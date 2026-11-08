@@ -198,7 +198,7 @@ data/
 每次 `POST /ask` 的顺序：
 
 1. **加载**：按 mtime 进程内缓存读取三个文件；版本不符或解析失败走 §7 自愈。
-2. **追问改写（复用现有调用）**：`expand_query(question, recent_turns)` 扩张为
+2. **追问改写（复用现有调用）**：`rewrite_and_expand(question, recent_turns)` 返回
    `{"standalone": "...", "en": [...], "zh": [...]}`。
    `standalone` 是把"那第三个公式呢"补全为独立问题后的版本，用于检索与生成；不新增 LLM 调用。
 3. **论文内检索**：用 `standalone + en + zh` 现有 BM25（`qa.py` 的 `tokenize` / `retrieve`），逻辑不变。
