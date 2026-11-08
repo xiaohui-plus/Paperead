@@ -8,7 +8,8 @@
 
 **Tech Stack:** Tauri 2 + Rust、React 19 + Vite、Python 3.12 + FastAPI + SQLite、Node 22 + DSH `0.1.0-rc.6`、Playwright + Vitest + pytest。
 
-**关联设计：** [2026-11-08-research-agent-design.md](../specs/2026-11-08-research-agent-design.md)（§6 搜索接入边界、§10 事件协议、§16 里程碑）
+**关联设计：** [2026-11-08-research-agent-design.md](../specs/2026-11-08-research-agent-design.md)（§6 搜索接入边界、§10 事件协议、§16 里程碑）  
+**DSH 接入完整方案：** [2026-11-08-dsh-integration-solution.md](../specs/2026-11-08-dsh-integration-solution.md)
 
 ---
 
@@ -16,7 +17,7 @@
 
 ### 本阶段做
 
-- DSH sidecar 跑通：`dsh-base` + `@paper-reflow/dsh-research`，一条 SSE、一个 echo 工具。
+- DSH sidecar 跑通：`dsh-base` + `@paperead/dsh-research`，一条 SSE、一个 echo 工具。
 - 项目 / 会话 / 产物 / 来源索引的 SQLite 与 API。
 - 研究首页、项目页骨架、composer、transcript、思维链组件。
 - `library_search`（本地库）、`paper_read`（本地全文）、`project_write`（产物）。
@@ -72,13 +73,17 @@ flowchart LR
 
 | 项 | 结果 |
 |---|---|
-| `node agent/src/bin.mjs` 启动 | ✅ |
+| `node agent/src/bin.mjs` 启动（minimal） | ✅ |
+| `PAPEREAD_AGENT_COMPOSE=full`（dsh-base + 研究 patch） | ✅（禁用 `hmr` 后） |
 | `GET /v1/health` | ✅ `{"ok":true,...}` |
 | `POST /v1/sessions` | ✅ |
 | SSE `/v1/sessions/:id/events` | ✅ `retry` + 事件流 |
 | 一轮：reasoning → tool draft/start/end → text → turn.end | ✅ 用假 LLM 验证 |
+| 完整组合额外产生 `title.update` | ✅ |
 | 重启后 `agents.resume`，turn 从 1 变 2 | ✅ |
 | `AgentSidecar` Tauri 编译 | ✅ `cargo check` 通过 |
+| Tauri 端到端（Python + Node + 窗口） | ✅ 用可写 `PAPEREAD_DATA` 验证，日志出现 `sidecar ready` / `agent ready` |
+| Python SSE 代理（A2 最小版） | ✅ `POST/GET /api/research/*` 代理到 Node |
 | `?research=spike` 页面构建 | ✅ `tsc && vite build` 通过 |
 | 安装包体积 / 干净 Windows 实测 | ⏳ 待做 |
 
@@ -87,11 +92,13 @@ flowchart LR
 - 没有用 `dsh --profile research`：DSH 的 profile 引导会在
   `$DSH_HOME/profiles/node_modules` 下建 junction；Node 24（Windows）把
   junction 报成普通目录，`dsh` 的 `ensureSymlink` 直接拒绝启动。
-- 改为直接 `boot()`：`agent/src/bin.mjs` 加载 `agent/minimal.yml`（A0 最小组合），
-  不经过 profile 的 junction 修复。完整组合（`dsh-base` + 研究 bundle）留到 A1/A2。
+- 改为直接 `boot()`：`agent/src/bin.mjs` 加载 `minimal.yml`（快速测试）或
+  `cordis.yml` + `dsh-base`/研究 patch（完整组合）。完整组合最初会卡住，
+  读 DSH 源码后发现官方 web bundle 也禁用 `hmr`；在
+  `bundle/cordis.patch.yml` 里 `hmr.disabled: true` 后完整组合正常启动。
 - `agent/` 用 pnpm + `pnpm-workspace.yaml` 的 `overrides` 锁定全部 DSH 包到
   `0.1.0-rc.6`；npm 的 peer 解析会因为 `dsh-invariants`/`dsh-brand` 等升到 rc.8 而失败。
-- Node 24 的 `node-pty`/`koffi` 构建脚本被 pnpm 忽略；A0 没用到它们，后续若启用 shell
+- Node 24 的 `node-pty`/`koffi` 构建脚本被 pnpm 忽略；当前组合没用到它们，后续若启用 shell
   工具再执行 `pnpm approve-builds`。
 
 **文件（实际）**
@@ -129,8 +136,9 @@ npm run tauri -- dev          # 验证 Tauri 拉起 agent
 **待办**
 
 - [ ] 在干净 Windows 上实测安装包体积、启动时间、首 token 延迟。
-- [ ] 把 `minimal.yml` 升级为 `dsh-base` + 研究 bundle 的完整组合（先解决/绕过 Node 24 junction 问题）。
-- [ ] 把 `agent.json` 直连换成 Python SSE 代理（A2）。
+- [ ] 处理 Windows 旧数据目录 ACL 异常：本机 `%LOCALAPPDATA%\paperead-data` 属于另一个 SID，当前用户只读；已加 `prepare` 失败回退，但还需要在真实安装包上验证。
+- [ ] 给完整组合补工具/权限/技能回归测试（`hmr` 之外是否还有会拖慢启动的 watcher）。
+- [ ] 把 `agent.json` 直连彻底删掉，前端只走 Python 代理（现在 SpikePage 已走代理，Tauri 仍写 `agent.json` 供代理读）。
 
 
 ---
@@ -161,7 +169,7 @@ npm run tauri -- dev          # 验证 Tauri 拉起 agent
 - [ ] `store.py`：`add_project_item` / `list_project_items` / `remove_project_item`。
 - [ ] `store.py`：`add_artifact` / `list_artifacts` / `get_artifact`；版本号按同 path 递增。
 - [ ] `files.py`：上传到 `projects/<id>/files/`；`realpath` 必须在项目根内；拒绝 `..` 和符号链接逃逸。
-- [ ] `main.py`：`PAPER_REFLOW_DATA/research/research.db` 初始化；测试用 `tmp_path`。
+- [ ] `main.py`：`PAPEREAD_DATA/research/research.db` 初始化；测试用 `tmp_path`。
 
 **验收**
 
@@ -533,4 +541,52 @@ pytest tests/test_research_store.py -q
 
 ## 8. 下一步
 
-先执行 A0。A0 通过后，A1/A2/A3 可以并行；`Scolar_search` 接入前不阻塞任何一项。
+## 8. 下一步顺序（A0 之后）
+
+A0 已经跑通，下一步不再按 A1→A2→A3 顺序硬走，而是先补两个“接入前提”：
+
+1. **P0 修 Tauri 端到端**：当前 `cargo run` 在 Python sidecar `/api/health` 超时处失败，
+   不是 agent 的问题。先让壳、Python、Node 三者同时起来，再继续。
+2. **P0.5 读 DSH 源码（1 天，限时）**：只读接入相关的 6 个 seam，不做 fork。
+3. **P1 完整组合回归**：`hmr` 已禁用，完整 `dsh-base` 能启动；接着验证 tools/skills/compaction/title。
+4. **P2 A2 Python SSE 代理**：去掉 `agent.json` 直连。
+5. **P3 A1 数据层 + A3 UI 壳**：这两块不依赖搜索，可并行。
+
+### 源码阅读清单（按优先级）
+
+源码参考：`F:\Agent\dsh-ref-rc7`（GitHub `dsh-v0.1.0-rc.7`；`0.1.0-rc.6` 没有 tag，rc.7 是最接近的公开源码）。
+
+| 优先级 | 路径 | 要回答的问题 |
+|---|---|---|
+| P0 | `packages/boot/app-boot/src/index.ts` | `boot()`/profile/patch 的官方语义；我们直接 boot 是否稳定 |
+| P0 | `packages/bundle/web-app/cordis.patch.yml` + `src/index.ts` | 官方 Web 宿主怎么组合；哪些 row 必须禁用（已发现 `hmr`） |
+| P0 | `packages/core/agent-loop/src/*`、`packages/core/agent/src/*` | `create/resume/setup/followup/cancel` 的准确时序；会话恢复 |
+| P1 | `packages/core/session/src/*`、`packages/core/session-persistence*` | `session/event`、`turn/end`、`session/title`、compaction 的边界 |
+| P1 | `packages/tool/tools/src/*` | `defineTool`、`presentCall/presentResult`、`presentationMeta` 的准确签名 |
+| P1 | `packages/host/webserver/src/*` | SSE 响应生命周期、断线、dispose |
+| P2 | `packages/examples/jsonrpc-demo`、`packages/sdk/*`、`packages/acp/*` | 官方嵌入协议能不能直接用 |
+
+### 读源码后的初步结论
+
+- **不要 fork DSH，也不要通读整个仓库**。按 seam 读，配合 `lib/*.js` + `.d.ts` 已够用。
+- **官方 SDK / ACP 不适合做交互式 UI 的主通道**：
+  - SDK 没有 per-prompt cancel，只有已提交消息，不传 reasoning/工具卡；
+  - ACP 只面向自动化，同样不传 reasoning/计划/工具展示。
+  - 我们的停止按钮、思维链、工具卡需要自己的 host 投影，现有 `research-host` 方向是对的。
+- **直接 `boot()` 是官方路径**：`dsh` CLI 的 `runProfile` 本身也是 `boot(NAME, rootConfig, patches)`；
+  区别只是我们跳过 profile 的 junction 修复。
+- **完整组合卡住的根因是 `hmr` watcher**；官方 web bundle 也禁用了它。禁用后完整组合启动正常。
+- **官方 Web 客户端（`dsh-client-*`）不适合直接复用**：它绑定 DSH 自己的 Cordis 客户端运行时和
+  Typert RPC；我们的产品 IA 也不同，复用成本高于自绘。
+
+### 1 天源码阅读的交付物
+
+- `agent/docs/dsh-integration-notes.md`：上面 6 个 seam 的“我们依赖的接口 + 不能碰的内部实现”。
+- 一张 `session/event → 产品 SSE` 的最终映射表（A4 直接用）。
+- 一份“升级 DSH 时要跑的契约测试清单”。
+
+### 明确不做的
+
+- 不复制 DSH 的客户端 UI 组件树。
+- 不修改 `node_modules` 里的 DSH 代码；所有适配放在 `agent/src` / `agent/bundle`。
+- 不把 SDK/ACP 当成主协议；只在未来做自动化/CI 时考虑。

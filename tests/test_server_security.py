@@ -4,10 +4,10 @@ from fastapi.testclient import TestClient
 
 
 def test_token_and_origin_guard(monkeypatch, tmp_path):
-    monkeypatch.setenv("PAPER_REFLOW_TOKEN", "test-token")
-    monkeypatch.setenv("PAPER_REFLOW_PORT", "8123")
-    monkeypatch.setenv("PAPER_REFLOW_DATA", str(tmp_path))
-    monkeypatch.setenv("PAPER_REFLOW_MOCK", "1")
+    monkeypatch.setenv("PAPEREAD_TOKEN", "test-token")
+    monkeypatch.setenv("PAPEREAD_PORT", "8123")
+    monkeypatch.setenv("PAPEREAD_DATA", str(tmp_path))
+    monkeypatch.setenv("PAPEREAD_MOCK", "1")
 
     import server.main as main
 
@@ -15,6 +15,13 @@ def test_token_and_origin_guard(monkeypatch, tmp_path):
 
     with TestClient(main.app) as client:
         assert client.get("/api/health").status_code == 403
+        assert (
+            client.get(
+                "/api/health", headers={"X-Paperead-Token": "test-token"}
+            ).status_code
+            == 200
+        )
+        # 旧版壳发的 header 仍然接受
         assert (
             client.get(
                 "/api/health", headers={"X-Paper-Reflow-Token": "test-token"}

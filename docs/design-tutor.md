@@ -1,4 +1,4 @@
-# paper-reflow · 从「读完」到「搞懂」
+# Paperead · 从「读完」到「搞懂」
 
 > 定位：不是论文阅读器，是**论文理解助手**。
 > 阅读是手段，搞懂才是目的。
@@ -11,7 +11,7 @@
 >
 > | 阶段 | 状态 | 说明 |
 > |---|---|---|
-> | P0 导读卡 | ✅ 已实现 | `paper_reflow/tutor/{concepts,references,prereq,guide}.py` + `GET/POST /guide` + 前端「导读」tab |
+> | P0 导读卡 | ✅ 已实现 | `paperead/tutor/{concepts,references,prereq,guide}.py` + `GET/POST /guide` + 前端「导读」tab |
 > | P1 追本溯源 | ✅ 已实现 | `citations.py` + `provenance.py` + `GET /block/{id}/provenance` + 段落「引」按钮 |
 > | P2 脉络图 | ✅ 已实现 | `lineage.py` + `GET/POST /lineage` + 前端「脉络」tab（竖向时间轴） |
 > | P3 三路问答 / 自测 | 🟡 问答已完成，自测未做 | `qa.py` + `web.py` + `POST /ask` + 前端问答 tab |
@@ -26,7 +26,7 @@
 
 ### 1.1 现状
 
-现在的 paper-reflow 解决的是「**把论文排好、翻成中文、能一段段读**」：
+现在的 Paperead 解决的是「**把论文排好、翻成中文、能一段段读**」：
 
 - 双栏重排、图表公式裁切、按页流式翻译
 - 左侧阅读助手（问答 / 目录 / 重点 / 图表）
@@ -310,8 +310,8 @@ GET /api/papers/{id}/lineage → { self, nodes: [], edges: [], yearRange: [min, 
 ### 6.1 模块划分
 
 ```
-paper-reflow/
-  paper_reflow/
+paperead/
+  paperead/
     layout.py  translate.py  formula.py  llm.py   （已有）
     tutor/                                        （新增）
       concepts.py    概念抽取（术语/方法/数据集/符号）
@@ -334,8 +334,8 @@ paper-reflow/
 | 多源检索 | `backend/search/engines/*` | PubMed / arXiv / OpenAlex / S2 / PMC |
 | 全文抓取 | `backend/search/fulltext.py` | PMC / arXiv 原文段落 |
 | 统一外呼 | `backend/search/http.py` | 限流、重试、代理 |
-| 术语表 | `paper_reflow.translate.build_glossary` | 概念抽取的种子 |
-| LLM | `paper_reflow.llm` | OpenAI 兼容，可注入 |
+| 术语表 | `paperead.translate.build_glossary` | 概念抽取的种子 |
+| LLM | `paperead.llm` | OpenAI 兼容，可注入 |
 
 **独立性**：新项目仍需能独立运行。`search.py` 做成适配器：
 
@@ -346,7 +346,7 @@ class SearchBackend(Protocol):
     async def abstract(self, doi_or_id: str) -> str | None: ...
 ```
 
-默认实现直连 OpenAlex（免费、限流宽松）；配置 `PAPER_REFLOW_SEARCH_BASE` 时走主项目。
+默认实现直连 OpenAlex（免费、限流宽松）；配置 `PAPEREAD_SEARCH_BASE` 时走主项目。
 
 ### 6.3 数据流
 

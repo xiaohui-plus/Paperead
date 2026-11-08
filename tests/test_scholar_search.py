@@ -8,11 +8,11 @@ import json
 import httpx
 import pytest
 
-from paper_reflow.scholar import http
-from paper_reflow.scholar import search as search_mod
-from paper_reflow.scholar.http import FriendlyError
-from paper_reflow.scholar.models import Paper
-from paper_reflow.scholar.search import SearchInput, parse_google_translation
+from paperead.scholar import http
+from paperead.scholar import search as search_mod
+from paperead.scholar.http import FriendlyError
+from paperead.scholar.models import Paper
+from paperead.scholar.search import SearchInput, parse_google_translation
 
 ARXIV_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom"

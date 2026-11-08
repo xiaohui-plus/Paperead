@@ -31,9 +31,8 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
   const [view, setView] = useState<'grid' | 'list'>('grid')
   const [dragOver, setDragOver] = useState(false)
   const [toast, setToast] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null)
-  const [settingsOpen, setSettingsOpen] = useState(
-    () => new URLSearchParams(window.location.search).get('settings') === '1',
-  )
+  // 设置只由用户点齿轮/侧栏打开；刷新页面不自动弹
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [uploading, setUploading] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 

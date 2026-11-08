@@ -94,16 +94,43 @@ def _build_prompt(title: str, abstract: str, headings: list[str],
 
 
 def _strip_json(text: str) -> dict:
-    t = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
+    """从模型回复里取 JSON；兼容代码块、前后解释、尾随逗号。"""
+    t = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip()).strip()
     try:
         return json.loads(t)
     except Exception:
-        m = re.search(r"\{.*\}", t, re.S)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except Exception:
-                pass
+        pass
+
+    # 不用贪婪的 r"\{.*\}"：回复里出现多个花括号时会把整段吞进去。
+    # 从每个 '{' 开始做括号配对，取第一个能解析的对象。
+    for start in [m.start() for m in re.finditer(r"\{", t)]:
+        depth = 0
+        in_str = False
+        escaped = False
+        for i in range(start, len(t)):
+            ch = t[i]
+            if in_str:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = t[start : i + 1]
+                    for attempt in (candidate, re.sub(r",\s*([}\]])", r"\1", candidate)):
+                        try:
+                            return json.loads(attempt)
+                        except Exception:
+                            continue
+                    break
     return {}
 
 
@@ -159,8 +186,9 @@ async def build_guide(blocks: list[Block], glossary: dict[str, str] | None = Non
     prompt = _build_prompt(title, abstract, headings, concepts, candidates)
 
     data: dict = {}
-    # 推理模型的 reasoning token 也计入 max_tokens，给小了会返回空
-    for budget in (3000, 6000):
+    # 推理模型的 reasoning token 也计入 max_tokens；导读 prompt 本身较长，
+    # V4.1 Flash / K3.1 Pro 这类思考模型给 3000 很容易只思考不出 JSON。
+    for budget in (6000, 12000):
         try:
             raw = await chat(
                 [{"role": "system", "content": SYS}, {"role": "user", "content": prompt}],
@@ -168,8 +196,16 @@ async def build_guide(blocks: list[Block], glossary: dict[str, str] | None = Non
                 max_tokens=budget,
             )
             data = _strip_json(raw)
+            if isinstance(data.get("guide"), dict):
+                data = data["guide"]
             if data.get("summary"):
                 break
+            log.warning(
+                "导读 JSON 解析失败（max_tokens=%d，回复 %d 字符）：%r",
+                budget,
+                len(raw),
+                raw[:160],
+            )
         except Exception as e:
             log.warning("导读生成失败（max_tokens=%d）：%s", budget, e)
 

@@ -4,8 +4,8 @@
 用法：
     python scripts/make_latest_json.py \
         --version 0.1.1 \
-        --installer release/paper-reflow_0.1.1_x64-setup.exe \
-        --url https://dl.example.com/paper-reflow_0.1.1_x64-setup.exe \
+        --installer release/Paperead_0.1.1_x64-setup.exe \
+        --url https://dl.example.com/Paperead_0.1.1_x64-setup.exe \
         --out release/latest.json
 """
 

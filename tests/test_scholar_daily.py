@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 
-from paper_reflow.scholar import daily
-from paper_reflow.scholar.daily import (
+from paperead.scholar import daily
+from paperead.scholar.daily import (
     build_category_or_query,
     build_openalex_subfield_filter,
     daily_batch,
@@ -14,7 +14,7 @@ from paper_reflow.scholar.daily import (
     mulberry32,
     rank_daily,
 )
-from paper_reflow.scholar.models import Paper
+from paperead.scholar.models import Paper
 
 NOW = datetime(2026, 11, 8, 12, 0, tzinfo=timezone.utc)
 

@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
 import type { Block, Paper, ViewMode } from '../types'
 import { loadPaper } from '../lib/api'
 import { outlineOf } from '../lib/blocks'
@@ -21,6 +29,27 @@ interface Props {
   onBack: () => void
 }
 
+const PANEL_WIDTH_KEY = 'paperead.panelWidth'
+const MIN_PANEL_WIDTH = 260
+const MAX_PANEL_WIDTH = 640
+const DEFAULT_PANEL_WIDTH = 344
+
+function readPanelWidth(): number {
+  try {
+    const width = Number(localStorage.getItem(PANEL_WIDTH_KEY))
+    if (
+      Number.isFinite(width) &&
+      width >= MIN_PANEL_WIDTH &&
+      width <= MAX_PANEL_WIDTH
+    ) {
+      return width
+    }
+  } catch {
+    // 隐私模式读不到 localStorage：用默认宽度
+  }
+  return DEFAULT_PANEL_WIDTH
+}
+
 export function ReaderView({ paperId, onBack }: Props) {
   const [paper, setPaper] = useState<Paper | null>(null)
   const [error, setError] = useState('')
@@ -40,16 +69,31 @@ export function ReaderView({ paperId, onBack }: Props) {
       new URLSearchParams(window.location.search).get('view') === 'pdf',
   )
   // 原版 PDF 的显示宽度与当前页码；页码跟着 PDF 滚动更新，顶栏显示 P{n}
-  const [pdfWidth, setPdfWidth] = useState(1000)
+  const initialExpanded =
+    new URLSearchParams(window.location.search).get('full') === '1'
+  const [pdfWidth, setPdfWidth] = useState(initialExpanded ? 1200 : 1000)
   const [pdfPage, setPdfPage] = useState(1)
-  const [settingsOpen, setSettingsOpen] = useState(
-    () => new URLSearchParams(window.location.search).get('settings') === '1',
-  )
+  // 默认只占右侧阅读区、保留左侧功能面板；展开后才占满整行
+  const [pdfExpanded, setPdfExpanded] = useState(initialExpanded)
+  // 面板里点目录/重点/图表时，PDF 视图要滚到对应页
+  const [pdfJump, setPdfJump] = useState<{ page: number; token: number } | null>(null)
+  const jumpSeq = useRef(0)
+  // 设置只由用户点齿轮/侧栏打开；刷新页面不自动弹
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [configured, setConfigured] = useState(() =>
     Boolean(readyModel(loadModelSettings(), 'answer')),
   )
   const [settingsKind, setSettingsKind] = useState<ModelKind>('answer')
   const [settingsVersion, setSettingsVersion] = useState(0)
+  const [panelWidth, setPanelWidth] = useState(readPanelWidth)
+  const [resizingPanel, setResizingPanel] = useState(false)
+  const panelWidthRef = useRef(panelWidth)
+  const dragRef = useRef<{
+    startX: number
+    startWidth: number
+    zoom: number
+  } | null>(null)
+  const workspaceRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const savedScroll = useRef(0)
   const paperRef = useRef<Paper | null>(null)
@@ -59,6 +103,112 @@ export function ReaderView({ paperId, onBack }: Props) {
   const inFlight = useRef(false)
   const inFlightPages = useRef<number[]>([])
   const queued = useRef<number[] | null>(null)
+
+  // ── 阅读助手宽度：拖动中间分隔线调整 ───────────────────
+  const maxPanelWidth = () => {
+    const total = workspaceRef.current?.clientWidth || window.innerWidth
+    return Math.max(
+      MIN_PANEL_WIDTH,
+      Math.min(MAX_PANEL_WIDTH, total - 360),
+    )
+  }
+
+  const clampPanelWidth = (width: number) =>
+    Math.min(maxPanelWidth(), Math.max(MIN_PANEL_WIDTH, width))
+
+  const persistPanelWidth = (width: number) => {
+    try {
+      localStorage.setItem(PANEL_WIDTH_KEY, String(Math.round(width)))
+    } catch {
+      // 隐私模式写不了 localStorage：本次会话仍可拖动
+    }
+  }
+
+  useEffect(() => {
+    panelWidthRef.current = panelWidth
+  }, [panelWidth])
+
+  useEffect(() => {
+    const onResize = () =>
+      setPanelWidth((width) => clampPanelWidth(width))
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    if (!resizingPanel) return
+    document.body.classList.add('col-resizing')
+
+    const onMove = (event: PointerEvent) => {
+      const drag = dragRef.current
+      if (!drag) return
+      const next = clampPanelWidth(
+        drag.startWidth + (event.clientX - drag.startX) / drag.zoom,
+      )
+      panelWidthRef.current = next
+      setPanelWidth(next)
+    }
+    const stop = () => {
+      setResizingPanel(false)
+      dragRef.current = null
+      document.body.classList.remove('col-resizing')
+      persistPanelWidth(panelWidthRef.current)
+    }
+
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', stop)
+    window.addEventListener('pointercancel', stop)
+    return () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', stop)
+      window.removeEventListener('pointercancel', stop)
+      document.body.classList.remove('col-resizing')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resizingPanel])
+
+  const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    const zoom =
+      Number.parseFloat(
+        getComputedStyle(document.documentElement).zoom || '1',
+      ) || 1
+    dragRef.current = {
+      startX: event.clientX,
+      startWidth: panelWidthRef.current,
+      zoom,
+    }
+    setResizingPanel(true)
+  }
+
+  const resizeBy = (delta: number) => {
+    const next = clampPanelWidth(panelWidthRef.current + delta)
+    panelWidthRef.current = next
+    setPanelWidth(next)
+    persistPanelWidth(next)
+  }
+
+  const onResizerKey = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault()
+      resizeBy(-20)
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault()
+      resizeBy(20)
+    } else if (event.key === 'Home') {
+      event.preventDefault()
+      resizeBy(DEFAULT_PANEL_WIDTH - panelWidthRef.current)
+    }
+  }
+
+  const resetPanelWidth = () => {
+    const next = clampPanelWidth(DEFAULT_PANEL_WIDTH)
+    panelWidthRef.current = next
+    setPanelWidth(next)
+    persistPanelWidth(next)
+  }
 
   // ── 加载（解析没完成时自动重试） ───────────────────────
   useEffect(() => {
@@ -252,6 +402,13 @@ export function ReaderView({ paperId, onBack }: Props) {
   }, [paper, pdfMode])
 
   const jump = (id: string) => {
+    const page = pageById.current.get(id)
+    if (pdfMode && page) {
+      // 原版视图没有重排节点，改成滚到这一页
+      jumpSeq.current += 1
+      setPdfJump({ page, token: jumpSeq.current })
+      return
+    }
     const node = scrollRef.current?.querySelector<HTMLElement>(`#${CSS.escape(id)}`)
     node?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
@@ -268,6 +425,16 @@ export function ReaderView({ paperId, onBack }: Props) {
     const url = new URL(window.location.href)
     if (next) url.searchParams.set('view', 'pdf')
     else url.searchParams.delete('view')
+    window.history.replaceState({}, '', url)
+  }
+
+  const togglePdfExpand = () => {
+    const next = !pdfExpanded
+    setPdfExpanded(next)
+    if (next) setPdfWidth((w) => Math.max(w, 1200))
+    const url = new URL(window.location.href)
+    if (next) url.searchParams.set('full', '1')
+    else url.searchParams.delete('full')
     window.history.replaceState({}, '', url)
   }
 
@@ -347,30 +514,51 @@ export function ReaderView({ paperId, onBack }: Props) {
         pdfMode={pdfMode}
         onTogglePdf={togglePdf}
         pdfHref={pdfHref}
+        pdfExpanded={pdfExpanded}
+        onTogglePdfExpand={togglePdfExpand}
       />
 
-      <div className={`workspace ${pdfMode ? 'is-pdf' : ''}`}>
-        {!pdfMode && (
-          <LeftPanel
-            paperId={paperId}
-            paper={paper}
-            outline={outline}
-            points={points}
-            activeId={activeId}
-            onJump={jump}
-            onOpenSettings={(kind) => {
-              setSettingsKind(kind ?? 'answer')
-              setSettingsOpen(true)
-            }}
-            settingsVersion={settingsVersion}
-          />
+      <div
+        ref={workspaceRef}
+        className={`workspace ${pdfMode && pdfExpanded ? 'is-pdf-expanded' : ''}`}
+        style={{ '--panel-w': `${panelWidth}px` } as CSSProperties}
+      >
+        {!(pdfMode && pdfExpanded) && (
+          <>
+            <LeftPanel
+              paperId={paperId}
+              paper={paper}
+              outline={outline}
+              points={points}
+              activeId={activeId}
+              onJump={jump}
+              onOpenSettings={(kind) => {
+                setSettingsKind(kind ?? 'answer')
+                setSettingsOpen(true)
+              }}
+              settingsVersion={settingsVersion}
+            />
+            <div
+              className="panel-resizer"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="拖动调整阅读助手宽度"
+              tabIndex={0}
+              title="拖动调整宽度，双击恢复默认"
+              onPointerDown={startResize}
+              onKeyDown={onResizerKey}
+              onDoubleClick={resetPanelWidth}
+            />
+          </>
         )}
         {pdfMode ? (
           <PdfPages
             paperId={paperId}
             pageCount={paper.page_count}
+            pageSizes={paper.page_sizes}
             initialPage={visiblePage}
             width={pdfWidth}
+            jump={pdfJump}
             onPageChange={setPdfPage}
           />
         ) : (

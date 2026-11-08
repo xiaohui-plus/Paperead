@@ -74,18 +74,18 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: "paper-reflow ${{ github.ref_name }}"
+          releaseName: "Paperead ${{ github.ref_name }}"
           releaseBody: |
             Windows 10/11 x64 安装包。
 
-            - 安装包：`paper-reflow_*_x64-setup.exe`
-            - 便携版：`paper-reflow_*_portable_x64.zip`
-            - 源码：`paper-reflow_*_source.zip`
+            - 安装包：`Paperead_*_x64-setup.exe`
+            - 便携版：`Paperead_*_portable_x64.zip`
+            - 源码：`Paperead_*_source.zip`
             - 自动更新清单：`latest.json`（随 Release 发布）
             - 源码：对应 tag 的 GitHub 源码包
 
             首次启动会引导填写模型 API Key；PDF 与阅读数据默认保存在
-            `%LOCALAPPDATA%\\paper-reflow`。
+            `%LOCALAPPDATA%\\Paperead`。
           releaseDraft: true
           prerelease: false
           includeUpdaterJson: true
@@ -96,7 +96,7 @@ jobs:
         shell: pwsh
         run: |
           .\scripts\build-portable.ps1
-          git archive --format=zip --prefix=paper-reflow-${{ github.ref_name }}/ --output=release/paper-reflow_${{ github.ref_name }}_source.zip HEAD
+          git archive --format=zip --prefix=Paperead-${{ github.ref_name }}/ --output=release/Paperead_${{ github.ref_name }}_source.zip HEAD
 
       - name: Upload portable and source to release
         uses: softprops/action-gh-release@v2
@@ -104,5 +104,5 @@ jobs:
           tag_name: ${{ github.ref_name }}
           draft: true
           files: |
-            release/paper-reflow_*_portable_x64.zip
-            release/paper-reflow_*_source.zip
+            release/Paperead_*_portable_x64.zip
+            release/Paperead_*_source.zip

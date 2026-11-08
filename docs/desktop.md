@@ -8,13 +8,13 @@ Python 或 Node。
 
 安装包发布在 GitHub Releases：
 
-- 安装版：`paper-reflow_<version>_x64-setup.exe`
-- 安装包 ZIP（.exe 被拦截时用）：`paper-reflow_<version>_x64-setup.zip`
-- 便携版：`paper-reflow_<version>_portable_x64.zip`
+- 安装版：`Paperead_<version>_x64-setup.exe`
+- 安装包 ZIP（.exe 被拦截时用）：`Paperead_<version>_x64-setup.zip`
+- 便携版：`Paperead_<version>_portable_x64.zip`
 - 系统：Windows 10/11 x64
 - 国内镜像：`https://ghproxy.net/https://github.com/xiaohui-plus/Paperead/releases/latest`
-- 安装方式：per-user（安装目录 `%LOCALAPPDATA%\paper-reflow`），不弹 UAC
-- 安装版数据目录：`%LOCALAPPDATA%\paper-reflow-data`（与安装目录分开，卸载/升级不影响文献库）
+- 安装方式：per-user（安装目录 `%LOCALAPPDATA%\Paperead`），不弹 UAC
+- 安装版数据目录：`%LOCALAPPDATA%\paperead-data`（与安装目录分开，卸载/升级不影响文献库）
 - 便携版：解压后双击 `启动.cmd`，数据在同级 `data\`；更新时下载新 ZIP，保留 `data\`
 - 卸载：默认保留数据；可在应用内打开数据目录手动删除
 
@@ -39,16 +39,16 @@ npm run verify:release
 产物：
 
 ```
-src-tauri\target\release\bundle\nsis\paper-reflow_0.1.0_x64-setup.exe
-release\paper-reflow_0.1.0_portable_x64.zip
-release\paper-reflow_0.1.0_source.zip        # AGPL 对应源码
+src-tauri\target\release\bundle\nsis\Paperead_0.1.0_x64-setup.exe
+release\Paperead_0.1.0_portable_x64.zip
+release\Paperead_0.1.0_source.zip        # AGPL 对应源码
 ```
 
 构建脚本会：
 
 1. 构建 `web/dist`；
-2. 用 PyInstaller 产出 `dist-sidecar\paper-reflow-server`（onedir，约 80MB）；
-3. 复制到 `src-tauri\resources\paper-reflow-server`；
+2. 用 PyInstaller 产出 `dist-sidecar\paperead-server`（onedir，约 80MB）；
+3. 复制到 `src-tauri\resources\paperead-server`；
 4. 编译 Tauri release 并生成 NSIS 安装包。
 
 只改前端时也要重新打包 sidecar，因为 sidecar 托管的是打包时的 `web/dist`。
@@ -63,12 +63,12 @@ npm run tauri -- dev
 
 ## 自动更新
 
-应用内自动更新面向**安装版**。便携版请下载新版便携 ZIP，覆盖 `paper-reflow-desktop.exe`
+应用内自动更新面向**安装版**。便携版请下载新版便携 ZIP，覆盖 `paperead-desktop.exe`
 和 `resources\`，保留 `data\`。
 
 安装版启动 8 秒后静默检查一次，之后每 6 小时检查一次；也可以手动点
 “帮助 → 检查更新”。检查到新版本才弹窗询问，不会自动下载。测试时可用
-`PAPER_REFLOW_UPDATE_INTERVAL_SECS` 覆盖间隔（最小 30 秒）。
+`PAPEREAD_UPDATE_INTERVAL_SECS` 覆盖间隔（最小 30 秒）。
 
 当前 `src-tauri/tauri.conf.json` 的更新地址指向本仓库，并带一个国内镜像回退：
 
@@ -85,7 +85,7 @@ npm run tauri -- dev
 本地联调或自建更新源时，可以用环境变量覆盖配置里的地址（不用重新打包）：
 
 ```powershell
-$env:PAPER_REFLOW_UPDATE_ENDPOINT = "http://127.0.0.1:8000/latest.json"
+$env:PAPEREAD_UPDATE_ENDPOINT = "http://127.0.0.1:8000/latest.json"
 ```
 
 生成更新清单（GitHub Actions 里的 tauri-action 也会自动生成）：
@@ -93,8 +93,8 @@ $env:PAPER_REFLOW_UPDATE_ENDPOINT = "http://127.0.0.1:8000/latest.json"
 ```powershell
 python scripts/make_latest_json.py `
   --version 0.1.1 `
-  --installer release\paper-reflow_0.1.1_x64-setup.exe `
-  --url https://dl.example.com/paper-reflow_0.1.1_x64-setup.exe `
+  --installer release\Paperead_0.1.1_x64-setup.exe `
+  --url https://dl.example.com/Paperead_0.1.1_x64-setup.exe `
   --out release\latest.json
 ```
 

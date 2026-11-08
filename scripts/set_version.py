@@ -5,7 +5,7 @@
     python scripts/set_version.py 0.1.1
     python scripts/set_version.py v0.1.1   # tag 形式也接受
 
-会更新：pyproject.toml、paper_reflow/__init__.py、web/package.json、
+会更新：pyproject.toml、paperead/__init__.py、web/package.json、
 根 package.json、src-tauri/tauri.conf.json、src-tauri/Cargo.toml。
 """
 
@@ -41,7 +41,7 @@ def main() -> None:
 
     replace_once(ROOT / "pyproject.toml", r'^version = ".*"$', f'version = "{version}"')
     replace_once(
-        ROOT / "paper_reflow" / "__init__.py",
+        ROOT / "paperead" / "__init__.py",
         r'^__version__ = ".*"$',
         f'__version__ = "{version}"',
     )

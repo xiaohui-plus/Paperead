@@ -1,16 +1,18 @@
-# paper-reflow research agent
+# Paperead research agent
 
-DSH（DeepSeek Harness）运行时，作为 paper-reflow 的 Node sidecar 使用。
+DSH（DeepSeek Harness）运行时，作为 Paperead 的 Node sidecar 使用。
 
 ## A0 状态
 
 已完成并验证：
 
-- `node agent/src/bin.mjs` 启动最小 DSH 组合（`agent/minimal.yml`）。
+- `node agent/src/bin.mjs` 启动最小组合（`agent/minimal.yml`）和完整组合
+  （`PAPEREAD_AGENT_COMPOSE=full`，`dsh-base` + `@paperead/dsh-research`）。
 - `GET /v1/health`、`POST /v1/sessions`、`GET /v1/sessions/:id/events`（SSE）、`POST /v1/sessions/:id/messages`、`POST /v1/sessions/:id/cancel`。
-- 一次真实 turn：`reasoning.delta` → `tool.draft` → `tool.start` → `tool.end` → `text.delta` → `turn.end`。
+- 一次真实 turn：`reasoning.delta` → `tool.draft` → `tool.start` → `tool.end` → `text.delta` → `turn.end`；完整组合还产生 `title.update`。
 - 进程重启后同一 session 恢复（`agents.resume`），turn 继续递增。
 - Tauri `agent_sidecar.rs` 编译通过；web 的 `?research=spike` 页面构建通过。
+- 完整组合的关键是禁用 `hmr`（官方 `dsh-web-app` 也这么做）；不禁用会拖住启动。
 
 ## 为什么不用 `dsh --profile`
 
@@ -21,19 +23,24 @@ Node 24（Windows）把 junction 报成普通目录，`dsh` 的 `ensureSymlink` 
 dsh: ...\profiles\node_modules\@deepseek-ai\dsh exists and is not a symlink
 ```
 
-A0 改为直接 `boot()`：`agent/src/bin.mjs` 加载 `minimal.yml`，不经过 profile 的
-junction 修复。完整组合（`dsh-base` + 研究 bundle）暂时留到 A1/A2，等这条路径稳定后再接。
+A0 改为直接 `boot()`：`agent/src/bin.mjs` 加载 `minimal.yml` 或完整组合的 patch，
+不经过 profile 的 junction 修复。
 
 ## 开发
 
 ```powershell
 cd agent
 pnpm install --store-dir .pnpm-store --config.node-linker=hoisted
-$env:PAPER_REFLOW_LLM_KEY = "sk-..."     # 不填也能启动，turn 会报 MISSING_CREDENTIAL
+$env:PAPEREAD_LLM_KEY = "sk-..."     # 不填也能启动，turn 会报 MISSING_CREDENTIAL
 .\dev.ps1
 ```
 
-默认端口 `8011`，token `dev-token`。
+默认端口 `8011`，token `dev-token`。完整组合：
+
+```powershell
+$env:PAPEREAD_AGENT_COMPOSE = "full"
+.\dev.ps1
+```
 
 ## 冒烟测试（不消耗真实额度）
 
@@ -43,8 +50,8 @@ node agent/test/mock-llm.mjs
 
 # 终端 2：agent 指向假 LLM
 $env:DSH_HOME = "...\agent"
-$env:PAPER_REFLOW_LLM_KEY = "test-key"
-$env:PAPER_REFLOW_LLM_BASE = "http://127.0.0.1:8012/v1"
+$env:PAPEREAD_LLM_KEY = "test-key"
+$env:PAPEREAD_LLM_BASE = "http://127.0.0.1:8012/v1"
 node agent/src/bin.mjs
 
 # 终端 3：一次完整 turn
@@ -59,7 +66,7 @@ node agent/test/spike-client.mjs
 agent/
   src/bin.mjs           # 直接 boot 入口
   minimal.yml           # A0 最小组合
-  bundle/               # @paper-reflow/dsh-research（host + tools）
+  bundle/               # @paperead/dsh-research（host + tools）
   profiles/research/    # 完整组合的 profile 模板（暂未使用）
   test/mock-llm.mjs     # 假 DeepSeek SSE
   test/spike-client.mjs # 冒烟客户端
@@ -67,6 +74,7 @@ agent/
 
 ## 已知限制
 
-- 还没有 compaction / skills / 会话标题 / 权限裁剪的完整组合；这些在 A1/A2 接入。
+- 完整组合已能启动，但 skills/todo/compaction/title 还没有逐项回归。
 - `agent.json` 握手文件由 Tauri 写入数据目录，Python 的 `/api/research/agent` 读取；A2 会换成正式代理。
 - 安装包体积与启动时间尚未在干净 Windows 上实测。
+- Tauri 端到端仍卡在现有 Python sidecar 的 `/api/health` 超时（不是 agent 本身）。

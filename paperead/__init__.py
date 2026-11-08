@@ -1,6 +1,6 @@
-"""paper-reflow：学术论文 PDF 版面重排 + 英中逐段翻译。
+"""Paperead：学术论文 PDF 版面重排 + 英中逐段翻译。
 
-    from paper_reflow import parse_pdf, build_glossary, translate_paper
+    from paperead import parse_pdf, build_glossary, translate_paper
 
     paper = parse_pdf("paper.pdf", figure_dir="assets")
     glossary = await build_glossary(paper.blocks)

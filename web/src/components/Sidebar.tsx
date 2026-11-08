@@ -22,10 +22,8 @@ export function Sidebar({ active, count, onNav, onSettings }: Props) {
   return (
     <aside className="library-side">
       <div className="library-brand">
-        <span className="brand-mark">R</span>
-        <span className="brand-name">
-          paper<i>·</i>reflow
-        </span>
+        <span className="brand-mark">P</span>
+        <span className="brand-name">Paperead</span>
       </div>
 
       <nav className="library-nav">

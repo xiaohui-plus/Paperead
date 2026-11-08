@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
-$exe = Join-Path $root "dist-sidecar\paper-reflow-server\paper-reflow-server.exe"
+$exe = Join-Path $root "dist-sidecar\paperead-server\paperead-server.exe"
 if (-not (Test-Path $exe)) { throw "先运行 scripts\build-sidecar.ps1" }
 
 $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
@@ -8,20 +8,20 @@ $listener.Start()
 $port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
 $listener.Stop()
 
-$data = Join-Path $env:TEMP ("paper-reflow-smoke-" + [guid]::NewGuid().ToString("N"))
+$data = Join-Path $env:TEMP ("paperead-smoke-" + [guid]::NewGuid().ToString("N"))
 $token = "smoke-token"
 New-Item -ItemType Directory -Force -Path $data | Out-Null
 
 $py = Join-Path $root ".venv-build\Scripts\python.exe"
 if (-not (Test-Path $py)) { throw "缺少 .venv-build，无法生成测试 PDF" }
 $sample = Join-Path $data "sample.pdf"
-& $py -c "import sys, pymupdf; d=pymupdf.open(); p=d.new_page(); p.insert_text((72,72),'A Test Paper',fontsize=20); p.insert_text((72,110),'This is a test paragraph for paper-reflow.',fontsize=11); [p.insert_text((72,150+i*12), f'Line {i}: the quick brown fox jumps over the lazy dog.', fontsize=9) for i in range(100)]; d.save(sys.argv[1])" $sample
+& $py -c "import sys, pymupdf; d=pymupdf.open(); p=d.new_page(); p.insert_text((72,72),'A Test Paper',fontsize=20); p.insert_text((72,110),'This is a test paragraph for paperead.',fontsize=11); [p.insert_text((72,150+i*12), f'Line {i}: the quick brown fox jumps over the lazy dog.', fontsize=9) for i in range(100)]; d.save(sys.argv[1])" $sample
 if ($LASTEXITCODE -ne 0) { throw "生成测试 PDF 失败" }
 
-$env:PAPER_REFLOW_PORT = "$port"
-$env:PAPER_REFLOW_DATA = $data
-$env:PAPER_REFLOW_TOKEN = $token
-$env:PAPER_REFLOW_MOCK = "1"
+$env:PAPEREAD_PORT = "$port"
+$env:PAPEREAD_DATA = $data
+$env:PAPEREAD_TOKEN = $token
+$env:PAPEREAD_MOCK = "1"
 
 $proc = $null
 $serverPid = $null
@@ -37,7 +37,7 @@ try {
         Start-Sleep -Milliseconds 500
         try {
             $raw = & curl.exe -s --max-time 2 `
-                -H "X-Paper-Reflow-Token: $token" "http://127.0.0.1:$port/api/health"
+                -H "X-Paperead-Token: $token" "http://127.0.0.1:$port/api/health"
             if ($raw) {
                 $health = $raw | ConvertFrom-Json
                 if ($health.ok) { $ok = $true; break }
@@ -54,7 +54,7 @@ try {
         Select-Object -First 1
     if ($conn) { $serverPid = $conn.OwningProcess }
     if (-not $serverPid) {
-        $serverPid = (Get-Process paper-reflow-server -ErrorAction SilentlyContinue |
+        $serverPid = (Get-Process paperead-server -ErrorAction SilentlyContinue |
             Sort-Object StartTime -Descending | Select-Object -First 1).Id
     }
 
@@ -71,7 +71,7 @@ try {
     $pageCode = & curl.exe -s -o $pageFile -w "%{http_code}" -c $cookieJar --max-time 5 `
         "http://127.0.0.1:$port/"
     if ([int]$pageCode -ne 200) { throw "首页不是 200，实际 $pageCode" }
-    if ((Get-Content $pageFile -Raw) -notmatch "paper-reflow") { throw "首页内容不对" }
+    if ((Get-Content $pageFile -Raw) -notmatch "Paperead") { throw "首页内容不对" }
 
     $papersCode = & curl.exe -s -o NUL -w "%{http_code}" -b $cookieJar --max-time 5 `
         "http://127.0.0.1:$port/api/papers"

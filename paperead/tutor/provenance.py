@@ -78,7 +78,7 @@ async def _openalex_by_title(title: str) -> tuple[str, str] | None:
         async with httpx.AsyncClient(timeout=12) as c:
             r = await c.get(
                 f"{OPENALEX}/works",
-                params={"search": title, "per_page": "3", "mailto": "paper-reflow@example.com"},
+                params={"search": title, "per_page": "3", "mailto": "paperead@example.com"},
             )
             r.raise_for_status()
             results = r.json().get("results") or []

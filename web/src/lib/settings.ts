@@ -199,6 +199,73 @@ export const PRESETS: ProviderPreset[] = [
       { id: 'qwen-plus', label: 'Qwen-Plus', note: '便宜通用，适合大量翻译' },
     ],
   },
+  {
+    id: 'siliconflow',
+    kind: 'answer',
+    label: '硅基流动',
+    provider: 'SiliconFlow 平台',
+    baseUrl: 'https://api.siliconflow.cn/v1',
+    note: '一个 Key 切换 2026 新模型：DeepSeek V4.1 / GLM-5.3 / Qwen3.8 / Kimi K2.7',
+    keyUrl: 'https://cloud.siliconflow.cn/account/ak',
+    recommended: true,
+    defaultModel: 'deepseek-ai/DeepSeek-V4.1-Flash',
+    models: [
+      {
+        id: 'deepseek-ai/DeepSeek-V4.1-Flash',
+        label: 'DeepSeek V4.1 Flash',
+        note: '2026-09 最新；原生多模态，性价比最高',
+        recommended: true,
+      },
+      {
+        id: 'zai-org/GLM-5.3-Flash',
+        label: 'GLM-5.3-Flash',
+        note: '2026-08 最新 GLM；原生多模态，1M 上下文',
+        recommended: true,
+      },
+      {
+        id: 'Qwen/Qwen3.8-27B',
+        label: 'Qwen3.8-27B',
+        note: '2026-08 最新 Qwen；原生视觉，256K 上下文',
+        recommended: true,
+      },
+      {
+        id: 'moonshotai/Kimi-K2.7-Code',
+        label: 'Kimi K2.7 Code',
+        note: '2026-06；多模态，代码/Agent 强',
+        recommended: true,
+      },
+      {
+        id: 'zai-org/GLM-5.3',
+        label: 'GLM-5.3',
+        note: '2026-08 旗舰；纯文本，复杂推理强',
+      },
+      {
+        id: 'tencent/Hy4-preview',
+        label: '腾讯 Hy4 Preview',
+        note: '2026-08 混元新一代；1M 上下文（Preview）',
+      },
+      {
+        id: 'deepseek-ai/DeepSeek-V4-Pro',
+        label: 'DeepSeek V4 Pro',
+        note: '2026-04 旗舰；更强推理，价格更高',
+      },
+      {
+        id: 'Qwen/Qwen3.6-27B',
+        label: 'Qwen3.6-27B',
+        note: '上一代稳定通用',
+      },
+      {
+        id: 'Qwen/Qwen3.6-35B-A3B',
+        label: 'Qwen3.6-35B-A3B',
+        note: 'MoE 版本，便宜、吞吐高',
+      },
+      {
+        id: 'XingChenAGI/Xing4.0-29B',
+        label: '星尘 Xing4.0-29B',
+        note: '2026-09 国产开源，便宜',
+      },
+    ],
+  },
 
   // ── 识图模型：同样按服务商分组 ─────────────────────────
   {
@@ -312,6 +379,53 @@ export const PRESETS: ProviderPreset[] = [
       },
     ],
   },
+  {
+    id: 'siliconflow-vision',
+    kind: 'vision',
+    label: '硅基流动',
+    provider: 'SiliconFlow 平台',
+    baseUrl: 'https://api.siliconflow.cn/v1',
+    note: '一个 Key 切换 2026 多模态新模型；列表外模型用自定义',
+    keyUrl: 'https://cloud.siliconflow.cn/account/ak',
+    recommended: true,
+    defaultModel: 'deepseek-ai/DeepSeek-V4.1-Flash',
+    models: [
+      {
+        id: 'deepseek-ai/DeepSeek-V4.1-Flash',
+        label: 'DeepSeek V4.1 Flash',
+        note: '2026-09 最新；原生视觉，通用识图/公式',
+        recommended: true,
+      },
+      {
+        id: 'zai-org/GLM-5.3-Flash',
+        label: 'GLM-5.3-Flash',
+        note: '2026-08 最新 GLM；原生多模态',
+        recommended: true,
+      },
+      {
+        id: 'Qwen/Qwen3.8-27B',
+        label: 'Qwen3.8-27B',
+        note: '2026-08 最新 Qwen；原生视觉，256K',
+        recommended: true,
+      },
+      {
+        id: 'moonshotai/Kimi-K2.7-Code',
+        label: 'Kimi K2.7 Code',
+        note: '2026-06；支持图片/视频输入',
+        recommended: true,
+      },
+      {
+        id: 'Qwen/Qwen3-VL-32B-Instruct',
+        label: 'Qwen3-VL-32B-Instruct',
+        note: '32B 专用视觉，复杂公式、表格更稳',
+      },
+      {
+        id: 'Qwen/Qwen3-VL-8B-Instruct',
+        label: 'Qwen3-VL-8B-Instruct',
+        note: '更便宜、更快，适合批量公式',
+      },
+    ],
+  },
 ]
 
 /** 自定义模型时可一键填入的常见 OpenAI 兼容地址。 */
@@ -325,8 +439,8 @@ export const BASE_URL_OPTIONS: { label: string; url: string }[] = [
   { label: 'OpenAI', url: 'https://api.openai.com/v1' },
 ]
 
-const STORAGE_KEY = 'paper-reflow.models'
-const LEGACY_KEY = 'paper-reflow.llm'
+const STORAGE_KEY = 'paperead.models'
+const LEGACY_KEYS = ['paperead.llm', 'paper-reflow.llm']
 
 export function presetsFor(kind: ModelKind): ProviderPreset[] {
   return PRESETS.filter((p) => p.kind === kind)
@@ -408,7 +522,9 @@ function normalizeSettings(raw: unknown): ModelSettings {
 function migrateLegacy(): ModelSettings | null {
   let raw: unknown
   try {
-    const text = localStorage.getItem(LEGACY_KEY)
+    const text = LEGACY_KEYS.map((key) => localStorage.getItem(key)).find(
+      Boolean,
+    )
     if (!text) return null
     raw = JSON.parse(text)
   } catch {

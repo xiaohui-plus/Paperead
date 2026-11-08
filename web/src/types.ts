@@ -38,6 +38,8 @@ export interface Paper {
   authors: string
   affiliation: string
   page_count: number
+  /** 每页 [宽, 高]（PDF 点），原版 PDF 视图用它给页图占位，跳转才不会错位 */
+  page_sizes?: [number, number][]
   columns: number
   glossary: Record<string, string>
   blocks: Block[]

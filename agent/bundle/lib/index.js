@@ -1,5 +1,5 @@
 /**
- * paper-reflow research host.
+ * Paperead research host.
  *
  * A deliberately small first slice: one HTTP/SSE surface over DSH sessions and
  * one echo tool. Later phases add the project brief, real tools and the Python

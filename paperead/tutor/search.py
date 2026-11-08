@@ -1,7 +1,7 @@
 """检索适配层：默认直连 OpenAlex（免费、限流宽松）。
 
 主项目里有更完整的检索栈（PubMed / arXiv / S2 / PMC），这里做成适配器，
-配置 `PAPER_REFLOW_SEARCH_BASE` 后可以改走主项目。
+配置 `PAPEREAD_SEARCH_BASE` 后可以改走主项目。
 """
 
 from __future__ import annotations
@@ -13,10 +13,12 @@ from dataclasses import dataclass
 
 import httpx
 
+from ..env import env
+
 log = logging.getLogger(__name__)
 
-OPENALEX = os.getenv("PAPER_REFLOW_OPENALEX", "https://api.openalex.org")
-MAILTO = os.getenv("PAPER_REFLOW_MAILTO", "paper-reflow@example.com")
+OPENALEX = env("PAPEREAD_OPENALEX", "https://api.openalex.org")
+MAILTO = env("PAPEREAD_MAILTO", "paperead@example.com")
 
 _cache: dict[str, tuple[float, list["Ref"]]] = {}
 _TTL = 6 * 3600

@@ -3,7 +3,7 @@
 默认走 OpenAI 兼容接口（DeepSeek / SiliconFlow / vLLM / Ollama / OpenAI 均可），
 配置全部来自环境变量；宿主应用也可以注入自己的实现：
 
-    from paper_reflow import set_backend
+    from paperead import set_backend
 
     class MyBackend:
         async def chat(self, messages, *, model=None, temperature=0.25, max_tokens=None) -> str:
@@ -20,6 +20,8 @@ import logging
 import os
 from dataclasses import dataclass
 from typing import AsyncIterator, Protocol, Sequence, runtime_checkable
+
+from .env import env
 
 logger = logging.getLogger(__name__)
 
@@ -72,21 +74,21 @@ class LLMConfig:
     def from_env(cls) -> "LLMConfig":
         return cls(
             api_key=(
-                os.getenv("PAPER_REFLOW_API_KEY")
+                env("PAPEREAD_API_KEY")
                 or os.getenv("OPENAI_API_KEY")
                 or ""
             ),
             base_url=(
-                os.getenv("PAPER_REFLOW_BASE_URL")
+                env("PAPEREAD_BASE_URL")
                 or os.getenv("OPENAI_BASE_URL")
                 or DEFAULT_BASE_URL
             ),
             model=(
-                os.getenv("PAPER_REFLOW_MODEL")
+                env("PAPEREAD_MODEL")
                 or os.getenv("OPENAI_MODEL")
                 or DEFAULT_MODEL
             ),
-            timeout=float(os.getenv("PAPER_REFLOW_TIMEOUT", "300")),
+            timeout=float(env("PAPEREAD_TIMEOUT", "300")),
         )
 
 
@@ -101,6 +103,7 @@ class LLMBackend(Protocol):
         model: str | None = None,
         temperature: float = 0.25,
         max_tokens: int | None = None,
+        extra_body: dict | None = None,
     ) -> str:
         ...
 
@@ -112,8 +115,8 @@ class OpenAICompatBackend:
         self.config = config or LLMConfig.from_env()
         if not self.config.api_key:
             raise RuntimeError(
-                "未配置 LLM API Key：请设置环境变量 PAPER_REFLOW_API_KEY（或 OPENAI_API_KEY），"
-                "或调用 paper_reflow.set_backend() 注入自定义实现。"
+                "未配置 LLM API Key：请设置环境变量 PAPEREAD_API_KEY（或 OPENAI_API_KEY），"
+                "或调用 paperead.set_backend() 注入自定义实现。"
             )
         from openai import AsyncOpenAI
 
@@ -130,6 +133,7 @@ class OpenAICompatBackend:
         model: str | None = None,
         temperature: float = 0.25,
         max_tokens: int | None = None,
+        extra_body: dict | None = None,
     ) -> str:
         actual_model = model or self.config.model
         kwargs: dict[str, object] = {
@@ -139,6 +143,8 @@ class OpenAICompatBackend:
         }
         if not _fixed_temperature_model(actual_model):
             kwargs["temperature"] = temperature
+        if extra_body:
+            kwargs["extra_body"] = extra_body
         resp = await self._client.chat.completions.create(**kwargs)
         content = (resp.choices[0].message.content or "").strip()
         if not content:
@@ -153,6 +159,7 @@ class OpenAICompatBackend:
         model: str | None = None,
         temperature: float = 0.25,
         max_tokens: int | None = None,
+        extra_body: dict | None = None,
     ) -> AsyncIterator[str]:
         """流式版本：按 delta 产出文本，调用方负责拼接。"""
         actual_model = model or self.config.model
@@ -164,6 +171,8 @@ class OpenAICompatBackend:
         }
         if not _fixed_temperature_model(actual_model):
             kwargs["temperature"] = temperature
+        if extra_body:
+            kwargs["extra_body"] = extra_body
         stream = await self._client.chat.completions.create(**kwargs)
         try:
             async for chunk in stream:
@@ -193,17 +202,28 @@ def get_backend() -> LLMBackend:
     return _backend
 
 
+def active_model() -> str | None:
+    """当前全局后端实际使用的模型名（翻译等任务据此决定是否关思考）。"""
+    return getattr(getattr(get_backend(), "config", None), "model", None)
+
+
 async def chat(
     messages: Sequence[dict],
     *,
     model: str | None = None,
     temperature: float = 0.25,
     max_tokens: int | None = None,
+    extra_body: dict | None = None,
 ) -> str:
     """调用当前后端，返回纯文本内容。"""
-    return await get_backend().chat(
-        messages, model=model, temperature=temperature, max_tokens=max_tokens
-    )
+    kwargs: dict = {
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if extra_body is not None:
+        kwargs["extra_body"] = extra_body
+    return await get_backend().chat(messages, **kwargs)
 
 
 async def chat_stream(
@@ -212,6 +232,7 @@ async def chat_stream(
     model: str | None = None,
     temperature: float = 0.25,
     max_tokens: int | None = None,
+    extra_body: dict | None = None,
 ) -> AsyncIterator[str]:
     """流式调用当前后端，逐段产出文本。
 
@@ -219,17 +240,20 @@ async def chat_stream(
     这里退化成一次性返回整段文本，调用方逻辑不需要区分。
     """
     backend = get_backend()
+    kwargs: dict = {
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if extra_body is not None:
+        kwargs["extra_body"] = extra_body
     streamer = getattr(backend, "chat_stream", None)
     if streamer is not None:
-        async for piece in streamer(
-            messages, model=model, temperature=temperature, max_tokens=max_tokens
-        ):
+        async for piece in streamer(messages, **kwargs):
             if piece:
                 yield piece
         return
 
-    text = await backend.chat(
-        messages, model=model, temperature=temperature, max_tokens=max_tokens
-    )
+    text = await backend.chat(messages, **kwargs)
     if text:
         yield text

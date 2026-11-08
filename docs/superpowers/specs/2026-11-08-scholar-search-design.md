@@ -6,7 +6,7 @@
 
 ## 1. 目标
 
-在 paper-reflow 里提供「检索外部文献 → 看详情 → 一键导入文献库 → 重排阅读 + 翻译」的闭环，
+在 Paperead 里提供「检索外部文献 → 看详情 → 一键导入文献库 → 重排阅读 + 翻译」的闭环，
 替换侧栏里一直禁用的「参考文献引用助手」占位。
 
 成功标准：
@@ -30,7 +30,7 @@
 ## 3. 目录与职责
 
 ```
-paper_reflow/scholar/
+paperead/scholar/
   __init__.py
   models.py    Paper / Searcher 输入输出类型；文本清洗：decode_xml、strip_latex_pointers、
                clean_html_text、reconstruct_abstract、strip_doi、epmc_key/split_epmc_key

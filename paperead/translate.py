@@ -24,9 +24,28 @@ import re
 from typing import Awaitable, Callable, Iterable
 
 from .layout import Block
-from .llm import chat as llm_chat
+from .llm import active_model, chat as llm_chat
 
 logger = logging.getLogger(__name__)
+
+
+def _task_extra_body(model: str | None) -> dict | None:
+    """DeepSeek V4.1 默认开思考；翻译/术语表关掉思考，避免 reasoning 吃光 token。"""
+    name = (model or active_model() or "").lower()
+    if name.startswith("deepseek"):
+        return {"thinking": {"type": "disabled"}}
+    return None
+
+
+async def _translate_chat(**kwargs) -> str:
+    extra = _task_extra_body(kwargs.get("model"))
+    try:
+        return await llm_chat(extra_body=extra, **kwargs)
+    except Exception as e:
+        # 某些中转/兼容实现不认识 thinking 参数：去掉后再试一次
+        if extra and "thinking" in str(e).lower():
+            return await llm_chat(extra_body=None, **kwargs)
+        raise
 
 # ── 占位符保护 ─────────────────────────────────────────────────────────
 
@@ -118,8 +137,8 @@ async def build_glossary(
     # 给小了会出现 finish_reason=length 且 content 为空
     for budget in (4096, 8192):
         try:
-            content = await llm_chat(
-                [
+            content = await _translate_chat(
+                messages=[
                     {"role": "system", "content": _GLOSSARY_SYS},
                     {"role": "user", "content": payload},
                 ],
@@ -207,8 +226,8 @@ async def translate_block(
     prompt = _build_prompt(masked, glossary or {}, block.section, prev_tail, next_head)
     # 推理模型的 reasoning token 计入 max_tokens，给小了会被截断成半句
     budget = min(8000, max(2048, int(len(masked) * 1.2) + 1500))
-    out = await llm_chat(
-        [
+    out = await _translate_chat(
+        messages=[
             {"role": "system", "content": _SYS},
             {"role": "user", "content": prompt},
         ],

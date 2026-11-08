@@ -5,7 +5,7 @@ import json
 
 from fastapi.testclient import TestClient
 
-from paper_reflow import llm as llm_mod
+from paperead import llm as llm_mod
 
 
 BLOCKS = [
@@ -63,10 +63,10 @@ class PlainBackend:
 
 
 def _load_main(monkeypatch, tmp_path):
-    monkeypatch.setenv("PAPER_REFLOW_DATA", str(tmp_path / "lib"))
-    monkeypatch.setenv("PAPER_REFLOW_MOCK", "1")
-    monkeypatch.setenv("PAPER_REFLOW_API_KEY", "test-key")
-    monkeypatch.delenv("PAPER_REFLOW_TOKEN", raising=False)
+    monkeypatch.setenv("PAPEREAD_DATA", str(tmp_path / "lib"))
+    monkeypatch.setenv("PAPEREAD_MOCK", "1")
+    monkeypatch.setenv("PAPEREAD_API_KEY", "test-key")
+    monkeypatch.delenv("PAPEREAD_TOKEN", raising=False)
 
     import server.main as main
 
@@ -171,7 +171,7 @@ def test_ask_stream_emits_error_but_keeps_partial_text(monkeypatch, tmp_path):
 def test_ask_stream_requires_model_config(monkeypatch, tmp_path):
     main = _load_main(monkeypatch, tmp_path)
     _use_fake_paper(main, monkeypatch)
-    monkeypatch.delenv("PAPER_REFLOW_API_KEY", raising=False)
+    monkeypatch.delenv("PAPEREAD_API_KEY", raising=False)
 
     res = _post_stream(main)
     assert res.status_code == 400

@@ -1,7 +1,19 @@
 /* ============================================================
-   paper-reflow · 阅读页
+   Paperead · 阅读页
    基调：纯白纸面 / 蓝色点缀 / 左栏助手（问答·目录·重点·图表）
    ============================================================ */
+
+/* 整体界面按 120% 渲染（等效浏览器的 120% 缩放），高分屏上字和按钮更清楚 */
+html {
+  zoom: var(--ui-zoom);
+}
+
+/* 不支持 CSS zoom 的旧浏览器退回 100%，避免满屏高度只剩 83% */
+@supports not (zoom: 1.2) {
+  :root {
+    --ui-zoom: 1;
+  }
+}
 
 :root {
   --bg: #ffffff;
@@ -29,6 +41,10 @@
   --read-scale: 1;
   --topbar-h: 52px;
   --panel-w: 344px;
+  /* 整体界面缩放：改这一个值即可（1.2 = 120%） */
+  --ui-zoom: 1.2;
+  /* zoom 会把 100vh 一起放大，满屏高度要先折算回 CSS 像素，否则比窗口高 20% */
+  --app-h: calc(100vh / var(--ui-zoom));
 }
 
 * {
@@ -70,7 +86,7 @@ textarea {
 .app {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: var(--app-h);
   overflow: hidden;
 }
 
@@ -244,19 +260,57 @@ textarea {
 
 .workspace {
   display: grid;
-  grid-template-columns: var(--panel-w) minmax(0, 1fr);
-  height: calc(100vh - var(--topbar-h));
+  grid-template-columns: var(--panel-w) 6px minmax(0, 1fr);
+  height: calc(var(--app-h) - var(--topbar-h));
   overflow: hidden;
 }
 
 /* ── 左栏 ─────────────────────────────────────────────── */
 
 .panel {
-  border-right: 1px solid var(--line);
   display: flex;
   flex-direction: column;
   min-height: 0;
   background: var(--bg);
+}
+
+/* 阅读助手与正文之间的可拖动分隔线 */
+.panel-resizer {
+  position: relative;
+  z-index: 6;
+  width: 6px;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+  background: transparent;
+}
+
+.panel-resizer::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 1px;
+  background: var(--line);
+  transition: background 0.15s ease, width 0.15s ease, left 0.15s ease;
+}
+
+.panel-resizer:hover::before,
+.panel-resizer:focus-visible::before {
+  left: 1px;
+  width: 3px;
+  background: var(--blue-line);
+}
+
+.panel-resizer:focus-visible {
+  background: var(--blue-soft);
+}
+
+body.col-resizing,
+body.col-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 
 .panel-head {
@@ -1284,7 +1338,7 @@ textarea {
 .splash {
   display: grid;
   place-items: center;
-  height: 100vh;
+  height: var(--app-h);
   color: var(--muted);
   font-size: 13px;
 }
@@ -1320,7 +1374,8 @@ textarea {
   .workspace {
     grid-template-columns: minmax(0, 1fr);
   }
-  .panel {
+  .panel,
+  .panel-resizer {
     display: none;
   }
   .brand-name,
@@ -1402,7 +1457,7 @@ textarea {
 
 .modal {
   width: min(560px, 100%);
-  max-height: 90vh;
+  max-height: calc(var(--app-h) * 0.9);
   display: flex;
   flex-direction: column;
   background: var(--bg);
@@ -1662,8 +1717,9 @@ textarea {
 
 .library {
   display: grid;
-  grid-template-columns: 232px minmax(0, 1fr);
-  height: 100vh;
+  /* 参考截图比例：左栏约占 18%，并随窗口宽度小幅伸缩 */
+  grid-template-columns: clamp(250px, 18vw, 290px) minmax(0, 1fr);
+  height: var(--app-h);
   overflow: hidden;
   background: var(--bg);
 }
@@ -1672,7 +1728,7 @@ textarea {
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--line);
-  padding: 14px 10px 12px;
+  padding: 16px 12px 14px;
   background: var(--bg);
   min-height: 0;
 }
@@ -1680,8 +1736,8 @@ textarea {
 .library-brand {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 8px 16px;
+  gap: 9px;
+  padding: 4px 10px 18px;
 }
 
 .library-nav {
@@ -1693,11 +1749,11 @@ textarea {
 .library-nav-item {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 10px;
   width: 100%;
-  padding: 8px 10px;
+  padding: 9px 11px;
   border-radius: 8px;
-  font-size: 13px;
+  font-size: 13.5px;
   color: var(--ink-2);
   text-align: left;
   transition: background 0.15s ease, color 0.15s ease;
@@ -1739,10 +1795,10 @@ textarea {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 11px;
+  font-size: 11.5px;
   letter-spacing: 0.6px;
   color: var(--faint);
-  padding: 0 6px 6px;
+  padding: 0 7px 6px;
 }
 
 .folders-head .icon-btn {
@@ -1753,7 +1809,7 @@ textarea {
 .folders-empty {
   margin: 0;
   padding: 18px 6px;
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--faint);
   text-align: center;
 }
@@ -1761,10 +1817,10 @@ textarea {
 .library-settings {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 9px 10px;
+  gap: 9px;
+  padding: 10px 11px;
   border-radius: 8px;
-  font-size: 12.5px;
+  font-size: 13.5px;
   color: var(--muted);
   border: 1px solid transparent;
 }
@@ -1776,7 +1832,7 @@ textarea {
 
 .library-main {
   overflow-y: auto;
-  padding: 26px 34px 80px;
+  padding: 28px 36px 80px;
 }
 
 .library-head {
@@ -1912,8 +1968,8 @@ textarea {
 
 .paper-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(248px, 1fr));
-  gap: 18px;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 20px;
 }
 
 .paper-grid.is-list {
@@ -1942,12 +1998,12 @@ textarea {
 
 .paper-cover {
   position: relative;
-  height: 156px;
+  height: 172px;
   background: linear-gradient(135deg, #eef2ff 0%, #e0e7ff 55%, #ede9fe 100%);
   display: grid;
   place-items: center;
   overflow: hidden;
-  padding: 12px;
+  padding: 14px;
 }
 
 .paper-cover img {
@@ -2005,13 +2061,13 @@ textarea {
 }
 
 .paper-body {
-  padding: 12px 14px 6px;
+  padding: 14px 16px 8px;
   flex: 1;
 }
 
 .paper-body h3 {
-  margin: 0 0 6px;
-  font-size: 13.5px;
+  margin: 0 0 7px;
+  font-size: 14.5px;
   line-height: 1.45;
   font-weight: 650;
   color: var(--ink);
@@ -2031,14 +2087,14 @@ textarea {
 }
 
 .paper-meta {
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--faint);
 }
 
 .paper-actions {
   display: flex;
   gap: 6px;
-  padding: 8px 14px 12px;
+  padding: 8px 16px 14px;
   opacity: 0;
   transition: opacity 0.15s ease;
 }
@@ -2137,10 +2193,10 @@ textarea {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  min-height: 240px;
+  min-height: 260px;
   border-style: dashed;
   color: var(--faint);
-  font-size: 12.5px;
+  font-size: 13px;
   background: transparent;
 }
 
@@ -2444,7 +2500,7 @@ textarea {
 
 .prov-modal {
   width: min(620px, 100%);
-  max-height: 82vh;
+  max-height: calc(var(--app-h) * 0.82);
   display: flex;
   flex-direction: column;
   background: #fff;
@@ -3536,6 +3592,7 @@ textarea {
 @media print {
   .topbar,
   .panel,
+  .panel-resizer,
   .block-actions {
     display: none !important;
   }
@@ -3561,6 +3618,14 @@ textarea {
   width: 100%;
   max-width: 1020px;
   margin: 0 auto;
+  /* 检索页不显示右侧滚动条：内容照常滚，界面更干净 */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.scholar-main::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .scholar-head {
@@ -4088,7 +4153,7 @@ textarea {
 
 /* ── 原版 PDF ─────────────────────────────────────────── */
 
-.workspace.is-pdf {
+.workspace.is-pdf-expanded {
   grid-template-columns: minmax(0, 1fr);
 }
 
@@ -4115,13 +4180,18 @@ textarea {
   gap: 6px;
 }
 
-.pdf-page img {
-  display: block;
-  max-width: 100%;
-  height: auto;
+.pdf-page-frame {
   background: #fff;
   border-radius: 2px;
   box-shadow: 0 2px 16px rgba(17, 24, 39, 0.14);
+  overflow: hidden;
+}
+
+.pdf-page-frame img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .pdf-page figcaption {

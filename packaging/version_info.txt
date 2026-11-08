@@ -15,12 +15,12 @@ VSVersionInfo(
         StringTable(
           u'040904B0',
           [
-            StringStruct(u'CompanyName', u'paper-reflow'),
-            StringStruct(u'FileDescription', u'paper-reflow local server'),
+            StringStruct(u'CompanyName', u'Paperead'),
+            StringStruct(u'FileDescription', u'Paperead local server'),
             StringStruct(u'FileVersion', u'0.1.0'),
-            StringStruct(u'InternalName', u'paper-reflow-server'),
-            StringStruct(u'OriginalFilename', u'paper-reflow-server.exe'),
-            StringStruct(u'ProductName', u'paper-reflow'),
+            StringStruct(u'InternalName', u'paperead-server'),
+            StringStruct(u'OriginalFilename', u'paperead-server.exe'),
+            StringStruct(u'ProductName', u'Paperead'),
             StringStruct(u'ProductVersion', u'0.1.0')
           ]
         )

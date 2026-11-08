@@ -1,3 +1,4 @@
+use std::fs::OpenOptions;
 use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -6,7 +7,6 @@ use rand::RngCore;
 use tauri::AppHandle;
 
 use crate::{api, paths};
-
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 #[cfg(windows)]
@@ -48,14 +48,22 @@ impl Sidecar {
         );
 
         let mut command = Command::new(&executable);
+        let stdout = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(data_dir.join("logs").join("server.log"))
+            .map_err(|error| format!("打开 sidecar 日志失败：{error}"))?;
+        let stderr = stdout
+            .try_clone()
+            .map_err(|error| format!("复制 sidecar 日志句柄失败：{error}"))?;
         command
-            .env("PAPER_REFLOW_PORT", port.to_string())
-            .env("PAPER_REFLOW_DATA", &data_dir)
-            .env("PAPER_REFLOW_TOKEN", &token)
+            .env("PAPEREAD_PORT", port.to_string())
+            .env("PAPEREAD_DATA", &data_dir)
+            .env("PAPEREAD_TOKEN", &token)
             .env("PYTHONUTF8", "1")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr));
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
 

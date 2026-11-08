@@ -1,4 +1,4 @@
-"""paper-reflow 本地服务。
+"""Paperead 本地服务。
 
 为什么需要它：国内厂商的 API 基本都不允许浏览器直连（CORS），
 所以「前端填 Key、直接调模型」这条路走不通，必须有一个本地代理。
@@ -9,7 +9,7 @@
     python -m server.main          # 或 uvicorn server.main:app --port 8000
 
 离线联调（不消耗额度、不需要 Key）：
-    PAPER_REFLOW_MOCK=1 python -m server.main
+    PAPEREAD_MOCK=1 python -m server.main
 """
 
 from __future__ import annotations
@@ -31,19 +31,20 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
-from paper_reflow import __version__
-from paper_reflow.formula import recognize_latex
-from paper_reflow.layout import Block, parse_pdf
-from paper_reflow.llm import LLMConfig, OpenAICompatBackend
-from paper_reflow.tutor import build_guide
-from paper_reflow.tutor import memory as memory_engine
-from paper_reflow.tutor import qa as qa_engine
-from paper_reflow.tutor import web as web_search
-from paper_reflow.tutor.citations import find as find_citations, resolve as resolve_citations
-from paper_reflow.tutor.lineage import build_lineage
-from paper_reflow.tutor.provenance import enrich as enrich_provenance
-from paper_reflow.tutor.references import Reference, parse as parse_references
-from paper_reflow.translate import (
+from paperead import __version__
+from paperead.env import env
+from paperead.formula import recognize_latex
+from paperead.layout import Block, parse_pdf
+from paperead.llm import LLMConfig, OpenAICompatBackend
+from paperead.tutor import build_guide
+from paperead.tutor import memory as memory_engine
+from paperead.tutor import qa as qa_engine
+from paperead.tutor import web as web_search
+from paperead.tutor.citations import find as find_citations, resolve as resolve_citations
+from paperead.tutor.lineage import build_lineage
+from paperead.tutor.provenance import enrich as enrich_provenance
+from paperead.tutor.references import Reference, parse as parse_references
+from paperead.translate import (
     build_glossary,
     quality_ok,
     translate_block,
@@ -59,18 +60,18 @@ from server.runtime import (
     web_dist,
 )
 
-log = logging.getLogger("paper-reflow.server")
+log = logging.getLogger("paperead.server")
 
 WEB_DIST = web_dist()
 DATA_DIR = ensure_data_dir(default_data_dir())
-PORT = int(os.getenv("PAPER_REFLOW_PORT", "8010"))
-TOKEN = os.getenv("PAPER_REFLOW_TOKEN", "")
+PORT = int(env("PAPEREAD_PORT", "8010"))
+TOKEN = env("PAPEREAD_TOKEN", "")
 ORIGINS = allowed_origins(PORT)
-MOCK = os.getenv("PAPER_REFLOW_MOCK") == "1"
+MOCK = env("PAPEREAD_MOCK") == "1"
 
 store = LibraryStore(DATA_DIR)
 
-app = FastAPI(title="paper-reflow", version=__version__)
+app = FastAPI(title="Paperead", version=__version__)
 
 
 @app.middleware("http")
@@ -78,13 +79,16 @@ async def guard(request: Request, call_next):
     """本地 API 防护：cookie/header token + Origin 校验。
 
     桌面壳把随机 token 作为 HttpOnly cookie 在首页下发，前端无需改代码；
-    壳自己用 X-Paper-Reflow-Token 调 health。直接 python -m server.main 时
+    壳自己用 X-Paperead-Token 调 health。直接 python -m server.main 时
     TOKEN 为空，鉴权关闭，保持原有开发体验。
     """
     path = request.url.path
     if path.startswith("/api"):
-        supplied = request.cookies.get("pr_token") or request.headers.get(
-            "x-paper-reflow-token"
+        # 旧版壳/脚本可能还在发 x-paper-reflow-token，继续接受。
+        supplied = (
+            request.cookies.get("pr_token")
+            or request.headers.get("x-paperead-token")
+            or request.headers.get("x-paper-reflow-token")
         )
         if TOKEN and supplied != TOKEN:
             return JSONResponse({"detail": "unauthorized"}, status_code=403)
@@ -165,12 +169,89 @@ async def research_agent() -> dict:
     if not path.exists():
         raise HTTPException(status_code=503, detail="研究 agent 尚未启动")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"agent.json 无效：{e}") from e
     if not isinstance(data, dict) or not data.get("port"):
         raise HTTPException(status_code=503, detail="agent.json 缺少 port")
     return data
+
+
+def _agent_target() -> tuple[str, str]:
+    path = DATA_DIR / "agent.json"
+    if not path.exists():
+        raise HTTPException(status_code=503, detail="研究 agent 尚未启动")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"agent.json 无效：{e}") from e
+    if not isinstance(data, dict) or not data.get("port"):
+        raise HTTPException(status_code=503, detail="agent.json 缺少 port")
+    return f"http://127.0.0.1:{int(data['port'])}", str(data.get("token") or "")
+
+
+@app.api_route(
+    "/api/research/{path:path}",
+    methods=["GET", "POST", "DELETE", "PATCH"],
+)
+async def research_proxy(path: str, request: Request):
+    """Thin SSE/JSON proxy from the product API to the local Node agent.
+
+    The frontend never sees the agent port or token. A2 keeps this route and
+    replaces the agent.json lookup with the project/session store.
+    """
+    base, token = _agent_target()
+    url = f"{base}/v1/{path}"
+    headers = {"x-agent-token": token}
+    query = list(request.query_params.multi_items())
+
+    if request.method == "GET" and path.endswith("/events"):
+        client = httpx.AsyncClient(timeout=None)
+        try:
+            upstream = await client.send(
+                client.build_request("GET", url, headers=headers, params=query),
+                stream=True,
+            )
+        except Exception as e:
+            await client.aclose()
+            raise HTTPException(status_code=503, detail=f"研究 agent 不可用：{e}") from e
+
+        async def relay():
+            try:
+                async for chunk in upstream.aiter_raw():
+                    yield chunk
+            finally:
+                await upstream.aclose()
+                await client.aclose()
+
+        return StreamingResponse(
+            relay(),
+            media_type="text/event-stream",
+            headers={
+                "cache-control": "no-cache, no-transform",
+                "x-accel-buffering": "no",
+                "connection": "keep-alive",
+            },
+        )
+
+    body = await request.body()
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            upstream = await client.request(
+                request.method,
+                url,
+                headers={**headers, "content-type": request.headers.get("content-type", "application/json")},
+                content=body,
+                params=query,
+            )
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"研究 agent 不可用：{e}") from e
+
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        media_type=upstream.headers.get("content-type"),
+    )
 
 
 @app.post("/api/formula")
@@ -370,6 +451,7 @@ async def paper_blocks(paper_id: str) -> dict:
         "title": row.get("title", ""),
         "authors": row.get("authors", ""),
         "page_count": row.get("pages", 0),
+        "page_sizes": store.page_sizes(paper_id),
         "columns": row.get("columns", 1),
         "glossary": row.get("glossary", {}),
         "blocks": blocks,
@@ -383,7 +465,7 @@ async def get_guide(paper_id: str) -> dict:
     path = store.papers_dir / f"{paper_id}.guide.json"
     if not path.exists():
         raise HTTPException(status_code=404, detail="导读还没生成")
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 _guiding: set[str] = set()
@@ -407,13 +489,13 @@ async def make_guide(paper_id: str, req: GuideReq | None = None) -> dict:
     path = store.papers_dir / f"{paper_id}.guide.json"
     refresh = bool(req and req.refresh)
     if path.exists() and not refresh:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
 
     if paper_id in _guiding:
         raise HTTPException(status_code=429, detail="导读正在生成中")
 
     if req and req.config:
-        from paper_reflow.llm import set_backend
+        from paperead.llm import set_backend
 
         set_backend(
             OpenAICompatBackend(
@@ -425,7 +507,7 @@ async def make_guide(paper_id: str, req: GuideReq | None = None) -> dict:
                 )
             )
         )
-    elif not os.getenv("PAPER_REFLOW_API_KEY"):
+    elif not env("PAPEREAD_API_KEY"):
         raise HTTPException(status_code=400, detail="未配置模型，无法生成导读")
 
     _guiding.add(paper_id)
@@ -501,7 +583,7 @@ async def get_lineage(paper_id: str) -> dict:
     path = store.papers_dir / f"{paper_id}.lineage.json"
     if not path.exists():
         raise HTTPException(status_code=404, detail="脉络还没生成")
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 _lineaging: set[str] = set()
@@ -520,12 +602,12 @@ async def make_lineage(paper_id: str, req: GuideReq | None = None) -> dict:
     path = store.papers_dir / f"{paper_id}.lineage.json"
     refresh = bool(req and req.refresh)
     if path.exists() and not refresh:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     if paper_id in _lineaging:
         raise HTTPException(status_code=429, detail="脉络正在生成中")
 
     if req and req.config:
-        from paper_reflow.llm import set_backend
+        from paperead.llm import set_backend
 
         set_backend(
             OpenAICompatBackend(
@@ -537,7 +619,7 @@ async def make_lineage(paper_id: str, req: GuideReq | None = None) -> dict:
                 )
             )
         )
-    elif not os.getenv("PAPER_REFLOW_API_KEY"):
+    elif not env("PAPEREAD_API_KEY"):
         raise HTTPException(status_code=400, detail="未配置模型，无法生成脉络")
 
     _lineaging.add(paper_id)
@@ -576,7 +658,7 @@ def _require_ask_ready(paper_id: str, question: str) -> None:
 def _apply_llm_config(config: LLMConfigIn | None) -> None:
     """把前端带来的模型配置注入全局后端；没有配置时要求环境变量兜底。"""
     if config:
-        from paper_reflow.llm import set_backend
+        from paperead.llm import set_backend
 
         try:
             set_backend(
@@ -591,7 +673,7 @@ def _apply_llm_config(config: LLMConfigIn | None) -> None:
             )
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"模型配置有误：{e}") from e
-    elif not os.getenv("PAPER_REFLOW_API_KEY"):
+    elif not env("PAPEREAD_API_KEY"):
         raise HTTPException(status_code=400, detail="未配置模型，无法回答")
 
 
@@ -989,7 +1071,7 @@ async def _translate_pages(
                 timeout=cfg.timeout,
             )
         )
-        from paper_reflow.llm import set_backend
+        from paperead.llm import set_backend
 
         set_backend(backend)
 
@@ -1052,7 +1134,7 @@ async def translate_stream(paper_id: str, req: TranslateReq) -> StreamingRespons
             timeout=req.config.timeout,
         )
     )
-    from paper_reflow.llm import set_backend
+    from paperead.llm import set_backend
 
     set_backend(backend)
 
@@ -1169,6 +1251,8 @@ async def _parse_task(paper_id: str) -> None:
         store.update(
             paper_id, status="ready", blocks=len(blocks),
             pages=parsed.page_count, columns=parsed.columns, error="",
+            # 重新解析会生成全新的 blocks；旧的已译计数不再成立
+            translated=0,
         )
         log.info("解析完成 %s：%d 块", paper_id, len(blocks))
     except Exception as e:
@@ -1180,7 +1264,7 @@ async def _parse_task(paper_id: str) -> None:
 
 # ── Zotero（实验性） ────────────────────────────────────────────────────
 
-ZOTERO_BASE = os.getenv("PAPER_REFLOW_ZOTERO", "http://127.0.0.1:23119/api/users/0")
+ZOTERO_BASE = env("PAPEREAD_ZOTERO", "http://127.0.0.1:23119/api/users/0")
 
 
 @app.get("/api/zotero/probe")
@@ -1305,7 +1389,7 @@ def main() -> None:
 
     _setup_logging()
     log.info(
-        "paper-reflow %s 启动：http://127.0.0.1:%d（数据：%s）",
+        "Paperead %s 启动：http://127.0.0.1:%d（数据：%s）",
         __version__,
         PORT,
         DATA_DIR,
@@ -1315,3 +1399,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

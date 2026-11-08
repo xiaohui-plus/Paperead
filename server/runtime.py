@@ -1,7 +1,7 @@
 """运行环境探测：frozen 路径、数据目录、token、允许的 Origin。
 
-桌面版由 Tauri 壳传入 ``PAPER_REFLOW_PORT`` / ``PAPER_REFLOW_DATA`` /
-``PAPER_REFLOW_TOKEN``；直接 ``python -m server.main`` 时使用仓库内 ``data/``。
+桌面版由 Tauri 壳传入 ``PAPEREAD_PORT`` / ``PAPEREAD_DATA`` /
+``PAPEREAD_TOKEN``；直接 ``python -m server.main`` 时使用仓库内 ``data/``。
 """
 
 from __future__ import annotations
@@ -11,7 +11,10 @@ import secrets
 import sys
 from pathlib import Path
 
-DATA_DIR_NAME = "paper-reflow-data"
+from paperead.env import env as read_env, migrate_legacy_dir
+
+DATA_DIR_NAME = "paperead-data"
+LEGACY_DATA_DIR_NAME = "paper-reflow-data"
 
 
 def is_frozen() -> bool:
@@ -31,14 +34,20 @@ def web_dist() -> Path:
 
 
 def default_data_dir() -> Path:
-    env = os.getenv("PAPER_REFLOW_DATA")
-    if env:
-        return Path(env).expanduser().resolve()
+    explicit = read_env("PAPEREAD_DATA")
+    if explicit:
+        return Path(explicit).expanduser().resolve()
     if is_frozen():
         base = os.getenv("LOCALAPPDATA") or os.getenv("APPDATA")
         if base:
-            return Path(base) / DATA_DIR_NAME
-        return Path.home() / f".{DATA_DIR_NAME}"
+            root = Path(base)
+            return migrate_legacy_dir(
+                root / DATA_DIR_NAME, root / LEGACY_DATA_DIR_NAME
+            )
+        home = Path.home()
+        return migrate_legacy_dir(
+            home / f".{DATA_DIR_NAME}", home / f".{LEGACY_DATA_DIR_NAME}"
+        )
     return bundle_root() / "data"
 
 

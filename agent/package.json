@@ -1,9 +1,9 @@
 {
-  "name": "paper-reflow-agent",
+  "name": "paperead-agent",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "paper-reflow research agent host (DeepSeek Harness runtime)",
+  "description": "Paperead research agent host (DeepSeek Harness runtime)",
   "scripts": {
     "start": "node ./src/bin.mjs",
     "dump": "node ./node_modules/@deepseek-ai/dsh/lib/bin.js --profile research --dump-config"
@@ -17,7 +17,7 @@
     "@deepseek-ai/dsh-llm": "0.1.0-rc.6",
     "@deepseek-ai/dsh-session-persistence-jsonl": "0.1.0-rc.6",
     "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
-    "@paper-reflow/dsh-research": "file:./bundle"
+    "@paperead/dsh-research": "file:./bundle"
   },
   "overrides": {
     "@deepseek-ai/dsh": "0.1.0-rc.6",

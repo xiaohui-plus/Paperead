@@ -1,4 +1,4 @@
-# paper-reflow
+# Paperead
 
 学术论文 PDF 的**版面重排 + 英中逐段翻译**。
 
@@ -10,11 +10,15 @@
 Windows 10/11 x64 安装包与便携 ZIP：[GitHub Releases](https://github.com/xiaohui-plus/Paperead/releases/latest)。
 国内网络访问 GitHub 资源慢时，可用镜像：
 `https://ghproxy.net/https://github.com/xiaohui-plus/Paperead/releases/latest`。
-如果 `.exe` 被网络或安全软件拦截，下载 `paper-reflow_0.1.0_x64-setup.zip` 解压后运行，
+如果 `.exe` 被网络或安全软件拦截，下载 `Paperead_0.1.0_x64-setup.zip` 解压后运行，
 或直接用便携版 ZIP。
 构建、签名与自动更新说明见 [docs/desktop.md](docs/desktop.md)。桌面版自带 Python
 sidecar，使用者不需要安装 Python/Node；安装版数据默认在
-`%LOCALAPPDATA%\paper-reflow-data`，便携版数据在同级 `data\` 目录。
+`%LOCALAPPDATA%\paperead-data`，便携版数据在同级 `data\` 目录。
+
+> **从 paper-reflow 升级**：首次启动会自动把旧数据目录
+> `%LOCALAPPDATA%\paper-reflow-data` 改名为 `paperead-data`；改名失败时继续使用旧目录。
+> 旧的 `PAPER_REFLOW_*` 环境变量、旧 API 请求头和旧版 localStorage 配置也仍然兼容。
 
 ## 能解决什么
 
@@ -84,8 +88,8 @@ POST /api/scholar/cite      { paper, style }
 POST /api/scholar/export    { papers, format }
 ```
 
-数据源都是公开接口，不需要 Key；OpenAlex / Unpaywall 用 `PAPER_REFLOW_MAILTO`
-（默认 `paper-reflow@users.noreply.github.com`）走礼貌池。Unpaywall 会拒绝 example.com 这类占位邮箱，
+数据源都是公开接口，不需要 Key；OpenAlex / Unpaywall 用 `PAPEREAD_MAILTO`
+（默认 `paperead@users.noreply.github.com`）走礼貌池。Unpaywall 会拒绝 example.com 这类占位邮箱，
 建议把它换成你自己的邮箱。检索页状态都在 URL 里
 （`?v=search&q=&src=&sort=&page=...`），刷新、前进后退、从阅读页返回都能还原。
 
@@ -93,8 +97,8 @@ POST /api/scholar/export    { papers, format }
 
 | 环境变量 | 说明 | 默认 |
 |---|---|---|
-| `PAPER_REFLOW_MAILTO` | OpenAlex / Unpaywall 的联系邮箱 | `paper-reflow@users.noreply.github.com` |
-| `PAPER_REFLOW_OPENALEX` | OpenAlex 兼容地址（旧版导读检索仍用） | `https://api.openalex.org` |
+| `PAPEREAD_MAILTO` | OpenAlex / Unpaywall 的联系邮箱 | `paperead@users.noreply.github.com` |
+| `PAPEREAD_OPENALEX` | OpenAlex 兼容地址（旧版导读检索仍用） | `https://api.openalex.org` |
 
 
 ## 快速开始
@@ -117,17 +121,17 @@ cd web && npm run dev                   # 终端 2：前端（5173，/api 已代
 ## 命令行
 
 ```bash
-export PAPER_REFLOW_API_KEY=sk-xxx          # 或 OPENAI_API_KEY
-export PAPER_REFLOW_MODEL=deepseek-flash
+export PAPEREAD_API_KEY=sk-xxx          # 或 OPENAI_API_KEY
+export PAPEREAD_MODEL=deepseek-flash
 
 # 只解析
-paper-reflow paper.pdf -o out
+paperead paper.pdf -o out
 
 # 解析 + 全文翻译
-paper-reflow paper.pdf -o out --translate
+paperead paper.pdf -o out --translate
 
 # 先翻 20 段看看效果
-paper-reflow paper.pdf -o out --translate --limit 20
+paperead paper.pdf -o out --translate --limit 20
 ```
 
 ## 公式识别（图片 → LaTeX）
@@ -136,11 +140,11 @@ paper-reflow paper.pdf -o out --translate --limit 20
 
 ```bash
 # 解析 + 识别公式（需要视觉模型）
-paper-reflow paper.pdf -o out --formula
+paperead paper.pdf -o out --formula
 ```
 
 识别在**解析阶段**完成并写入 `blocks[].latex`，阅读时不再调模型；结果按图片 sha1 缓存在
-`~/.cache/paper-reflow/formula/`，同一公式重跑零成本。识别失败或 KaTeX 不支持时，前端自动回落到裁图。
+`~/.cache/paperead/formula/`，同一公式重跑零成本。识别失败或 KaTeX 不支持时，前端自动回落到裁图。
 
 识图模型在「设置 → 识图模型」里单独配置，和回答模型互不影响；推荐服务商旁有「获取 API Key」
 直达官网，配置后可以点「测试」用一张示例公式验证识图能力。
@@ -156,14 +160,16 @@ paper-reflow paper.pdf -o out --formula
 
 推荐服务商都带「获取 API Key」按钮，直接跳到官方创建密钥页面；每个服务商卡片里还有**模型下拉框**，
 可以选择该平台当前提供的模型（DeepSeek：V4.1 Flash / V4 Pro；智谱：GLM-5.3 / 5.2 / 5 / 4.6；
-Kimi：K3.1 Pro / 高速版 / K3；豆包：Seed 2.0 Pro / Lite；通义：Qwen3-Max-Thinking / Qwen-Plus）。
+Kimi：K3.1 Pro / 高速版 / K3；豆包：Seed 2.0 Pro / Lite；通义：Qwen3-Max-Thinking / Qwen-Plus；
+硅基流动：DeepSeek V4.1 Flash / V4 Pro、GLM-5.3-Flash / GLM-5.3、Qwen3.8-27B / Qwen3.6、
+Kimi K2.7 Code、腾讯 Hy4 Preview 等，一个 Key 就能切换）。
 选中模型后只需要粘贴 API Key，接口地址和模型名会自动填好。也可以添加自定义模型，只填接口地址、模型名、
 API Key 三项即可。配置存在**本机 localStorage**，两套密钥互相独立。浏览器直连国内厂商接口会被 CORS 拦，所以需要一层本地服务：
 
 ```bash
 pip install -e ".[server]"
 python -m server.main            # 默认 8010
-# 离线联调（不消耗额度）： PAPER_REFLOW_MOCK=1 python -m server.main
+# 离线联调（不消耗额度）： PAPEREAD_MOCK=1 python -m server.main
 ```
 
 开发时 `npm run dev` 会把 `/api` 代理到 `127.0.0.1:8010`；生产构建后
@@ -222,7 +228,7 @@ POST /api/papers/{id}/ask/stream                → 同上，SSE 流式（status
 - `GET /api/papers/{id}/chat` → `{ turns, hasMore }`，按轮配对，供前端恢复历史
 - `POST /ask` / `POST /ask/stream` 支持可选 `client_id`，重试不会重复落盘
 - 不提供记忆管理界面；删 `data/memory/` 等于"忘掉我"
-- `PAPER_REFLOW_MEMORY=0` 可整体关闭，回到无记忆问答
+- `PAPEREAD_MEMORY=0` 可整体关闭，回到无记忆问答
 
 ## 前端（论文阅读页）
 
@@ -290,7 +296,7 @@ Python API：
 
 ```python
 import asyncio
-from paper_reflow import build_glossary, parse_pdf, translate_paper
+from paperead import build_glossary, parse_pdf, translate_paper
 
 async def main():
     paper = parse_pdf("paper.pdf", figure_dir="out/assets")
@@ -337,15 +343,15 @@ asyncio.run(main())
 
 | 环境变量 | 说明 | 默认 |
 |---|---|---|
-| `PAPER_REFLOW_API_KEY` / `OPENAI_API_KEY` | API Key | 必填 |
-| `PAPER_REFLOW_BASE_URL` / `OPENAI_BASE_URL` | OpenAI 兼容地址 | `https://api.deepseek.com/v1` |
-| `PAPER_REFLOW_MODEL` / `OPENAI_MODEL` | 模型名 | `deepseek-flash` |
-| `PAPER_REFLOW_TIMEOUT` | 单请求超时（秒） | `300` |
+| `PAPEREAD_API_KEY` / `OPENAI_API_KEY` | API Key | 必填 |
+| `PAPEREAD_BASE_URL` / `OPENAI_BASE_URL` | OpenAI 兼容地址 | `https://api.deepseek.com/v1` |
+| `PAPEREAD_MODEL` / `OPENAI_MODEL` | 模型名 | `deepseek-flash` |
+| `PAPEREAD_TIMEOUT` | 单请求超时（秒） | `300` |
 
 任意 OpenAI 兼容服务都能接（SiliconFlow / vLLM / Ollama / OneAPI）。宿主应用也可以注入自己的实现：
 
 ```python
-from paper_reflow import set_backend
+from paperead import set_backend
 
 class MyBackend:
     async def chat(self, messages, *, model=None, temperature=0.25, max_tokens=None) -> str:
@@ -393,7 +399,7 @@ pytest
 ## 目录
 
 ```
-paper_reflow/
+paperead/
   layout.py     PDF → 结构化块（栏检测 / 阅读顺序 / 段落重组 / 图表公式裁剪）
   formula.py    公式裁图 → LaTeX（视觉模型 + 校验 + 缓存）
   translate.py  术语表 + 占位符 + 逐段翻译
@@ -402,7 +408,7 @@ paper_reflow/
   scholar/      外部文献检索（arXiv / PubMed / OpenAlex / Europe PMC / 每日推荐 / 引用格式）
 server/          本地服务
   main.py        API：文献库 / 检索挂载 / 公式识别 / Zotero / 静态托管
-  scholar_api.py 检索接口（检索逻辑在 paper_reflow/scholar，文献库能力由 main 注入）
+  scholar_api.py 检索接口（检索逻辑在 paperead/scholar，文献库能力由 main 注入）
   store.py       论文文件与元信息、首页缩略图
 web/             前端（React + Vite + KaTeX）
   src/components/  LibraryPage · PaperCard · Sidebar（文献库）

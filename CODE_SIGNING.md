@@ -2,12 +2,12 @@
 
 ## Project
 
-- Name: paper-reflow
+- Name: Paperead
 - Repository: https://github.com/xiaohui-plus/Paperead
 - License: AGPL-3.0
 - Maintainer: [@xiaohui-plus](https://github.com/xiaohui-plus)
 
-paper-reflow is an open-source Windows desktop application for reading and
+Paperead is an open-source Windows desktop application for reading and
 translating academic PDFs. It is built with Tauri 2 and a bundled Python
 sidecar.
 
@@ -20,8 +20,8 @@ publisher warning.
 
 Once approved, only the following artifacts are signed:
 
-- `paper-reflow_<version>_x64-setup.exe` (NSIS installer)
-- `paper-reflow-desktop.exe` and `paper-reflow-server.exe`
+- `Paperead_<version>_x64-setup.exe` (NSIS installer)
+- `paperead-desktop.exe` and `paperead-server.exe`
   (when the release pipeline can sign binaries before packaging)
 - optionally the portable ZIP, if it is repackaged by SignPath
 
@@ -43,13 +43,13 @@ uncommitted local changes or from forks.
 After downloading a signed installer:
 
 ```powershell
-Get-AuthenticodeSignature .\paper-reflow_0.1.0_x64-setup.exe
+Get-AuthenticodeSignature .\Paperead_0.1.0_x64-setup.exe
 ```
 
 or:
 
 ```powershell
-signtool verify /pa /v .\paper-reflow_0.1.0_x64-setup.exe
+signtool verify /pa /v .\Paperead_0.1.0_x64-setup.exe
 ```
 
 The signature should name SignPath Foundation as the signer and include a

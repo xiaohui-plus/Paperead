@@ -43,6 +43,8 @@ impl AgentSidecar {
 
         let agent_home = agent_home(app, data_dir);
         ensure_profile(&agent_dir, &agent_home)?;
+        let tmp_dir = data_dir.join("tmp");
+        let _ = fs::create_dir_all(&tmp_dir);
         let log_dir = data_dir.join("logs");
         let _ = fs::create_dir_all(&log_dir);
         let log_path = log_dir.join("agent.log");
@@ -56,13 +58,13 @@ impl AgentSidecar {
             .map_err(|error| format!("复制 agent 日志句柄失败：{error}"))?;
 
         let node = node_path(&agent_dir);
-        let llm_key = std::env::var("PAPER_REFLOW_LLM_KEY")
-            .or_else(|_| std::env::var("DEEPSEEK_API_KEY"))
+        let llm_key = paths::var("PAPEREAD_LLM_KEY")
+            .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok())
             .unwrap_or_default();
-        let llm_base = std::env::var("PAPER_REFLOW_LLM_BASE")
-            .unwrap_or_else(|_| "https://api.deepseek.com".into());
-        let model = std::env::var("PAPER_REFLOW_MODEL")
-            .unwrap_or_else(|_| "deepseek-v4-flash".into());
+        let llm_base = paths::var("PAPEREAD_LLM_BASE")
+            .unwrap_or_else(|| "https://api.deepseek.com".into());
+        let model = paths::var("PAPEREAD_MODEL")
+            .unwrap_or_else(|| "deepseek-v4-flash".into());
 
         paths::log_line(
             app,
@@ -81,13 +83,17 @@ impl AgentSidecar {
             .arg(&bin)
             .current_dir(&agent_dir)
             .env("DSH_HOME", &agent_home)
-            .env("PAPER_REFLOW_AGENT_PORT", port.to_string())
-            .env("PAPER_REFLOW_AGENT_TOKEN", &token)
-            .env("PAPER_REFLOW_API_BASE", format!("http://127.0.0.1:{python_port}"))
-            .env("PAPER_REFLOW_TOKEN", python_token)
-            .env("PAPER_REFLOW_LLM_KEY", llm_key)
-            .env("PAPER_REFLOW_LLM_BASE", llm_base)
-            .env("PAPER_REFLOW_MODEL", model)
+            .env("PAPEREAD_AGENT_PORT", port.to_string())
+            .env("PAPEREAD_AGENT_TOKEN", &token)
+            .env("PAPEREAD_AGENT_COMPOSE", "full")
+            .env("PAPEREAD_API_BASE", format!("http://127.0.0.1:{python_port}"))
+            .env("TMP", &tmp_dir)
+            .env("TEMP", &tmp_dir)
+            .env("TMPDIR", &tmp_dir)
+            .env("PAPEREAD_TOKEN", python_token)
+            .env("PAPEREAD_LLM_KEY", llm_key)
+            .env("PAPEREAD_LLM_BASE", llm_base)
+            .env("PAPEREAD_MODEL", model)
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
@@ -178,7 +184,7 @@ fn random_token() -> String {
 }
 
 fn agent_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    if let Ok(value) = std::env::var("PAPER_REFLOW_AGENT_DIR") {
+    if let Some(value) = paths::var("PAPEREAD_AGENT_DIR") {
         let path = PathBuf::from(value);
         if path.join("node_modules").is_dir() {
             return Ok(path);
@@ -206,7 +212,7 @@ fn agent_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn node_path(agent_dir: &Path) -> PathBuf {
-    if let Ok(value) = std::env::var("PAPER_REFLOW_NODE") {
+    if let Some(value) = paths::var("PAPEREAD_NODE") {
         let path = PathBuf::from(value);
         if path.is_file() {
             return path;
@@ -220,7 +226,7 @@ fn node_path(agent_dir: &Path) -> PathBuf {
 }
 
 fn agent_home(_app: &AppHandle, data_dir: &Path) -> PathBuf {
-    if let Ok(value) = std::env::var("PAPER_REFLOW_AGENT_HOME") {
+    if let Some(value) = paths::var("PAPEREAD_AGENT_HOME") {
         return PathBuf::from(value);
     }
     data_dir.join("dsh")

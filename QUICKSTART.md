@@ -1,4 +1,4 @@
-# paper-reflow 快速开始
+# Paperead 快速开始
 
 一个本地跑起来的论文阅读 + 理解工具：PDF 版面重排、英中逐段流式翻译、
 导读、引用溯源、思路来源图、带出处的问答。
@@ -36,9 +36,9 @@ chmod +x start.sh
 复制 `.env.example` 为 `.env`，填入：
 
 ```
-PAPER_REFLOW_API_KEY=sk-xxxx
-PAPER_REFLOW_BASE_URL=https://api.deepseek.com/v1
-PAPER_REFLOW_MODEL=deepseek-chat
+PAPEREAD_API_KEY=sk-xxxx
+PAPEREAD_BASE_URL=https://api.deepseek.com/v1
+PAPEREAD_MODEL=deepseek-chat
 ```
 
 ## 4. 用起来
@@ -57,9 +57,9 @@ PAPER_REFLOW_MODEL=deepseek-chat
 | 变量 | 作用 |
 |---|---|
 | `TAVILY_API_KEY` | 开启问答的联网检索；不填则只在论文与引用文献内回答 |
-| `PAPER_REFLOW_PORT` | 端口，默认 8010 |
-| `PAPER_REFLOW_DATA` | 数据目录，默认 `./data` |
-| `PAPER_REFLOW_MOCK=1` | 假翻译，用于验证流程不花钱 |
+| `PAPEREAD_PORT` | 端口，默认 8010 |
+| `PAPEREAD_DATA` | 数据目录，默认 `./data` |
+| `PAPEREAD_MOCK=1` | 假翻译，用于验证流程不花钱 |
 
 ## 6. 常见问题
 
@@ -70,7 +70,7 @@ PAPER_REFLOW_MODEL=deepseek-chat
 检查右上角是否显示「未配置模型」。没配置时不会发任何请求。
 
 **Q：端口被占用？**
-`PAPER_REFLOW_PORT=8123 ./start.sh`
+`PAPEREAD_PORT=8123 ./start.sh`
 
 **Q：数据存在哪？**
 `./data/`：`library.json` 索引 + `papers/{id}.pdf|.blocks.json|.guide.json…`。

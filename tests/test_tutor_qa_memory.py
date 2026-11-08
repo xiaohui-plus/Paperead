@@ -7,8 +7,8 @@ import json
 
 import pytest
 
-from paper_reflow.llm import set_backend
-from paper_reflow.tutor import memory as memlib
+from paperead.llm import set_backend
+from paperead.tutor import memory as memlib
 
 
 class FakeBackend:
@@ -33,7 +33,7 @@ def reset_backend():
 
 
 def test_write_memory_applies_writer_patch(tmp_path, monkeypatch):
-    monkeypatch.setenv("PAPER_REFLOW_MEMORY", "1")
+    monkeypatch.setenv("PAPEREAD_MEMORY", "1")
     store = memlib.MemoryStore(tmp_path)
     store.profile_path.write_text(
         json.dumps(
@@ -90,7 +90,7 @@ def test_write_memory_applies_writer_patch(tmp_path, monkeypatch):
 
 
 def test_write_memory_falls_back_when_model_returns_garbage(tmp_path, monkeypatch):
-    monkeypatch.setenv("PAPER_REFLOW_MEMORY", "1")
+    monkeypatch.setenv("PAPEREAD_MEMORY", "1")
     store = memlib.MemoryStore(tmp_path)
     set_backend(FakeBackend("这不是 JSON"))
     asyncio.run(
@@ -102,7 +102,7 @@ def test_write_memory_falls_back_when_model_returns_garbage(tmp_path, monkeypatc
 
 
 def test_write_memory_survives_backend_error(tmp_path, monkeypatch):
-    monkeypatch.setenv("PAPER_REFLOW_MEMORY", "1")
+    monkeypatch.setenv("PAPEREAD_MEMORY", "1")
     store = memlib.MemoryStore(tmp_path)
     set_backend(FakeBackend(error=RuntimeError("模型挂了")))
 
@@ -115,7 +115,7 @@ def test_write_memory_survives_backend_error(tmp_path, monkeypatch):
 
 
 def test_write_memory_disabled_writes_nothing(tmp_path, monkeypatch):
-    monkeypatch.setenv("PAPER_REFLOW_MEMORY", "0")
+    monkeypatch.setenv("PAPEREAD_MEMORY", "0")
     store = memlib.MemoryStore(tmp_path)
     fake = FakeBackend("{}")
     set_backend(fake)
@@ -132,7 +132,7 @@ def test_write_memory_disabled_writes_nothing(tmp_path, monkeypatch):
 
 
 def test_write_memory_applies_fallback_only_once_when_chat_write_fails(tmp_path, monkeypatch):
-    monkeypatch.setenv("PAPER_REFLOW_MEMORY", "1")
+    monkeypatch.setenv("PAPEREAD_MEMORY", "1")
     store = memlib.MemoryStore(tmp_path)
     set_backend(FakeBackend("这不是 JSON"))
     calls = {"n": 0}
@@ -154,7 +154,7 @@ def test_write_memory_applies_fallback_only_once_when_chat_write_fails(tmp_path,
 
 
 def test_write_memory_keeps_invalid_model_fields_without_fallback(tmp_path, monkeypatch):
-    monkeypatch.setenv("PAPER_REFLOW_MEMORY", "1")
+    monkeypatch.setenv("PAPEREAD_MEMORY", "1")
     store = memlib.MemoryStore(tmp_path)
     set_backend(FakeBackend(json.dumps({"traits": [{"key": "bogus", "value": "值"}]}, ensure_ascii=False)))
 

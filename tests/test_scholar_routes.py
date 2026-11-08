@@ -8,10 +8,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from paper_reflow.scholar import search as search_mod
-from paper_reflow.scholar.http import FriendlyError
-from paper_reflow.scholar.models import Paper
-from paper_reflow.scholar.search import SearchResult
+from paperead.scholar import search as search_mod
+from paperead.scholar.http import FriendlyError
+from paperead.scholar.models import Paper
+from paperead.scholar.search import SearchResult
 from server import scholar_api
 from server.scholar_api import build_router
 

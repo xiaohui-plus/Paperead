@@ -3,7 +3,7 @@
 - 版本：v1（已确认）
 - 日期：2026-11-08
 - 范围：阅读页左侧「问答」tab 的回答呈现与传输方式
-- 关联：`web/src/components/ChatPanel.tsx`、`web/src/lib/library.ts`、`server/main.py` `/ask`、`paper_reflow/tutor/qa.py`、`paper_reflow/llm.py`
+- 关联：`web/src/components/ChatPanel.tsx`、`web/src/lib/library.ts`、`server/main.py` `/ask`、`paperead/tutor/qa.py`、`paperead/llm.py`
 
 > 一句话：把左侧问答从「一次性返回 + 纯文本气泡」改成「逐字流式 + 成品 Markdown 文档」。
 > 视觉参考：靠岸学术右侧 AI 回答——无气泡、标题/列表/表格/公式按文档排版。
@@ -69,10 +69,10 @@
 
 ### 5.1 后端
 
-- `paper_reflow/llm.py`
+- `paperead/llm.py`
   - `OpenAICompatBackend.chat_stream()`：`stream=True`，逐 delta 产出 `content`（忽略仅带 usage 的 chunk），结束时关闭上游。
   - 模块级 `chat_stream()`：后端没有 `chat_stream` 时退回 `chat()` 一次性输出，保证测试注入的假后端仍可用。
-- `paper_reflow/tutor/qa.py`
+- `paperead/tutor/qa.py`
   - 抽出 `_answer_messages()`，`answer()` 与新增的 `answer_stream()` 共用同一 prompt。
 - `server/main.py`
   - 把检索、来源构造抽成 `_prepare_ask()`；`_require_ask_ready()`、`_apply_llm_config()` 消除重复。

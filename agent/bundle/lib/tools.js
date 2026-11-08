@@ -8,7 +8,7 @@ export function apply(ctx) {
     defineTool({
       name: 'echo',
       description:
-        'Echo the given text back verbatim. Used by the paper-reflow research host spike to prove the tool pipeline and card projection.',
+        'Echo the given text back verbatim. Used by the Paperead research host spike to prove the tool pipeline and card projection.',
       parameters: {
         text: {
           type: 'string',

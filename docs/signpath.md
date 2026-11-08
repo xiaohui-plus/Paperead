@@ -13,7 +13,7 @@ SignPath Foundation 的代码签名证书和私钥保存在 SignPath 的 HSM 中
 
 在 <https://signpath.org/apply> 提交申请，填写：
 
-- 项目：paper-reflow
+- 项目：Paperead
 - 仓库：https://github.com/xiaohui-plus/Paperead
 - 许可证：AGPL-3.0
 - 构建方式：GitHub Actions（`.github/workflows/release.yml`）
@@ -38,7 +38,7 @@ SignPath Foundation 的代码签名证书和私钥保存在 SignPath 的 HSM 中
 ```xml
 <artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
   <zip-file>
-    <pe-file path="paper-reflow_*_x64-setup.exe">
+    <pe-file path="Paperead_*_x64-setup.exe">
       <authenticode-sign/>
     </pe-file>
   </zip-file>
@@ -48,8 +48,8 @@ SignPath Foundation 的代码签名证书和私钥保存在 SignPath 的 HSM 中
 更完整的版本需要签 exe 内部的程序，但 NSIS 不支持像 MSI 那样的 deep-sign。
 建议分两步：
 
-1. 先用 `tauri build --no-bundle` 产出 `paper-reflow-desktop.exe`，把
-   `paper-reflow-desktop.exe` 和 sidecar 的 `paper-reflow-server.exe` 打包成
+1. 先用 `tauri build --no-bundle` 产出 `paperead-desktop.exe`，把
+   `paperead-desktop.exe` 和 sidecar 的 `paperead-server.exe` 打包成
    ZIP，交给 SignPath 签；
 2. 用已签名的 exe + sidecar 重新执行 NSIS 打包；
 3. 再把最终安装包交给 SignPath 签一次；

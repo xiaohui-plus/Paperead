@@ -553,12 +553,18 @@ def _build_blocks(ordered: list[Line], body_size: float) -> list[Block]:
     cur: dict | None = None
     line_h = median([ln.height for ln in ordered]) if ordered else 12.0
 
-    # 每栏的左右边界，用于判断「行是否写满」与「是否首行缩进」
-    edges: dict[int, tuple[float, float]] = {}
-    for c in (0, 1):
-        ls = [ln for ln in ordered if ln.col == c]
-        if ls:
-            edges[c] = (min(ln.x0 for ln in ls), max(ln.x1 for ln in ls))
+    # 每页、每栏的左右边界，用于判断「行是否写满」与「是否首行缩进」。
+    # 不能跨页取全局边界：首页通栏标题/摘要会把左栏的 right 撑到页面右边，
+    # 导致后面双栏页的每一行都被误判成「没写满」而各起一段。
+    edges: dict[tuple[int, int], tuple[float, float]] = {}
+    for page in sorted({ln.page for ln in ordered}):
+        for c in (0, 1):
+            ls = [ln for ln in ordered if ln.page == page and ln.col == c]
+            if ls:
+                edges[(page, c)] = (
+                    min(ln.x0 for ln in ls),
+                    max(ln.x1 for ln in ls),
+                )
 
     def flush():
         nonlocal cur
@@ -668,7 +674,7 @@ def _build_blocks(ordered: list[Line], body_size: float) -> list[Block]:
             cur = start(ln)
             continue
 
-        left, right = edges.get(ln.col, (ln.x0, ln.x1))
+        left, right = edges.get((ln.page, ln.col), (ln.x0, ln.x1))
         col_w = max(right - left, 1.0)
         prev_short = cur["last_x1"] < right - 0.08 * col_w      # 上一行没写满 → 段落结束
         # 首行缩进：既要相对栏左边界缩进，又要相对上一行缩进（否则整段每行都会被误判）
@@ -792,6 +798,20 @@ def _merge_affiliations(blocks: list[Block]) -> list[Block]:
     return out
 
 
+_REF_START_RE = re.compile(r"^\s*\[?\d{1,3}\]?[.)]\s+\S")
+_REF_YEAR_RE = re.compile(r"\b(?:19[5-9]\d|20[0-3]\d)\b")
+
+
+def _looks_reference_entry(text: str) -> bool:
+    """编号开头、且像文献条目（有年份/et al./DOI）而不是正文编号列表。"""
+    if len(text) < 28 or not _REF_START_RE.match(text):
+        return False
+    return bool(
+        _REF_YEAR_RE.search(text)
+        or re.search(r"\bet\s+al\b|\bdoi\b|arxiv|https?://", text, re.IGNORECASE)
+    )
+
+
 def _classify(blocks: list[Block], body_size: float, page_height: float = 792.0) -> None:
     """按位置与文本特征标注块类型，并确定「不翻译」的块。"""
     in_refs = False
@@ -823,8 +843,15 @@ def _classify(blocks: list[Block], body_size: float, page_height: float = 792.0)
             b.section = t
             if re.match(r"^(References|Bibliography)\b", t, re.IGNORECASE):
                 in_refs = True
+            elif in_refs:
+                # Nature 等 PDF 的参考文献区未必有可识别的 References 标题，
+                # 进入下一个正常章节（Methods 等）时结束参考文献状态。
+                in_refs = False
             if re.match(r"^(Abstract|摘\s*要)\b", t, re.IGNORECASE):
                 front_matter = False
+                # 很多期刊（如 Nature）没有 Introduction 标题；摘要之后就是正文，
+                # 否则正文里的 "laboratory / Institute" 会被误判成作者单位。
+                body_started = True
             if re.match(r"^(\d+\.?\s*)?(Introduction|摘\s*要)\b", t, re.IGNORECASE):
                 body_started = True
             continue
@@ -835,8 +862,10 @@ def _classify(blocks: list[Block], body_size: float, page_height: float = 792.0)
         if b.kind in ("equation", "figure", "table"):
             continue
 
-        # Introduction 之前、长得像机构的块 → 作者单位（大型论文的单位列表会横跨两三页）
-        if not body_started and len(t) < 320 and (
+        # Introduction 之前、长得像机构的块 → 作者单位（大型论文的单位列表会横跨两三页）。
+        # 限制在前两页：有些期刊没有 Introduction 标题，后面的正文一旦出现
+        # "laboratory / Institute" 会被误判成单位，整段就不再翻译。
+        if not body_started and b.page <= 2 and len(t) < 320 and (
             _AFFIL_RE.search(t) or _AFFIL_MARKER_RE.match(t)
         ):
             b.kind = "affiliation"
@@ -847,12 +876,26 @@ def _classify(blocks: list[Block], body_size: float, page_height: float = 792.0)
             b.kind = "keywords"
             continue
 
+        # 没有 References 标题的 PDF：用「1. 作者 et al. ... 2025」这种
+        # 条目特征进入参考文献状态，后续条目保持 reference。
+        if not in_refs and _looks_reference_entry(t):
+            in_refs = True
+
         if in_refs:
             b.kind = "reference"
             b.translatable = False
             continue
 
         if front_matter and b.page == 1:
+            # 首页底部的摘要经常没有 "Abstract" 标题，字号是正文字号、长度很长；
+            # 不能当成作者单位，否则摘要不翻译、导读也拿不到内容。
+            if b.size >= body_size * 0.95 and len(t) > 260:
+                b.kind = "para"
+                b.section = "Abstract"
+                b.translatable = True
+                front_matter = False
+                body_started = True
+                continue
             if _AFFIL_RE.search(t) or len(t) > 260:
                 b.kind = "affiliation"
             elif _NAME_RE.search(t) and t.count(",") >= 1:
@@ -1312,6 +1355,80 @@ def _crop_equations(
     return blocks
 
 
+def _collapse_vector_figure_pages(
+    doc: pymupdf.Document,
+    blocks: list[Block],
+    out_dir: Path,
+) -> list[Block]:
+    """把纯矢量图表页收敛成一张整页图，避免把图里的标注拆成一句一块。
+
+    Nature 这类 PDF 的系统图/流程图没有位图，只有几百条矢量线段和大量
+    独立短文本。它们不是正文段落，逐块翻译既没有意义，也会出现
+    「一句一块」的观感。这里对「矢量元素很多 + 文本几乎都是短标注」的页面
+    直接渲染成 PNG，替换掉该页的文字块。
+    """
+    by_page: dict[int, list[tuple[int, Block]]] = {}
+    for i, b in enumerate(blocks):
+        by_page.setdefault(b.page, []).append((i, b))
+
+    replacements: dict[int, tuple[int, Block]] = {}
+    for page_no, items in by_page.items():
+        if page_no < 1 or page_no > len(doc):
+            continue
+        page = doc[page_no - 1]
+        # 已经有位图/表格块的页面交给原来的图表抽取逻辑，避免重复
+        if any(b.kind in ("figure", "table") for _, b in items):
+            continue
+        if page.get_images(full=True) or len(page.get_drawings()) < 200:
+            continue
+
+        texts = [
+            (i, b) for i, b in items
+            if b.kind not in ("figure", "table", "reference") and b.text.strip()
+        ]
+        if len(texts) < 8:
+            continue
+        short = sum(1 for _, b in texts if len(b.text.strip()) <= 70)
+        long = sum(1 for _, b in texts if len(b.text.strip()) > 220)
+        if short < len(texts) * 0.7 or long > 2:
+            continue
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        img = out_dir / f"page_{page_no:03d}.png"
+        page.get_pixmap(dpi=150).save(str(img))
+        first = min(i for i, _ in texts)
+        replacements[page_no] = (
+            first,
+            Block(
+                id="",
+                order=0,
+                page=page_no,
+                kind="figure",
+                text="",
+                bbox=(0.0, 0.0, page.rect.width, page.rect.height),
+                image_path=str(img),
+                caption=f"第 {page_no} 页图表",
+                translatable=False,
+            ),
+        )
+
+    if not replacements:
+        return blocks
+
+    out: list[Block] = []
+    for i, b in enumerate(blocks):
+        repl = replacements.get(b.page)
+        if repl is not None:
+            if i == repl[0]:
+                out.append(repl[1])
+            continue
+        out.append(b)
+    for i, b in enumerate(out):
+        b.order = i
+        b.id = f"b{i:04d}"
+    return out
+
+
 def parse_pdf(
     pdf_path: str | Path,
     paper_id: str = "",
@@ -1337,10 +1454,20 @@ def parse_pdf(
             return ParsedPaper(page_count=len(doc), blocks=[])
 
         _mark_margins(lines, doc)
-        gutter = _detect_gutter(lines)
-        _assign_columns(lines, gutter)
+        # 按页检测栏间距：同一 PDF 里经常混有单栏首页、双栏正文、
+        # 通栏图表页。用整篇文档的全局投影会被图表页的跨栏文字填满 gutter，
+        # 最终误判成单栏，正文左右栏就会交错、且每行各起一段。
+        pages: dict[int, list[Line]] = {}
+        for ln in lines:
+            pages.setdefault(ln.page, []).append(ln)
+        gutters: dict[int, float | None] = {}
+        for page_no, page_lines in pages.items():
+            page_gutter = _detect_gutter(page_lines)
+            gutters[page_no] = page_gutter
+            _assign_columns(page_lines, page_gutter)
+        has_gutter = any(g is not None for g in gutters.values())
         rows = _merge_visual_rows(lines)      # 行内公式碎片并回正文行
-        ordered = _reading_order(rows, gutter)
+        ordered = _reading_order(rows, 0.0 if has_gutter else None)
 
         body_size = _guess_body_size(ordered)
         blocks = _build_blocks(ordered, body_size)
@@ -1356,6 +1483,7 @@ def parse_pdf(
                 out = out / paper_id
             blocks = _extract_tables(doc, blocks, out / "tables")
             blocks = _extract_figures(doc, blocks, out / "figures")
+            blocks = _collapse_vector_figure_pages(doc, blocks, out / "figures")
             blocks = _crop_equations(doc, blocks, out / "equations")
         else:
             for i, b in enumerate(blocks):
@@ -1366,7 +1494,7 @@ def parse_pdf(
             page_count=len(doc),
             blocks=blocks,
             body_size=body_size,
-            columns=2 if gutter is not None else 1,
+            columns=2 if has_gutter else 1,
         )
     finally:
         doc.close()

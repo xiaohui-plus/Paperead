@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from ..env import env
 from ..llm import chat as llm_chat
 from .qa import BM25, tokenize
 
@@ -53,7 +54,7 @@ INDEX_WINDOW = 400
 
 
 def enabled() -> bool:
-    return os.getenv("PAPER_REFLOW_MEMORY", "1") != "0"
+    return env("PAPEREAD_MEMORY", "1") != "0"
 
 
 def _now() -> float:

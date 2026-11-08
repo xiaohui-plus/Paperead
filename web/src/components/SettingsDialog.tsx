@@ -421,7 +421,10 @@ export function SettingsDialog({
       models,
       active: { ...settings.active, [editor.kind]: id },
     })
+    // 「保存并使用」是完成动作：保存成功就退出设置，不把用户留在弹窗里。
+    // 需要再配另一类模型时，从顶栏齿轮重新打开即可。
     closeEditor()
+    onClose()
   }
 
   const selectModel = (model: ModelProfile) => {

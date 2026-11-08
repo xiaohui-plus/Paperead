@@ -8,7 +8,7 @@ import time
 import httpx
 import pytest
 
-from paper_reflow.scholar import http
+from paperead.scholar import http
 
 
 def run(coro):

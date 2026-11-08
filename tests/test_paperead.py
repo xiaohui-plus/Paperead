@@ -7,14 +7,14 @@
 - 占位符还原把正文里的 `[2]` 当成占位符，导致引用编号整体错位
 """
 
-from paper_reflow.layout import (
+from paperead.layout import (
     Line,
     _ends_sentence,
     _join_spans,
     _looks_equation,
     _merge_visual_rows,
 )
-from paper_reflow.translate import protect, restore
+from paperead.translate import protect, restore
 
 
 # ── span 拼接 ──────────────────────────────────────────────────────────

@@ -38,9 +38,11 @@ export function PaperCard({ paper, view, onOpen, onDelete, onReparse }: Props) {
         ) : (
           <div className="cover-fallback">PDF</div>
         )}
-        <span className="paper-status" data-status={paper.status}>
-          {STATUS_LABEL[paper.status] ?? paper.status}
-        </span>
+        {paper.status !== 'ready' && (
+          <span className="paper-status" data-status={paper.status}>
+            {STATUS_LABEL[paper.status] ?? paper.status}
+          </span>
+        )}
       </div>
 
       <div className="paper-body">

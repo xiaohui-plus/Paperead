@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from paper_reflow.scholar.cite import (
+from paperead.scholar.cite import (
     build_bibtex,
     build_ris,
     format_citation,
     split_name,
 )
-from paper_reflow.scholar.models import Paper
+from paperead.scholar.models import Paper
 
 
 def make_paper(**overrides) -> Paper:

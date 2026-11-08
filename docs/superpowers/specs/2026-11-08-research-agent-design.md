@@ -1,14 +1,15 @@
-# paper-reflow 研究功能技术方案
+# Paperead 研究功能技术方案
 
 > 版本：v0.3（外部检索改为复用 Scolar_search）  
 > 日期：2026-11-08  
 > 状态：设计已确认，搜索接入等待中；其余部分可实施  
 > 关联：`docs/design-tutor.md`、`docs/desktop.md`、DSH `0.1.0-rc.6`、`F:\Project\Scolar_search`  
-> 实施计划：[Phase A（非搜索）](../plans/2026-11-08-research-agent-phase-a.md)
+> 实施计划：[Phase A（非搜索）](../plans/2026-11-08-research-agent-phase-a.md)  
+> DSH 接入完整方案：[2026-11-08-dsh-integration-solution.md](2026-11-08-dsh-integration-solution.md)
 
 ## 0. 结论
 
-**把 DeepSeek Harness（DSH）作为 agent runtime，做成一个独立的 Node sidecar；paper-reflow 的文献库、解析能力包装成 DSH 的 in-process 工具；Python 仍是数据与解析平面，外部检索复用 Scolar_search；React 自绘研究首页、项目页和思维链。**
+**把 DeepSeek Harness（DSH）作为 agent runtime，做成一个独立的 Node sidecar；Paperead 的文献库、解析能力包装成 DSH 的 in-process 工具；Python 仍是数据与解析平面，外部检索复用 Scolar_search；React 自绘研究首页、项目页和思维链。**
 
 具体是：
 
@@ -50,18 +51,18 @@
 
 ## 2. 现状盘点
 
-### 2.1 paper-reflow 已经有的
+### 2.1 Paperead 已经有的
 
 | 能力 | 位置 | 对研究功能的价值 |
 |---|---|---|
 | 文献库、上传、Zotero 导入 | `server/main.py`、`server/store.py` | 项目可直接引用库内论文 |
-| PDF 版面重排、图表/公式裁切 | `paper_reflow/layout.py` | 读全文、按页引用 |
-| 逐段翻译 + SSE | `paper_reflow/translate.py` | 中文摘要/段落可直接进上下文 |
-| 论文内 BM25 检索 | `paper_reflow/tutor/qa.py` | `paper_read` 的段落召回 |
-| OpenAlex 适配器 | `paper_reflow/tutor/search.py` | 外部检索的起点（但只有标题/关键词 + 被引排序） |
-| Tavily 网页检索 | `paper_reflow/tutor/web.py` | 网页补充来源 |
-| 导读 / 脉络 / 溯源 / 问答 | `paper_reflow/tutor/*` | 可复用为技能和工具 |
-| 研究者画像 / 概念台账 | `paper_reflow/tutor/memory.py` | 个性化提示词、概念对齐 |
+| PDF 版面重排、图表/公式裁切 | `paperead/layout.py` | 读全文、按页引用 |
+| 逐段翻译 + SSE | `paperead/translate.py` | 中文摘要/段落可直接进上下文 |
+| 论文内 BM25 检索 | `paperead/tutor/qa.py` | `paper_read` 的段落召回 |
+| OpenAlex 适配器 | `paperead/tutor/search.py` | 外部检索的起点（但只有标题/关键词 + 被引排序） |
+| Tavily 网页检索 | `paperead/tutor/web.py` | 网页补充来源 |
+| 导读 / 脉络 / 溯源 / 问答 | `paperead/tutor/*` | 可复用为技能和工具 |
+| 研究者画像 / 概念台账 | `paperead/tutor/memory.py` | 个性化提示词、概念对齐 |
 | Tauri + Python sidecar 生命周期 | `src-tauri/src/sidecar.rs` | 再加一个 Node sidecar 可复用同一套模式 |
 
 **缺口**：没有 agent loop、没有多步工具调用、没有项目/会话模型、没有多源学术检索与去重排序、没有流式工具卡与思维链。
@@ -144,7 +145,7 @@ flowchart LR
   W -->|"SSE /api/research/... (Python 代理)"| S1
   S1 -->|"内部 HTTP + token"| S2
   S2 -->|"工具调用 /internal/*"| S1
-  S2 --> DSH["dsh-base +<br/>@paper-reflow/dsh-research"]
+  S2 --> DSH["dsh-base +<br/>@paperead/dsh-research"]
   S2 --> LLM["DeepSeek API"]
   S1 --> LIB["library.json / blocks / PDF"]
   SS["Scolar_search<br/>arXiv / PubMed / OpenAlex / Europe PMC"]
@@ -191,7 +192,7 @@ resources/agent/
   node.exe
   node_modules/                  # pnpm deploy，production only
     @deepseek-ai/dsh/...
-    @paper-reflow/dsh-research/  # 自研 bundle
+    @paperead/dsh-research/  # 自研 bundle
   profiles/research/
     package.json
     cordis.patch.yml
@@ -205,13 +206,13 @@ resources/agent/
 
 ```json
 {
-  "name": "paper-reflow-research-profile",
+  "name": "paperead-research-profile",
   "private": true,
   "dsh": {
     "profile": {
       "bundles": [
         "@deepseek-ai/dsh-base",
-        "@paper-reflow/dsh-research"
+        "@paperead/dsh-research"
       ]
     }
   }
@@ -221,7 +222,7 @@ resources/agent/
 启动：
 
 ```
-DSH_HOME=%LOCALAPPDATA%\paper-reflow\dsh
+DSH_HOME=%LOCALAPPDATA%\Paperead\dsh
 node resources/agent/node_modules/@deepseek-ai/dsh/lib/bin.js --profile research
 ```
 
@@ -230,27 +231,27 @@ node resources/agent/node_modules/@deepseek-ai/dsh/lib/bin.js --profile research
 ### 5.2 自研 bundle 的 patch（草图）
 
 ```yaml
-# @paper-reflow/dsh-research/cordis.patch.yml
+# @paperead/dsh-research/cordis.patch.yml
 - id: research-host
-  name: '@paper-reflow/dsh-research/host'
+  name: '@paperead/dsh-research/host'
   config:
-    port: !!js Number(process.env.PAPER_REFLOW_AGENT_PORT)
-    token: !!js process.env.PAPER_REFLOW_AGENT_TOKEN
-    pythonBase: !!js process.env.PAPER_REFLOW_API_BASE
-    pythonToken: !!js process.env.PAPER_REFLOW_TOKEN
-    dataRoot: !!js process.env.PAPER_REFLOW_DATA
-    skillsDir: !!js process.env.PAPER_REFLOW_SKILLS_DIR
+    port: !!js Number(process.env.PAPEREAD_AGENT_PORT)
+    token: !!js process.env.PAPEREAD_AGENT_TOKEN
+    pythonBase: !!js process.env.PAPEREAD_API_BASE
+    pythonToken: !!js process.env.PAPEREAD_TOKEN
+    dataRoot: !!js process.env.PAPEREAD_DATA
+    skillsDir: !!js process.env.PAPEREAD_SKILLS_DIR
 
 - id: research-tools
-  name: '@paper-reflow/dsh-research/tools'
+  name: '@paperead/dsh-research/tools'
 
 - id: research-persona
-  name: '@paper-reflow/dsh-research/persona'
+  name: '@paperead/dsh-research/persona'
 
 - id: llm-deepseek
   config:
-    apiKeyEnv: PAPER_REFLOW_LLM_KEY
-    baseURL: !!js process.env.PAPER_REFLOW_LLM_BASE
+    apiKeyEnv: PAPEREAD_LLM_KEY
+    baseURL: !!js process.env.PAPEREAD_LLM_BASE
     thinking: enabled
     reasoningEffort: high
     models:
@@ -262,15 +263,17 @@ node resources/agent/node_modules/@deepseek-ai/dsh/lib/bin.js --profile research
 # web_search 也用同一把 key
 - id: web-search-deepseek
   config:
-    apiKeyEnv: PAPER_REFLOW_LLM_KEY
+    apiKeyEnv: PAPEREAD_LLM_KEY
 
 # 技能只从产品目录读
 - id: skill-filesystem
   config:
     includeDefaultRoots: false
-    customSkillDirs: [!!js process.env.PAPER_REFLOW_SKILLS_DIR]
+    customSkillDirs: [!!js process.env.PAPEREAD_SKILLS_DIR]
 
 # 研究 agent 不需要 coding 工具
+- id: hmr
+  disabled: true
 - id: tool-bash
   disabled: true
 - id: tool-pwsh
@@ -309,6 +312,8 @@ node resources/agent/node_modules/@deepseek-ai/dsh/lib/bin.js --profile research
 
 保留：`session-title-first-prompt-llm`、`tool-todo`、`tool-skill`、`tool-web`、`compaction-basic`、`tool-result-pruner`、`session-checkpoint-policy`、`token-meter`、`timeout-policy`、`spill-policy`、`attachment-local`。
 
+> `hmr` 必须禁用：完整组合里它会监听整个安装树，A0 实测会拖住启动；官方 `dsh-web-app` 也做了同样的禁用。
+
 ### 5.3 启动与生命周期
 
 沿用 Python sidecar 的模式（`src-tauri/src/sidecar.rs`）：
@@ -316,13 +321,13 @@ node resources/agent/node_modules/@deepseek-ai/dsh/lib/bin.js --profile research
 1. Tauri 选空闲端口、生成随机 token。
 2. 启动 Node：`node resources/agent/src/bin.mjs`（不是 `dsh --profile`，见下方注意）。
    ```
-   PAPER_REFLOW_AGENT_PORT=...
-   PAPER_REFLOW_AGENT_TOKEN=...
-   PAPER_REFLOW_API_BASE=http://127.0.0.1:<python>
-   PAPER_REFLOW_TOKEN=<python token>
-   PAPER_REFLOW_LLM_KEY=<DPAPI 解密后>
-   PAPER_REFLOW_LLM_BASE=https://api.deepseek.com
-   DSH_HOME=%LOCALAPPDATA%\paper-reflow\dsh
+   PAPEREAD_AGENT_PORT=...
+   PAPEREAD_AGENT_TOKEN=...
+   PAPEREAD_API_BASE=http://127.0.0.1:<python>
+   PAPEREAD_TOKEN=<python token>
+   PAPEREAD_LLM_KEY=<DPAPI 解密后>
+   PAPEREAD_LLM_BASE=https://api.deepseek.com
+   DSH_HOME=%LOCALAPPDATA%\Paperead\dsh
    ```
 3. 轮询 `GET /health`，20s 超时。
 4. 失败：研究功能显示“引擎未启动”+ 日志路径；**文献库/阅读器不受影响**。
@@ -451,14 +456,14 @@ MCP 留给“以后接第三方数据源”，因为 MCP 工具没有 DSH 的卡
 
 **边界**：
 
-- 不在 paper-reflow 里重写 arXiv/PubMed/OpenAlex/Europe PMC 的 adapter、缓存、重试、中文翻译。
+- 不在 Paperead 里重写 arXiv/PubMed/OpenAlex/Europe PMC 的 adapter、缓存、重试、中文翻译。
 - 不做 CNKI/万方/Google Scholar 抓取；不接 SCI-Hub/LibGen。
-- paper-reflow 仍保留自己的**本地文献库检索**（`library_search`），它和外部检索是两件事。
+- Paperead 仍保留自己的**本地文献库检索**（`library_search`），它和外部检索是两件事。
 
 ### 6.2 接入方式（二选一，接入时确认）
 
 **A. TS 包 seam（推荐）**  
-把 `src/lib/arxiv.ts`、`src/lib/cite.ts`、`src/lib/papers.functions.ts` 里的纯逻辑抽成 `@paper-reflow/scholar-search`，去掉 `createServerFn`，暴露普通 async 函数：
+把 `src/lib/arxiv.ts`、`src/lib/cite.ts`、`src/lib/papers.functions.ts` 里的纯逻辑抽成 `@paperead/scholar-search`，去掉 `createServerFn`，暴露普通 async 函数：
 
 ```ts
 searchPapers(input: SearchInput): Promise<SearchResult>
@@ -485,7 +490,7 @@ Python 的 `/internal/search/academic` 做代理；Node 工具不变。
 
 ### 6.3 数据映射（以其现有 `Paper` 为准）
 
-| Scolar_search `Paper` | paper-reflow `Source` |
+| Scolar_search `Paper` | Paperead `Source` |
 |---|---|
 | `id`（`arxiv:...` / `pubmed:...` / `openalex:...` / `europepmc:...`） | `externalId` |
 | `source` | `provider` |
@@ -557,7 +562,7 @@ interface AcademicSearchBackend {
 - `paper_ingest`：先 `findFreeFullText(doi)`；有 OA 就下载入库；没有就返回合法入口（DOI/Europe PMC/预印本/机构/上传）。
 - 不返回 SCI-Hub/LibGen 链接。
 - 引用格式复用 `cite.ts`（GB/T 7714、APA、MLA、IEEE、BibTeX、RIS），避免两套格式。
-- `citation_check` 仍由 paper-reflow 编排：用 Scolar_search 的 `getPaper` 做候选（或 Crossref DOI 直查），再加标题相似度/年份/作者判定；它要回答“这条引用是否真实”，和检索不是同一件事。
+- `citation_check` 仍由 Paperead 编排：用 Scolar_search 的 `getPaper` 做候选（或 Crossref DOI 直查），再加标题相似度/年份/作者判定；它要回答“这条引用是否真实”，和检索不是同一件事。
 
 ### 6.7 接入后要补的
 
@@ -781,7 +786,7 @@ ctx.tools.register(defineTool({
 ### 8.1 研究 persona（全局 section）
 
 ```text
-你是 paper-reflow 的研究助手。你的目标不是“聊得像专家”，而是让用户得到
+你是 Paperead 的研究助手。你的目标不是“聊得像专家”，而是让用户得到
 可核查的文献、清楚的证据边界和能继续做下去的研究路径。
 
 规则：
@@ -840,7 +845,7 @@ ctx.tools.register(defineTool({
 ### 9.1 目录
 
 ```
-%LOCALAPPDATA%\paper-reflow\
+%LOCALAPPDATA%\Paperead\
   data\                         # 现有文献库
     papers\{id}.pdf
     {id}.blocks.json
@@ -1186,7 +1191,7 @@ data: {"seq":128,"type":"tool.end","callId":"c7","status":"ok","durationMs":3210
 | `POST` | `/internal/sessions/{id}/turn` | 轮次结束回写 usage/sources |
 | `POST` | `/internal/artifacts` | 产物索引 |
 
-鉴权：`X-Paper-Reflow-Token` + 仅回环 + `Origin` 校验（内部请求无 Origin，用 token）。
+鉴权：`X-Paperead-Token` + 仅回环 + `Origin` 校验（内部请求无 Origin，用 token）。
 
 ---
 
@@ -1285,7 +1290,7 @@ UI：表格（题名/年份/主题/理由/顺序），可勾选加入项目、�
 
 ### 14.1 密钥
 
-- 研究模型 key 存 Windows DPAPI（`CryptProtectData`），文件 `%LOCALAPPDATA%\paper-reflow\secrets.bin`；前端保存后不再回读明文。
+- 研究模型 key 存 Windows DPAPI（`CryptProtectData`），文件 `%LOCALAPPDATA%\Paperead\secrets.bin`；前端保存后不再回读明文。
 - Tauri 启动 Node 时解密到环境变量；不写命令行、不写日志。
 - 现有翻译/公式 key 仍走 localStorage + 随请求发送；研究 key 单独管理，避免迁移风险。
 - 开发模式允许 `DEEPSEEK_API_KEY` 环境变量。
@@ -1313,7 +1318,7 @@ UI：表格（题名/年份/主题/理由/顺序），可勾选加入项目、�
 - 只下载 OA（Unpaywall `is_oa` / Europe PMC / PMC / arXiv / bioRxiv / DOAJ / CORE）；非 OA 只存元数据 + 链接，提示用户自行上传。
 - **不接入 SCI-Hub / LibGen / Z-Library**，不做盗版 PDF 的搜索、下载、跳转或缓存；也不接受用户以“镜像”为名把盗版库接进来。
 - 遵守 provider rate limit 与 `mailto` 约定；不抓 CNKI/Google Scholar。
-- 导出物保留来源 URL/DOI 与“生成于 paper-reflow”标识。
+- 导出物保留来源 URL/DOI 与“生成于 Paperead”标识。
 
 ### 14.6 隐私
 

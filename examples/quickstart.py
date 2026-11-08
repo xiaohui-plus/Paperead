@@ -1,6 +1,6 @@
 """最小可运行示例：解析一篇 PDF 并翻译前 10 段。
 
-    export PAPER_REFLOW_API_KEY=sk-xxx
+    export PAPEREAD_API_KEY=sk-xxx
     python examples/quickstart.py path/to/paper.pdf
 """
 
@@ -8,7 +8,7 @@ import asyncio
 import sys
 from pathlib import Path
 
-from paper_reflow import build_glossary, parse_pdf, translate_paper
+from paperead import build_glossary, parse_pdf, translate_paper
 
 
 async def main(pdf: str) -> None:

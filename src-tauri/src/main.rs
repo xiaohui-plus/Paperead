@@ -48,7 +48,7 @@ fn main() {
                     handle
                         .dialog()
                         .message(&error)
-                        .title("paper-reflow 启动失败")
+                        .title("Paperead 启动失败")
                         .kind(MessageDialogKind::Error)
                         .blocking_show();
                     return Err(Box::new(std::io::Error::other(error)));
@@ -90,8 +90,7 @@ fn main() {
 
             let updater_app = handle.clone();
             tauri::async_runtime::spawn(async move {
-                let interval = std::env::var("PAPER_REFLOW_UPDATE_INTERVAL_SECS")
-                    .ok()
+                let interval = paths::var("PAPEREAD_UPDATE_INTERVAL_SECS")
                     .and_then(|value| value.parse::<u64>().ok())
                     .unwrap_or(6 * 60 * 60)
                     .max(30);
@@ -108,7 +107,7 @@ fn main() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("failed to build paper-reflow desktop")
+        .expect("failed to build Paperead desktop")
         .run(|app_handle, event| {
             if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
                 shutdown(app_handle);
@@ -124,7 +123,7 @@ fn create_main_window(app: &mut tauri::App, port: u16, data_dir: &std::path::Pat
     let _ = std::fs::create_dir_all(&webview_dir);
 
     let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
-        .title("paper-reflow")
+        .title("Paperead")
         .inner_size(1280.0, 860.0)
         .min_inner_size(1000.0, 680.0)
         .data_directory(webview_dir)
@@ -164,7 +163,7 @@ fn setup_menu(app: &mut tauri::App) -> tauri::Result<()> {
         .item(&quit)
         .build()?;
 
-    let about = MenuItemBuilder::with_id("about", "关于 paper-reflow").build(app)?;
+    let about = MenuItemBuilder::with_id("about", "关于 Paperead").build(app)?;
     let check_update = MenuItemBuilder::with_id("check_update", "检查更新").build(app)?;
     let help = SubmenuBuilder::new(app, "帮助")
         .item(&check_update)
@@ -246,9 +245,9 @@ fn maybe_onboard(app: &AppHandle, port: u16, data_dir: &std::path::Path) {
     let window = app.get_webview_window("main");
     app.dialog()
         .message(
-            "paper-reflow 已安装。\n\nPDF 和阅读数据只保存在本机；翻译/导读时，论文文本会发送给你配置的模型服务商。\n\n接下来请在设置里填写 API Key。",
+            "Paperead 已安装。\n\nPDF 和阅读数据只保存在本机；翻译/导读时，论文文本会发送给你配置的模型服务商。\n\n接下来请在设置里填写 API Key。",
         )
-        .title("欢迎使用 paper-reflow")
+        .title("欢迎使用 Paperead")
         .kind(MessageDialogKind::Info)
         .show(move |_| {
             if let Some(window) = window {
@@ -260,11 +259,10 @@ fn maybe_onboard(app: &AppHandle, port: u16, data_dir: &std::path::Path) {
 }
 
 async fn check_updates(app: AppHandle, interactive: bool) {
-    let endpoint = std::env::var("PAPER_REFLOW_UPDATE_ENDPOINT")
-        .ok()
+    let endpoint = paths::var("PAPEREAD_UPDATE_ENDPOINT")
         .and_then(|value| Url::parse(&value).ok());
-    if std::env::var("PAPER_REFLOW_UPDATE_ENDPOINT").is_ok() && endpoint.is_none() {
-        paths::log_line(&app, "invalid PAPER_REFLOW_UPDATE_ENDPOINT, using config endpoint");
+    if paths::var("PAPEREAD_UPDATE_ENDPOINT").is_some() && endpoint.is_none() {
+        paths::log_line(&app, "invalid PAPEREAD_UPDATE_ENDPOINT, using config endpoint");
     }
 
     let builder = if let Some(url) = endpoint {
@@ -368,7 +366,7 @@ fn install_downloaded_update(
 
     let temp_dir = paths::ensure_data_dir(app).join("update-temp");
     std::fs::create_dir_all(&temp_dir).map_err(|error| format!("创建更新目录失败：{error}"))?;
-    let installer = temp_dir.join(format!("paper-reflow-{version}-setup.exe"));
+    let installer = temp_dir.join(format!("paperead-{version}-setup.exe"));
     std::fs::write(&installer, bytes).map_err(|error| format!("写入更新包失败：{error}"))?;
 
     let cmd = std::env::var("SystemRoot")
@@ -409,12 +407,12 @@ fn install_downloaded_update(
 }
 
 fn show_about(app: &AppHandle) {    let message = format!(
-        "paper-reflow {}\n\nAGPL-3.0 开源\n源码与安装包见 GitHub Releases。",
+        "Paperead {}\n\nAGPL-3.0 开源\n源码与安装包见 GitHub Releases。",
         env!("CARGO_PKG_VERSION")
     );
     app.dialog()
         .message(message)
-        .title("关于 paper-reflow")
+        .title("关于 Paperead")
         .show(|_| {});
 }
 

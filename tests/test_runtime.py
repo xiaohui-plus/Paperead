@@ -16,16 +16,40 @@ def test_web_dist_uses_meipass_when_frozen(monkeypatch, tmp_path):
 
 
 def test_default_data_dir_prefers_env(monkeypatch, tmp_path):
-    monkeypatch.setenv("PAPER_REFLOW_DATA", str(tmp_path / "lib"))
+    monkeypatch.setenv("PAPEREAD_DATA", str(tmp_path / "lib"))
     assert default_data_dir() == (tmp_path / "lib").resolve()
 
 
 def test_default_data_dir_uses_localappdata_when_frozen(monkeypatch, tmp_path):
-    monkeypatch.delenv("PAPER_REFLOW_DATA", raising=False)
+    monkeypatch.delenv("PAPEREAD_DATA", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "bundle"), raising=False)
-    assert default_data_dir() == tmp_path / "paper-reflow-data"
+    assert default_data_dir() == tmp_path / "paperead-data"
+
+
+def test_default_data_dir_migrates_legacy_dir(monkeypatch, tmp_path):
+    monkeypatch.delenv("PAPEREAD_DATA", raising=False)
+    legacy = tmp_path / "paper-reflow-data"
+    (legacy / "papers").mkdir(parents=True)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "bundle"), raising=False)
+
+    assert default_data_dir() == tmp_path / "paperead-data"
+    assert (tmp_path / "paperead-data" / "papers").is_dir()
+    assert not legacy.exists()
+
+
+def test_legacy_env_prefix_still_works(monkeypatch):
+    from paperead.env import env
+
+    monkeypatch.delenv("PAPEREAD_MOCK", raising=False)
+    monkeypatch.setenv("PAPER_REFLOW_MOCK", "1")
+    assert env("PAPEREAD_MOCK") == "1"
+
+    monkeypatch.setenv("PAPEREAD_MOCK", "0")
+    assert env("PAPEREAD_MOCK") == "0"
 
 
 def test_ensure_data_dir_creates_layout(tmp_path):

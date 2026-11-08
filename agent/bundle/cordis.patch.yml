@@ -1,4 +1,4 @@
-# paper-reflow research bundle, applied on top of @deepseek-ai/dsh-base.
+# Paperead research bundle, applied on top of @deepseek-ai/dsh-base.
 #
 # A0 keeps the surface deliberately small: one HTTP/SSE host, one echo tool,
 # and the DeepSeek adapter. Later phases add the real research tools.
@@ -8,30 +8,34 @@
       name: '@deepseek-ai/dsh-host-webserver'
       config:
         host: 127.0.0.1
-        port: !!js Number(process.env.PAPER_REFLOW_AGENT_PORT || 0)
+        port: !!js Number(process.env.PAPEREAD_AGENT_PORT || 0)
 
     - id: research-host
-      name: '@paper-reflow/dsh-research'
+      name: '@paperead/dsh-research'
       config:
-        token: !!js process.env.PAPER_REFLOW_AGENT_TOKEN || ''
-        defaultModel: !!js process.env.PAPER_REFLOW_MODEL || 'deepseek-v4-flash'
+        token: !!js process.env.PAPEREAD_AGENT_TOKEN || ''
+        defaultModel: !!js process.env.PAPEREAD_MODEL || 'deepseek-v4-flash'
 
     - id: research-tools
-      name: '@paper-reflow/dsh-research/tools'
+      name: '@paperead/dsh-research/tools'
 
 # Keep one credential source for chat and web search.
 - id: llm-deepseek
   config:
-    apiKeyEnv: PAPER_REFLOW_LLM_KEY
-    baseURL: !!js process.env.PAPER_REFLOW_LLM_BASE || 'https://api.deepseek.com'
+    apiKeyEnv: PAPEREAD_LLM_KEY
+    baseURL: !!js process.env.PAPEREAD_LLM_BASE || 'https://api.deepseek.com'
     thinking: enabled
     reasoningEffort: high
 
 - id: web-search-deepseek
   config:
-    apiKeyEnv: PAPER_REFLOW_LLM_KEY
+    apiKeyEnv: PAPEREAD_LLM_KEY
 
 # A research agent must not get a shell or an arbitrary filesystem.
+# HMR watches the whole install tree and is unnecessary in a packaged app;
+# the official web bundle disables it for the same reason.
+- id: hmr
+  disabled: true
 - id: tool-bash
   disabled: true
 - id: tool-pwsh

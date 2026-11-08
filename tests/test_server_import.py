@@ -23,10 +23,10 @@ def test_import_from_local_path(monkeypatch, tmp_path):
     _make_pdf(str(pdf))
     assert pdf.stat().st_size >= 1024
 
-    monkeypatch.setenv("PAPER_REFLOW_TOKEN", "import-token")
-    monkeypatch.setenv("PAPER_REFLOW_PORT", "8124")
-    monkeypatch.setenv("PAPER_REFLOW_DATA", str(tmp_path / "lib"))
-    monkeypatch.setenv("PAPER_REFLOW_MOCK", "1")
+    monkeypatch.setenv("PAPEREAD_TOKEN", "import-token")
+    monkeypatch.setenv("PAPEREAD_PORT", "8124")
+    monkeypatch.setenv("PAPEREAD_DATA", str(tmp_path / "lib"))
+    monkeypatch.setenv("PAPEREAD_MOCK", "1")
 
     import server.main as main
 
@@ -37,7 +37,7 @@ def test_import_from_local_path(monkeypatch, tmp_path):
         res = client.post(
             "/api/papers/import",
             json={"path": str(pdf)},
-            headers={"X-Paper-Reflow-Token": "import-token"},
+            headers={"X-Paperead-Token": "import-token"},
         )
         assert res.status_code == 200, res.text
         added = res.json()["added"]

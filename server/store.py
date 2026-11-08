@@ -23,7 +23,7 @@ from typing import Any
 
 import pymupdf
 
-log = logging.getLogger("paper-reflow.store")
+log = logging.getLogger("paperead.store")
 
 # 原版 PDF 页图的分辨率范围：太小看不清公式，太大传输慢。
 PAGE_WIDTH_MIN = 480
@@ -144,6 +144,23 @@ class LibraryStore:
 
     def page_dir(self, paper_id: str) -> Path:
         return self.papers_dir / f"{paper_id}_pages"
+
+    def page_sizes(self, paper_id: str) -> list[list[float]]:
+        """每页 [宽, 高]（PDF 点）。前端拿它给原版 PDF 的页图占位。"""
+        pdf = self.pdf_path(paper_id)
+        if not pdf:
+            return []
+        try:
+            doc = pymupdf.open(str(pdf))
+        except Exception:
+            return []
+        try:
+            return [
+                [round(page.rect.width, 1), round(page.rect.height, 1)]
+                for page in doc
+            ]
+        finally:
+            doc.close()
 
     def render_page(self, paper_id: str, page: int, width: int = 1400) -> bytes | None:
         """把 PDF 的第 N 页（1 起）渲染成 PNG。用于阅读页「原版 PDF」视图。

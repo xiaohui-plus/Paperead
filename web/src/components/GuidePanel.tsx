@@ -10,7 +10,7 @@ interface Props {
 }
 
 function masteredKey(paperId: string) {
-  return `paper-reflow.mastered.${paperId}`
+  return `paperead.mastered.${paperId}`
 }
 
 export function GuidePanel({ paperId, onOpenSettings, settingsVersion = 0 }: Props) {

@@ -30,6 +30,7 @@ export async function loadPaper(paperId = 'demo'): Promise<Paper> {
     authors: data.authors ?? '',
     affiliation: '',
     page_count: data.page_count ?? 0,
+    page_sizes: data.page_sizes ?? [],
     columns: data.columns ?? 1,
     glossary: data.glossary ?? {},
     blocks: data.blocks ?? [],

@@ -18,10 +18,10 @@ if (-not (Test-Path (Join-Path $root "web\dist\index.html"))) {
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 
-& $py -m PyInstaller packaging\paper-reflow-server.spec --noconfirm --clean --distpath dist-sidecar --workpath build-sidecar
+& $py -m PyInstaller packaging\paperead-server.spec --noconfirm --clean --distpath dist-sidecar --workpath build-sidecar
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller 失败" }
 
-$exe = Join-Path $root "dist-sidecar\paper-reflow-server\paper-reflow-server.exe"
+$exe = Join-Path $root "dist-sidecar\paperead-server\paperead-server.exe"
 if (-not (Test-Path $exe)) { throw "没有产出 $exe" }
 
 $size = [math]::Round(((Get-ChildItem (Split-Path $exe) -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 1)

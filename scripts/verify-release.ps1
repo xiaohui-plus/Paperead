@@ -4,15 +4,15 @@ Set-Location $root
 
 $config = Get-Content "src-tauri\tauri.conf.json" -Raw | ConvertFrom-Json
 $version = $config.version
-$installer = Join-Path $root "release\paper-reflow_${version}_x64-setup.exe"
-$portable = Join-Path $root "release\paper-reflow_${version}_portable_x64.zip"
+$installer = Join-Path $root "release\Paperead_${version}_x64-setup.exe"
+$portable = Join-Path $root "release\Paperead_${version}_portable_x64.zip"
 $sums = Join-Path $root "release\SHA256SUMS.txt"
 
 $errors = @()
 if (-not (Test-Path $installer)) { $errors += "缺少安装包：$installer" }
 if (-not (Test-Path "$installer.sig")) { $errors += "缺少更新签名：$installer.sig" }
 if (-not (Test-Path $portable)) { $errors += "缺少便携包：$portable" }
-if (-not (Test-Path "src-tauri\resources\paper-reflow-server\paper-reflow-server.exe")) {
+if (-not (Test-Path "src-tauri\resources\paperead-server\paperead-server.exe")) {
     $errors += "缺少已 stage 的 sidecar"
 }
 

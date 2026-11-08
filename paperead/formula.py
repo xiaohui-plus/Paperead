@@ -19,6 +19,7 @@ import os
 import re
 from pathlib import Path
 
+from .env import env, migrate_legacy_dir
 from .layout import Block
 from .llm import LLMConfig, OpenAICompatBackend, chat, set_backend
 
@@ -76,8 +77,12 @@ def validate_latex(tex: str) -> tuple[bool, str]:
 
 
 def _cache_dir() -> Path:
-    root = os.getenv("PAPER_REFLOW_CACHE")
-    base = Path(root) if root else Path.home() / ".cache" / "paper-reflow"
+    root = env("PAPEREAD_CACHE")
+    if root:
+        base = Path(root)
+    else:
+        cache = Path.home() / ".cache"
+        base = migrate_legacy_dir(cache / "paperead", cache / "paper-reflow")
     d = base / "formula"
     d.mkdir(parents=True, exist_ok=True)
     return d

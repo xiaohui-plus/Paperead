@@ -9,8 +9,8 @@ import json
 import httpx
 from fastapi.testclient import TestClient
 
-from paper_reflow import llm as llm_mod
-from paper_reflow.tutor import memory as memlib
+from paperead import llm as llm_mod
+from paperead.tutor import memory as memlib
 
 
 BLOCKS = [
@@ -108,11 +108,11 @@ class WriterBlockingBackend(MemoryBackend):
 
 
 def _load_main(monkeypatch, tmp_path):
-    monkeypatch.setenv("PAPER_REFLOW_DATA", str(tmp_path / "lib"))
-    monkeypatch.setenv("PAPER_REFLOW_MOCK", "1")
-    monkeypatch.setenv("PAPER_REFLOW_MEMORY", "1")
-    monkeypatch.setenv("PAPER_REFLOW_API_KEY", "test-key")
-    monkeypatch.delenv("PAPER_REFLOW_TOKEN", raising=False)
+    monkeypatch.setenv("PAPEREAD_DATA", str(tmp_path / "lib"))
+    monkeypatch.setenv("PAPEREAD_MOCK", "1")
+    monkeypatch.setenv("PAPEREAD_MEMORY", "1")
+    monkeypatch.setenv("PAPEREAD_API_KEY", "test-key")
+    monkeypatch.delenv("PAPEREAD_TOKEN", raising=False)
 
     import server.main as main
 

@@ -1,8 +1,8 @@
-# paper-reflow 桌面版 M0（基础打包）实施计划
+# Paperead 桌面版 M0（基础打包）实施计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 让现有 FastAPI 应用在 PyInstaller 打包后仍能正确找到前端资源、使用独立数据目录、接受壳传入的端口与 token，并产出一个可独立运行的 `paper-reflow-server.exe`。
+**Goal:** 让现有 FastAPI 应用在 PyInstaller 打包后仍能正确找到前端资源、使用独立数据目录、接受壳传入的端口与 token，并产出一个可独立运行的 `paperead-server.exe`。
 
 **Architecture:** 新增 `server/runtime.py` 负责 frozen 路径、数据目录、token；`server/main.py` 改为使用它，并加 cookie/header 鉴权中间件；PyInstaller 用 onedir + noconsole 打包，spec 把 `web/dist` 作为数据目录带入。
 
@@ -15,7 +15,7 @@
 - 新增 `server/runtime.py`：运行环境探测（frozen / 路径 / 数据目录 / token / allowed origins）。
 - 修改 `server/main.py`：使用 runtime 模块；health 返回版本；鉴权中间件；`uvicorn.run(app, ...)`。
 - 新增 `packaging/server_entry.py`：PyInstaller 入口。
-- 新增 `packaging/paper-reflow-server.spec`：打包配置。
+- 新增 `packaging/paperead-server.spec`：打包配置。
 - 新增 `scripts/build-sidecar.ps1`：可复现构建。
 - 新增 `scripts/smoke-sidecar.ps1`：启动 exe 并验证 health/鉴权/静态页。
 - 新增 `tests/test_runtime.py`：路径与 token 单测。
@@ -165,16 +165,16 @@ def test_web_dist_uses_meipass_when_frozen(monkeypatch, tmp_path):
 
 
 def test_default_data_dir_prefers_env(monkeypatch, tmp_path):
-    monkeypatch.setenv("PAPER_REFLOW_DATA", str(tmp_path / "lib"))
+    monkeypatch.setenv("PAPEREAD_DATA", str(tmp_path / "lib"))
     assert default_data_dir() == (tmp_path / "lib").resolve()
 
 
 def test_default_data_dir_uses_localappdata_when_frozen(monkeypatch, tmp_path):
-    monkeypatch.delenv("PAPER_REFLOW_DATA", raising=False)
+    monkeypatch.delenv("PAPEREAD_DATA", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "bundle"), raising=False)
-    assert default_data_dir() == tmp_path / "paper-reflow"
+    assert default_data_dir() == tmp_path / "paperead-data"
 
 
 def test_ensure_data_dir_creates_layout(tmp_path):
@@ -211,7 +211,7 @@ import secrets
 import sys
 from pathlib import Path
 
-APP_NAME = "paper-reflow"
+APP_NAME = "Paperead"
 
 
 def is_frozen() -> bool:
@@ -230,7 +230,7 @@ def web_dist() -> Path:
 
 
 def default_data_dir() -> Path:
-    env = os.getenv("PAPER_REFLOW_DATA")
+    env = os.getenv("PAPEREAD_DATA")
     if env:
         return Path(env).expanduser().resolve()
     if is_frozen():
@@ -286,7 +286,7 @@ git commit -m "feat(server): add runtime path and data-dir detection"
 ```python
 from fastapi import Request
 from fastapi.responses import JSONResponse
-from paper_reflow import __version__
+from paperead import __version__
 from server.runtime import (
     allowed_origins,
     default_data_dir,
@@ -301,7 +301,7 @@ from server.runtime import (
 ```python
 ROOT = Path(__file__).resolve().parent.parent
 WEB_DIST = ROOT / "web" / "dist"
-DATA_DIR = Path(os.getenv("PAPER_REFLOW_DATA", str(ROOT / "data")))
+DATA_DIR = Path(os.getenv("PAPEREAD_DATA", str(ROOT / "data")))
 ```
 
 改为：
@@ -309,8 +309,8 @@ DATA_DIR = Path(os.getenv("PAPER_REFLOW_DATA", str(ROOT / "data")))
 ```python
 WEB_DIST = web_dist()
 DATA_DIR = ensure_data_dir(default_data_dir())
-PORT = int(os.getenv("PAPER_REFLOW_PORT", "8010"))
-TOKEN = os.getenv("PAPER_REFLOW_TOKEN", "")
+PORT = int(os.getenv("PAPEREAD_PORT", "8010"))
+TOKEN = os.getenv("PAPEREAD_TOKEN", "")
 ORIGINS = allowed_origins(PORT)
 ```
 
@@ -326,7 +326,7 @@ async def guard(request: Request, call_next):
     path = request.url.path
     if path.startswith("/api"):
         supplied = request.cookies.get("pr_token") or request.headers.get(
-            "x-paper-reflow-token"
+            "x-paperead-token"
         )
         if TOKEN and supplied != TOKEN:
             return JSONResponse({"detail": "unauthorized"}, status_code=403)
@@ -376,7 +376,7 @@ def main() -> None:
     import uvicorn
 
     _setup_logging()
-    log.info("paper-reflow %s 启动：http://127.0.0.1:%d（数据：%s）", __version__, PORT, DATA_DIR)
+    log.info("Paperead %s 启动：http://127.0.0.1:%d（数据：%s）", __version__, PORT, DATA_DIR)
     uvicorn.run(app, host="127.0.0.1", port=PORT, log_config=None, access_log=False)
 ```
 
@@ -398,7 +398,7 @@ git commit -m "feat(server): support frozen paths, token auth and health metadat
 
 **Files:**
 - Create: `packaging/server_entry.py`
-- Create: `packaging/paper-reflow-server.spec`
+- Create: `packaging/paperead-server.spec`
 - Create: `packaging/version_info.txt`
 - Create: `scripts/build-sidecar.ps1`
 
@@ -415,7 +415,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: spec**
 
 ```python
-# packaging/paper-reflow-server.spec
+# packaging/paperead-server.spec
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all
@@ -448,7 +448,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="paper-reflow-server",
+    name="paperead-server",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -456,7 +456,7 @@ exe = EXE(
     console=False,
     icon=None,
 )
-coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="paper-reflow-server")
+coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="paperead-server")
 ```
 
 - [ ] **Step 3: 构建脚本**
@@ -480,10 +480,10 @@ if (-not (Test-Path (Join-Path $root "web\dist\index.html"))) {
     Pop-Location
 }
 
-& $py -m PyInstaller packaging\paper-reflow-server.spec --noconfirm --clean
+& $py -m PyInstaller packaging\paperead-server.spec --noconfirm --clean
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller 失败" }
 
-$exe = Join-Path $root "dist-sidecar\paper-reflow-server\paper-reflow-server.exe"
+$exe = Join-Path $root "dist-sidecar\paperead-server\paperead-server.exe"
 if (-not (Test-Path $exe)) { throw "没有产出 $exe" }
 Write-Host "OK: $exe"
 ```
@@ -494,7 +494,7 @@ Run:
 ```powershell
 .\scripts\build-sidecar.ps1
 ```
-Expected: `OK: ...\dist-sidecar\paper-reflow-server\paper-reflow-server.exe`.
+Expected: `OK: ...\dist-sidecar\paperead-server\paperead-server.exe`.
 
 - [ ] **Step 5: 提交**
 
@@ -516,15 +516,15 @@ git commit -m "build: add PyInstaller sidecar spec and build script"
 # scripts/smoke-sidecar.ps1
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
-$exe = Join-Path $root "dist-sidecar\paper-reflow-server\paper-reflow-server.exe"
-$data = Join-Path $env:TEMP ("paper-reflow-smoke-" + [guid]::NewGuid().ToString("N"))
+$exe = Join-Path $root "dist-sidecar\paperead-server\paperead-server.exe"
+$data = Join-Path $env:TEMP ("paperead-smoke-" + [guid]::NewGuid().ToString("N"))
 $port = 8123
 $token = "smoke-token"
 
-$env:PAPER_REFLOW_PORT = "$port"
-$env:PAPER_REFLOW_DATA = $data
-$env:PAPER_REFLOW_TOKEN = $token
-$env:PAPER_REFLOW_MOCK = "1"
+$env:PAPEREAD_PORT = "$port"
+$env:PAPEREAD_DATA = $data
+$env:PAPEREAD_TOKEN = $token
+$env:PAPEREAD_MOCK = "1"
 
 $proc = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden
 try {
@@ -532,7 +532,7 @@ try {
     for ($i = 0; $i -lt 60; $i++) {
         Start-Sleep -Milliseconds 500
         try {
-            $r = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/health" -Headers @{ "X-Paper-Reflow-Token" = $token } -TimeoutSec 2
+            $r = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/health" -Headers @{ "X-Paperead-Token" = $token } -TimeoutSec 2
             if ($r.ok) { $ok = $true; break }
         } catch {}
     }
@@ -549,7 +549,7 @@ try {
 
     $page = Invoke-WebRequest -Uri "http://127.0.0.1:$port/" -UseBasicParsing -TimeoutSec 5
     if ($page.StatusCode -ne 200) { throw "首页不是 200" }
-    if ($page.Content -notmatch "paper-reflow") { throw "首页内容不对" }
+    if ($page.Content -notmatch "Paperead") { throw "首页内容不对" }
 
     Write-Host "SMOKE OK version=$($r.version) data=$($r.data)"
 } finally {
@@ -565,7 +565,7 @@ Expected: `SMOKE OK version=0.1.0 ...`.
 
 - [ ] **Step 3: 检查残留进程**
 
-Run: `Get-Process paper-reflow-server -ErrorAction SilentlyContinue`
+Run: `Get-Process paperead-server -ErrorAction SilentlyContinue`
 Expected: 无输出。
 
 - [ ] **Step 4: 提交**
@@ -595,7 +595,7 @@ Expected: `SMOKE OK`.
 
 - [ ] **Step 3: 查看产物大小**
 
-Run: `Get-ChildItem dist-sidecar\paper-reflow-server | Measure-Object Length -Sum`
+Run: `Get-ChildItem dist-sidecar\paperead-server | Measure-Object Length -Sum`
 Expected: 80–150MB。
 
 - [ ] **Step 4: 提交**

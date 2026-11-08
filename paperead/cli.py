@@ -1,15 +1,15 @@
 """命令行入口。
 
     # 只解析，导出结构化块
-    paper-reflow paper.pdf -o out
+    paperead paper.pdf -o out
 
     # 解析 + 全文翻译
-    paper-reflow paper.pdf -o out --translate
+    paperead paper.pdf -o out --translate
 
     # 只翻前 20 段，先看效果
-    paper-reflow paper.pdf -o out --translate --limit 20
+    paperead paper.pdf -o out --translate --limit 20
 
-也可以直接用模块方式跑：python -m paper_reflow.cli paper.pdf --translate
+也可以直接用模块方式跑：python -m paperead.cli paper.pdf --translate
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from .translate import build_glossary, translate_paper
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="paper-reflow",
+        prog="paperead",
         description="学术论文 PDF 版面重排 + 英中逐段翻译",
     )
     p.add_argument("pdf", help="PDF 路径")

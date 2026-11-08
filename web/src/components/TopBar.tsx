@@ -1,6 +1,6 @@
 import type { Paper, ViewMode } from '../types'
 import { downloadMarkdown } from '../lib/markdown'
-import { IconBack, IconDownload, IconMinus, IconPdf, IconPlus, IconPrint, IconSettings } from './icons'
+import { IconBack, IconCollapse, IconDownload, IconExpand, IconMinus, IconPdf, IconPlus, IconPrint, IconSettings } from './icons'
 
 interface Props {
   paper: Paper
@@ -22,6 +22,8 @@ interface Props {
   pdfMode: boolean
   onTogglePdf: () => void
   pdfHref: string
+  pdfExpanded: boolean
+  onTogglePdfExpand: () => void
 }
 
 const MODES: { key: ViewMode; label: string }[] = [
@@ -49,6 +51,8 @@ export function TopBar({
   pdfMode,
   onTogglePdf,
   pdfHref,
+  pdfExpanded,
+  onTogglePdfExpand,
 }: Props) {
   const pct = total ? Math.round((translated / total) * 100) : 0
 
@@ -60,10 +64,8 @@ export function TopBar({
         </button>
       )}
       <div className="brand">
-        <span className="brand-mark">R</span>
-        <span className="brand-name">
-          paper<i>·</i>reflow
-        </span>
+        <span className="brand-mark">P</span>
+        <span className="brand-name">Paperead</span>
       </div>
 
       <div className="divider" />
@@ -116,6 +118,18 @@ export function TopBar({
             onClick={onTogglePdf}
           >
             <IconPdf />
+          </button>
+        )}
+
+        {pdfMode && (
+          <button
+            className="icon-btn"
+            data-active={pdfExpanded}
+            aria-pressed={pdfExpanded}
+            title={pdfExpanded ? '收起全宽，保留左侧面板' : '展开原版到全宽'}
+            onClick={onTogglePdfExpand}
+          >
+            {pdfExpanded ? <IconCollapse /> : <IconExpand />}
           </button>
         )}
 

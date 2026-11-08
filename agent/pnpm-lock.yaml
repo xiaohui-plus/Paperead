@@ -226,7 +226,7 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 0.1.0-rc.6
         version: 0.1.0-rc.6(f8724372086ccc1457fc84e7becee2e0)
-      '@paper-reflow/dsh-research':
+      '@paperead/dsh-research':
         specifier: file:./bundle
         version: file:bundle
 
@@ -2715,7 +2715,7 @@ packages:
     resolution: {integrity: sha512-aOP45mbcOKbQVvFWfQmgoOPT8R2iwbbbgl83k4CujGV9BrJhFr3qG55MFpwFs4YLabpuW3HhzUY9eQxPlDqaZw==}
     engines: {node: '>=14'}
 
-  '@paper-reflow/dsh-research@file:bundle':
+  '@paperead/dsh-research@file:bundle':
     resolution: {directory: bundle, type: directory}
 
   '@protobufjs/aspromise@1.1.2':
@@ -6903,7 +6903,7 @@ snapshots:
 
   '@opentelemetry/semantic-conventions@1.45.0': {}
 
-  '@paper-reflow/dsh-research@file:bundle': {}
+  '@paperead/dsh-research@file:bundle': {}
 
   '@protobufjs/aspromise@1.1.2': {}
 

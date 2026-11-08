@@ -8,12 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from paper_reflow.tutor import memory as memlib
+from paperead.tutor import memory as memlib
 
 
 @pytest.fixture
 def store(tmp_path, monkeypatch):
-    monkeypatch.setenv("PAPER_REFLOW_MEMORY", "1")
+    monkeypatch.setenv("PAPEREAD_MEMORY", "1")
     return memlib.MemoryStore(tmp_path)
 
 
@@ -391,7 +391,7 @@ def test_seed_clears_forget_tombstone(store):
 
 
 def test_memory_disabled_writes_no_files(tmp_path, monkeypatch):
-    monkeypatch.setenv("PAPER_REFLOW_MEMORY", "0")
+    monkeypatch.setenv("PAPEREAD_MEMORY", "0")
     store = memlib.MemoryStore(tmp_path)
     msg, cached = store.begin_question("p1", "q", "c1")
     assert cached is None
@@ -1003,7 +1003,7 @@ def test_brief_disabled_returns_empty(store, monkeypatch):
         "p1",
         {"summary": "用户已经理解了消息传递，正在关心 BST 的时间复杂度，还没有搞懂与 SEAL 的对比是否公平。"},
     )
-    monkeypatch.setenv("PAPER_REFLOW_MEMORY", "0")
+    monkeypatch.setenv("PAPEREAD_MEMORY", "0")
     assert store.build_brief("p1", "消息传递怎么用") == ""
 
 

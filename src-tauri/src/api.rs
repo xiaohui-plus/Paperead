@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 pub fn health(port: u16, token: &str) -> Result<Value, String> {
     let url = format!("http://127.0.0.1:{port}/api/health");
     let response = ureq::get(&url)
-        .set("X-Paper-Reflow-Token", token)
+        .set("X-Paperead-Token", token)
         .timeout(Duration::from_millis(800))
         .call()
         .map_err(|error| error.to_string())?;
@@ -29,7 +29,7 @@ pub fn agent_health(port: u16, token: &str) -> Result<Value, String> {
 pub fn import_pdf(port: u16, token: &str, path: &str) -> Result<String, String> {
     let url = format!("http://127.0.0.1:{port}/api/papers/import");
     let response = ureq::post(&url)
-        .set("X-Paper-Reflow-Token", token)
+        .set("X-Paperead-Token", token)
         .timeout(Duration::from_secs(120))
         .send_json(json!({ "path": path }))
         .map_err(|error| error.to_string())?;

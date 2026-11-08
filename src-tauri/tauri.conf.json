@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "paper-reflow",
+  "productName": "Paperead",
   "version": "0.1.0",
-  "identifier": "com.paperreflow.desktop",
+  "identifier": "com.paperead.desktop",
   "build": {
     "frontendDist": "../web/dist",
     "beforeBuildCommand": "npm --prefix web run build"
@@ -26,7 +26,7 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "resources/paper-reflow-server"
+      "resources/paperead-server"
     ],
     "windows": {
       "webviewInstallMode": {

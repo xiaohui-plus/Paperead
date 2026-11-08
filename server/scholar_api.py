@@ -1,6 +1,6 @@
 """文献检索的 HTTP 接口。
 
-路由用工厂函数构造：检索本身在 `paper_reflow.scholar` 里，写入文献库的能力由
+路由用工厂函数构造：检索本身在 `paperead.scholar` 里，写入文献库的能力由
 `server.main` 注入（`store` 与「加一篇 PDF 并后台解析」的回调），避免循环依赖。
 """
 
@@ -12,14 +12,14 @@ from typing import Any, Callable
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from paper_reflow.scholar import search as scholar_search
-from paper_reflow.scholar.cite import STYLE_KEYS, build_bibtex, build_ris, format_citation
-from paper_reflow.scholar.daily import get_daily
-from paper_reflow.scholar.http import FriendlyError
-from paper_reflow.scholar.models import paper_from_dict
-from paper_reflow.scholar.search import SearchInput
+from paperead.scholar import search as scholar_search
+from paperead.scholar.cite import STYLE_KEYS, build_bibtex, build_ris, format_citation
+from paperead.scholar.daily import get_daily
+from paperead.scholar.http import FriendlyError
+from paperead.scholar.models import paper_from_dict
+from paperead.scholar.search import SearchInput
 
-log = logging.getLogger("paper-reflow.scholar")
+log = logging.getLogger("paperead.scholar")
 
 # 一次最多导出 100 条，避免前端误传巨大数组。
 MAX_EXPORT = 100

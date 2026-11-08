@@ -1,4 +1,4 @@
-# paper-reflow 桌面版设计
+# Paperead 桌面版设计
 
 - 状态：已获用户批准（2026-11-08）
 - 目标平台：Windows 10/11 x64（首发）
@@ -7,7 +7,7 @@
 
 ## 1. 背景与目标
 
-paper-reflow 目前是「FastAPI 本地服务 + React 构建产物 + `data/` 目录」的 local-first
+Paperead 目前是「FastAPI 本地服务 + React 构建产物 + `data/` 目录」的 local-first
 Web 应用。使用者需要自己装 Python、建虚拟环境、跑 `start.bat`，再打开浏览器。
 
 桌面版的目标是让其他研究者**下载一个安装包、双击安装、双击启动**，不需要 Python、
@@ -39,7 +39,7 @@ Node 或命令行；同时保留现有的全部能力：PDF 版面重排、按�
 
 - 在干净 Windows 11（无 Python/Node）上安装、启动、导入、翻译、重启后数据仍在。
 - 中文用户名/中文路径/带空格路径正常。
-- 退出后无残留 `paper-reflow-server.exe` 进程。
+- 退出后无残留 `paperead-server.exe` 进程。
 - 端口冲突时自动换端口。
 - 0.1.0 → 0.1.1 应用内升级成功。
 - 断网启动不崩溃，AI 功能给出明确提示。
@@ -49,8 +49,8 @@ Node 或命令行；同时保留现有的全部能力：PDF 版面重排、按�
 ```
 Tauri 2 壳 (Rust)
   ├─ 选空闲端口 + 生成随机 token
-  ├─ 启动 sidecar: paper-reflow-server.exe
-  │    env: PAPER_REFLOW_PORT / PAPER_REFLOW_DATA / PAPER_REFLOW_TOKEN
+  ├─ 启动 sidecar: paperead-server.exe
+  │    env: PAPEREAD_PORT / PAPEREAD_DATA / PAPEREAD_TOKEN
   ├─ 轮询 /api/health 直到 200
   └─ 打开窗口: http://127.0.0.1:<port>
         └─ FastAPI 托管 web/dist + 全部 /api
@@ -67,13 +67,13 @@ Tauri 2 壳 (Rust)
 - Tauri 启动时在 Rust 侧 `TcpListener::bind("127.0.0.1:0")` 取空闲端口，关闭监听后
   把端口通过环境变量传给 sidecar；sidecar 绑定失败则退出，壳换端口重试。
 - 壳生成 128-bit 随机 token，sidecar 通过环境变量接收。
-- 壳轮询 `/api/health`（带 `X-Paper-Reflow-Token`），200 后显示主窗口；失败重试
+- 壳轮询 `/api/health`（带 `X-Paperead-Token`），200 后显示主窗口；失败重试
   最多 10 秒，连续 3 次启动失败弹出原生错误框（重试 / 打开日志 / 退出）。
 - sidecar 放入 Windows Job Object（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`），壳退出或
   崩溃时整棵进程树被终止，避免孤儿进程。
 - `tauri-plugin-single-instance`：第二次启动聚焦已有窗口；带 PDF 路径启动时把路径
   交给已运行实例。
-- 日志：`%LOCALAPPDATA%\paper-reflow-data\logs\app.log` 与 `server.log`，滚动 5MB × 3；
+- 日志：`%LOCALAPPDATA%\paperead-data\logs\app.log` 与 `server.log`，滚动 5MB × 3；
   不记录 API Key。
 
 ### 前端与原生能力的边界
@@ -89,7 +89,7 @@ Tauri 2 壳 (Rust)
 
 - 只绑定 `127.0.0.1`，不监听 `0.0.0.0`。
 - 首页响应下发 `pr_token` cookie：`HttpOnly; SameSite=Strict; Path=/`。
-- `/api/*` 中间件校验 cookie 或 `X-Paper-Reflow-Token`；`/api/health` 接受 header。
+- `/api/*` 中间件校验 cookie 或 `X-Paperead-Token`；`/api/health` 接受 header。
 - 校验 `Origin`（如存在）必须是 `http://127.0.0.1:<port>`；开发模式额外允许
   `http://localhost:5173`。
 - 生产环境移除宽松 CORS。
@@ -101,9 +101,9 @@ Tauri 2 壳 (Rust)
 
 ## 5. 数据
 
-- 数据根目录：`%LOCALAPPDATA%\paper-reflow-data`，通过 `PAPER_REFLOW_DATA` 传给 sidecar。
+- 数据根目录：`%LOCALAPPDATA%\paperead-data`，通过 `PAPEREAD_DATA` 传给 sidecar。
 - 结构沿用现有 `data/`：`library.json`、`papers/{id}.pdf|.blocks.json|.thumb.png|...`。
-- 安装目录：`%LOCALAPPDATA%\paper-reflow`（Tauri NSIS currentUser 默认），per-user，不弹 UAC。
+- 安装目录：`%LOCALAPPDATA%\Paperead`（Tauri NSIS currentUser 默认），per-user，不弹 UAC。
   数据目录与安装目录分开，避免卸载/升级删掉文献库。
 - `library.json` 改为原子写：临时文件 + `os.replace`，并在 `backups/` 保留上一版。
 - 增加 `schema_version`，升级时做迁移；MVP 只需写入版本号。
@@ -123,7 +123,7 @@ Tauri 2 壳 (Rust)
 - `bundle.targets = ["nsis"]`；`installMode = "currentUser"`。
 - `webviewInstallMode = "embedBootstrapper"`（安装时按需下载 WebView2）。
 - `externalBin` 放 sidecar；文件按 target triple 命名：
-  `paper-reflow-server-x86_64-pc-windows-msvc.exe`。
+  `paperead-server-x86_64-pc-windows-msvc.exe`。
 - 安装包预计 90–130MB。
 
 ### CI / 发布
@@ -186,7 +186,7 @@ GitHub Actions `windows-latest`：
 
 - [ ] 干净 Windows 11（无 Python/Node）安装、启动、导入、翻译、重启后数据仍在。
 - [ ] 中文用户名、中文路径、带空格路径正常。
-- [ ] 退出后任务管理器没有残留 `paper-reflow-server.exe`。
+- [ ] 退出后任务管理器没有残留 `paperead-server.exe`。
 - [ ] 端口被占用时自动换端口。
 - [ ] 断网启动不崩，AI 功能给出明确提示。
 - [ ] 0.1.0 → 0.1.1 应用内升级成功。

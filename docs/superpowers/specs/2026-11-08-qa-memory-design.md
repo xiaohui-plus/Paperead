@@ -2,9 +2,9 @@
 
 - 版本：v1（设计稿）
 - 日期：2026-11-08
-- 状态：已实现。核心在 `paper_reflow/tutor/memory.py`，服务端接线在 `server/main.py` 的 `/ask`、`/ask/stream`、`GET /chat`，前端在 `ChatPanel`。
+- 状态：已实现。核心在 `paperead/tutor/memory.py`，服务端接线在 `server/main.py` 的 `/ask`、`/ask/stream`、`GET /chat`，前端在 `ChatPanel`。
 - 范围：阅读页「问答」tab 的记忆能力（持久化、追问、研究者画像、概念理解、跨论文）
-- 关联：`docs/design-tutor.md` §4.5（三路问答）、`paper_reflow/tutor/qa.py`、`server/main.py` `/ask`、`web/src/components/ChatPanel.tsx`
+- 关联：`docs/design-tutor.md` §4.5（三路问答）、`paperead/tutor/qa.py`、`server/main.py` `/ask`、`web/src/components/ChatPanel.tsx`
 
 > 一句话：让问答从"每次都是陌生人"变成"一个记得你读到哪、懂到哪、爱怎么听的助教"。
 > 约束：单用户本地服务，后续封装成桌面软件；记忆隐式形成，不提供记忆管理界面。
@@ -313,7 +313,7 @@ data/
 ## 7. 失败与边界
 
 - **损坏自愈**：任何记忆文件解析失败 / 版本高于当前 → 改名 `.bak`，以空记忆继续；回答不受影响。
-- **总开关**：`PAPER_REFLOW_MEMORY=0` 时完全不读写记忆，行为回到当前版本。
+- **总开关**：`PAPEREAD_MEMORY=0` 时完全不读写记忆，行为回到当前版本。
 - **删除**：删论文连带删 `{id}.chat.json`；删 `data/memory/` 等于"忘掉我"。
 - **规模**：消息永久保留；旧轮检索只看最近 400 条；单文件无硬上限，但每轮 prompt 预算固定。
 - **隐私**：记忆摘要会随 prompt 发给模型厂商；只存研究相关维度，白名单不含姓名、单位、联系方式，不做 PII 推断；API Key 仍只在 localStorage、不落盘。
@@ -336,7 +336,7 @@ POST /api/papers/{id}/ask
 +  → { messages: [...], hasMore: bool }     # 按时间升序
 ```
 
-- `GET /chat`：论文不存在返回 404；没有记忆文件返回空列表；`PAPER_REFLOW_MEMORY=0` 时同样返回空列表。
+- `GET /chat`：论文不存在返回 404；没有记忆文件返回空列表；`PAPEREAD_MEMORY=0` 时同样返回空列表。
 - `before` 用于向前翻页（按 `messages` 中 id 定位）。
 - 不新增任何记忆相关端点（用户明确不要管理界面）。
 

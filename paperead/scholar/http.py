@@ -20,13 +20,15 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
+from paperead.env import env
+
 log = logging.getLogger(__name__)
 
 # arXiv 官方要求 User-Agent 带上应用名与联系方式。
 # Unpaywall 会拒绝 example.com 这类占位邮箱（422），默认用一个可用的项目地址；
-# 部署方可以通过 PAPER_REFLOW_MAILTO 换成自己的邮箱，走礼貌池也更稳。
-CONTACT_EMAIL = os.getenv("PAPER_REFLOW_MAILTO", "paper-reflow@users.noreply.github.com")
-USER_AGENT = f"paper-reflow/0.1 (mailto:{CONTACT_EMAIL})"
+# 部署方可以通过 PAPEREAD_MAILTO 换成自己的邮箱，走礼貌池也更稳。
+CONTACT_EMAIL = env("PAPEREAD_MAILTO", "paperead@users.noreply.github.com")
+USER_AGENT = f"Paperead/0.1 (mailto:{CONTACT_EMAIL})"
 _HEADERS = {"User-Agent": USER_AGENT, "Accept": "*/*"}
 
 TIMEOUT_S = 12.0

@@ -6,7 +6,7 @@ from urllib.parse import unquote
 
 import pytest
 
-from paper_reflow.scholar.models import (
+from paperead.scholar.models import (
     Paper,
     clean_html_text,
     decode_xml,
@@ -17,7 +17,7 @@ from paper_reflow.scholar.models import (
     strip_doi,
     strip_latex_pointers,
 )
-from paper_reflow.scholar.sources import (
+from paperead.scholar.sources import (
     build_arxiv_query,
     encode_phrase,
     europe_pmc_url,
@@ -337,6 +337,6 @@ def test_paper_to_dict_is_api_shape():
 
 @pytest.mark.parametrize("value", [None, "", "not-a-year-99999"])
 def test_normalize_year_rejects_bad_values(value):
-    from paper_reflow.scholar.models import normalize_year
+    from paperead.scholar.models import normalize_year
 
     assert normalize_year(value) is None

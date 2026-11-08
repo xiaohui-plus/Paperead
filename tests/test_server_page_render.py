@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import time
 
 import pymupdf
 from fastapi.testclient import TestClient
@@ -23,10 +24,10 @@ def make_pdf(path, pages: int = 2) -> None:
 
 
 def boot(monkeypatch, tmp_path, token: str = "page-token"):
-    monkeypatch.setenv("PAPER_REFLOW_TOKEN", token)
-    monkeypatch.setenv("PAPER_REFLOW_PORT", "8125")
-    monkeypatch.setenv("PAPER_REFLOW_DATA", str(tmp_path / "lib"))
-    monkeypatch.setenv("PAPER_REFLOW_MOCK", "1")
+    monkeypatch.setenv("PAPEREAD_TOKEN", token)
+    monkeypatch.setenv("PAPEREAD_PORT", "8125")
+    monkeypatch.setenv("PAPEREAD_DATA", str(tmp_path / "lib"))
+    monkeypatch.setenv("PAPEREAD_MOCK", "1")
 
     import server.main as main
 
@@ -38,7 +39,7 @@ def test_render_page_endpoint_caches_png(monkeypatch, tmp_path):
     pdf = tmp_path / "sample.pdf"
     make_pdf(pdf, pages=2)
     _main, client, token = boot(monkeypatch, tmp_path)
-    headers = {"X-Paper-Reflow-Token": token}
+    headers = {"X-Paperead-Token": token}
 
     with client:
         added = client.post("/api/papers/import", json={"path": str(pdf)}, headers=headers)
@@ -56,12 +57,25 @@ def test_render_page_endpoint_caches_png(monkeypatch, tmp_path):
         again = client.get(f"/api/papers/{paper_id}/page/1.png?width=600", headers=headers)
         assert again.content == page.content
 
+        # blocks 接口带上每页尺寸，前端用它给页图占位
+        body = None
+        for _ in range(30):
+            res = client.get(f"/api/papers/{paper_id}/blocks", headers=headers)
+            if res.status_code == 200:
+                body = res.json()
+                break
+            time.sleep(0.1)
+        assert body is not None, "解析一直没完成"
+        assert len(body["page_sizes"]) == 2
+        width, height = body["page_sizes"][0]
+        assert width > 0 and height > width
+
 
 def test_render_page_clamps_width_and_rejects_bad_pages(monkeypatch, tmp_path):
     pdf = tmp_path / "sample.pdf"
     make_pdf(pdf, pages=2)
     _main, client, token = boot(monkeypatch, tmp_path)
-    headers = {"X-Paper-Reflow-Token": token}
+    headers = {"X-Paperead-Token": token}
 
     with client:
         paper_id = client.post(
@@ -82,6 +96,19 @@ def test_render_page_clamps_width_and_rejects_bad_pages(monkeypatch, tmp_path):
         assert (
             client.get("/api/papers/not-a-paper/page/1.png", headers=headers).status_code == 404
         )
+
+
+def test_page_sizes_returns_point_dimensions(tmp_path):
+    pdf = tmp_path / "sample.pdf"
+    make_pdf(pdf, pages=1)
+    store = LibraryStore(tmp_path / "lib")
+    row = store.add("sample.pdf", pdf.read_bytes())
+
+    sizes = store.page_sizes(row["id"])
+    assert len(sizes) == 1
+    width, height = sizes[0]
+    assert width > 0 and height > width  # 默认纵向页面
+    assert store.page_sizes("not-a-paper") == []
 
 
 def test_remove_clears_page_cache(tmp_path):
