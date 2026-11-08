@@ -45,11 +45,11 @@ jobs:
           uv venv .venv-build --python 3.12
           uv pip install --python .venv-build\Scripts\python.exe -e ".[server]" pytest "pyinstaller>=6.10"
 
-      - name: Run backend tests
-        run: .venv-build\Scripts\python.exe -m pytest -q
-
       - name: Build frontend
         run: npm --prefix web run build
+
+      - name: Run backend tests
+        run: .venv-build\Scripts\python.exe -m pytest -q
 
       - name: Build Python sidecar
         shell: pwsh
@@ -72,6 +72,8 @@ jobs:
             Windows 10/11 x64 安装包。
 
             - 安装包：`paper-reflow_*_x64-setup.exe`
+            - 便携版：`paper-reflow_*_portable_x64.zip`
+            - 源码：`paper-reflow_*_source.zip`
             - 自动更新清单：`latest.json`（随 Release 发布）
             - 源码：对应 tag 的 GitHub 源码包
 
