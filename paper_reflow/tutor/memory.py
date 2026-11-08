@@ -517,6 +517,8 @@ class MemoryStore:
         if not enabled():
             return msg
         with self._lock:
+            if paper_id in self._forgotten:
+                return msg
             chat = self.chat(paper_id)
             existing = next(
                 (

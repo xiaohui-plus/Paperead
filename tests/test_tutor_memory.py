@@ -369,6 +369,16 @@ def test_forget_tombstone_blocks_apply_patch_until_new_question(store):
     assert store.profile()["turn_count"] == 1
 
 
+def test_finish_answer_after_forget_does_not_recreate_file(store):
+    user, _ = store.begin_question("p1", "进行中的问题")
+    store.forget("p1")
+
+    ai = store.finish_answer("p1", user["id"], "迟到的回答", [], False, 0.1)
+    assert ai["text"] == "迟到的回答"
+    assert not store.paper_path("p1").exists()
+    assert len(store.chat("p1")["messages"]) == 0
+
+
 def test_seed_clears_forget_tombstone(store):
     store.forget("p1")
     store.seed("p1", title="Paper A")

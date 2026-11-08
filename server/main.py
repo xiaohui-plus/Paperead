@@ -29,6 +29,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 from paper_reflow import __version__
 from paper_reflow.formula import recognize_latex
@@ -238,8 +239,24 @@ _translating: set[str] = set()
 _locks: dict[str, asyncio.Lock] = {}
 # 后台记忆写手的强引用：task -> paper_id，删除论文时要能按论文取消
 _bg_tasks: dict[asyncio.Task, str] = {}
-# 同一个 (paper_id, client_id) 的并发请求串行化，后到的直接命中缓存
-_ask_claims: dict[tuple[str, str], asyncio.Lock] = {}
+
+
+@dataclass
+class _Claim:
+    key: tuple[str, str]
+    lock: asyncio.Lock
+    users: int = 0
+
+
+@dataclass
+class _ClaimRef:
+    claim: _Claim
+    acquired: bool = False
+    released: bool = False
+
+
+# 同一个 (paper_id, client_id) 的并发请求串行化；users 归零即移除，避免无限增长
+_ask_claims: dict[tuple[str, str], _Claim] = {}
 
 
 def _public(row: dict) -> dict:
@@ -605,16 +622,40 @@ def _cached_answer(user_msg: dict, cached: dict) -> dict:
     }
 
 
-def _claim(paper_id: str, client_id: str | None) -> asyncio.Lock | None:
-    """同一个 (paper_id, client_id) 只跑一次生成；没有 client_id 时不上锁。"""
+def _claim(paper_id: str, client_id: str | None) -> _ClaimRef | None:
+    """登记一次 claim 使用；没有 client_id 时不上锁。"""
     if not client_id:
         return None
     key = (paper_id, client_id)
-    lock = _ask_claims.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _ask_claims[key] = lock
-    return lock
+    entry = _ask_claims.get(key)
+    if entry is None:
+        entry = _Claim(key=key, lock=asyncio.Lock())
+        _ask_claims[key] = entry
+    entry.users += 1
+    return _ClaimRef(entry)
+
+
+async def _acquire_claim(ref: _ClaimRef | None) -> None:
+    if ref is None:
+        return
+    try:
+        await ref.claim.lock.acquire()
+    except BaseException:
+        _release_claim(ref)
+        raise
+    ref.acquired = True
+
+
+def _release_claim(ref: _ClaimRef | None) -> None:
+    """幂等释放：generator finally 与 background 任务可能各调一次。"""
+    if ref is None or ref.released:
+        return
+    ref.released = True
+    if ref.acquired:
+        ref.claim.lock.release()
+    ref.claim.users -= 1
+    if ref.claim.users <= 0:
+        _ask_claims.pop(ref.claim.key, None)
 
 
 def _schedule_writer(
@@ -702,8 +743,10 @@ async def ask_paper(paper_id: str, req: AskReq) -> dict:
     _apply_llm_config(req.config)
 
     claim = _claim(paper_id, req.client_id)
-    if claim is not None:
-        await claim.acquire()
+    await _acquire_claim(claim)
+    if claim is not None and not store.get(paper_id):
+        _release_claim(claim)
+        raise HTTPException(status_code=404, detail="论文不存在")
     try:
         t0 = time.time()
         mem = memory_engine.get_store(store.root)
@@ -735,8 +778,7 @@ async def ask_paper(paper_id: str, req: AskReq) -> dict:
             "answer_message_id": ai_msg["id"],
         }
     finally:
-        if claim is not None:
-            claim.release()
+        _release_claim(claim)
 
 
 @app.post("/api/papers/{paper_id}/ask/stream")
@@ -750,34 +792,33 @@ async def ask_stream(paper_id: str, req: AskReq) -> StreamingResponse:
     _apply_llm_config(req.config)
 
     claim = _claim(paper_id, req.client_id)
-    if claim is not None:
-        await claim.acquire()
+    await _acquire_claim(claim)
+    if claim is not None and not store.get(paper_id):
+        _release_claim(claim)
+        raise HTTPException(status_code=404, detail="论文不存在")
     try:
         mem = memory_engine.get_store(store.root)
         _seed_memory(mem, paper_id)
         user_msg, cached = mem.begin_question(paper_id, req.question, req.client_id)
     except BaseException:
-        if claim is not None:
-            claim.release()
+        _release_claim(claim)
         raise
 
     if cached is not None:
+        # 缓存回放不需要一直占着 claim，返回前就释放
+        _release_claim(claim)
 
         async def cached_gen():
-            try:
-                yield _sse({"type": "status", "stage": "retrieving"})
-                yield _sse(
-                    {
-                        "type": "sources",
-                        "sources": cached.get("sources") or [],
-                        "usedWeb": bool(cached.get("used_web")),
-                    }
-                )
-                yield _sse({"type": "delta", "text": cached.get("text", "")})
-                yield _sse({"type": "done", "latency": cached.get("latency", 0.0)})
-            finally:
-                if claim is not None:
-                    claim.release()
+            yield _sse({"type": "status", "stage": "retrieving"})
+            yield _sse(
+                {
+                    "type": "sources",
+                    "sources": cached.get("sources") or [],
+                    "usedWeb": bool(cached.get("used_web")),
+                }
+            )
+            yield _sse({"type": "delta", "text": cached.get("text", "")})
+            yield _sse({"type": "done", "latency": cached.get("latency", 0.0)})
 
         return StreamingResponse(
             cached_gen(),
@@ -834,9 +875,9 @@ async def ask_stream(paper_id: str, req: AskReq) -> StreamingResponse:
             log.exception("流式问答失败 %s", paper_id)
             yield _sse({"type": "error", "message": str(e)[:300]})
         finally:
-            if claim is not None:
-                claim.release()
+            _release_claim(claim)
 
+    background = BackgroundTask(_release_claim, claim) if claim is not None else None
     return StreamingResponse(
         gen(),
         media_type="text/event-stream",
@@ -845,6 +886,7 @@ async def ask_stream(paper_id: str, req: AskReq) -> StreamingResponse:
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
+        background=background,
     )
 
 

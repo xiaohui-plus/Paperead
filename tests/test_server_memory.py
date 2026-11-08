@@ -415,6 +415,157 @@ def test_delete_cancels_writer_and_blocks_memory_recreation(monkeypatch, tmp_pat
     assert mem.profile()["turn_count"] == 0
 
 
+def test_delete_between_begin_and_finish_leaves_no_file(monkeypatch, tmp_path):
+    main = _load_main(monkeypatch, tmp_path)
+    _use_fake_paper(main, monkeypatch)
+    mem = _mem(main)
+    user, _ = mem.begin_question("p1", "进行中的问题", "inflight")
+
+    with TestClient(main.app) as client:
+        deleted = client.delete("/api/papers/p1")
+        assert deleted.status_code == 200
+
+    ai = mem.finish_answer("p1", user["id"], "迟到的回答", [], False, 0.1)
+    assert ai["text"] == "迟到的回答"
+    assert not mem.paper_path("p1").exists()
+
+
+def test_waiting_duplicate_after_delete_gets_404(monkeypatch, tmp_path):
+    main = _load_main(monkeypatch, tmp_path)
+    _use_fake_paper(main, monkeypatch)
+    alive = {"p1": True}
+    monkeypatch.setattr(
+        main.store,
+        "get",
+        lambda pid: {"id": pid} if pid == "p1" and alive["p1"] else None,
+    )
+    monkeypatch.setattr(
+        main.store,
+        "read_blocks",
+        lambda pid: BLOCKS if pid == "p1" and alive["p1"] else None,
+    )
+
+    def remove(pid: str) -> bool:
+        if pid != "p1":
+            return False
+        alive["p1"] = False
+        return True
+
+    monkeypatch.setattr(main.store, "remove", remove)
+
+    backend = BlockingAnswerBackend()
+    llm_mod.set_backend(backend)
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=main.app)
+        payload = {
+            "question": "pairwise structure encoding",
+            "web": False,
+            "client_id": "race-delete",
+        }
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            first_task = asyncio.create_task(
+                client.post("/api/papers/p1/ask", json=payload)
+            )
+            await asyncio.wait_for(backend.answer_started.wait(), timeout=2)
+            second_task = asyncio.create_task(
+                client.post("/api/papers/p1/ask", json=payload)
+            )
+            await asyncio.sleep(0.05)
+            assert not second_task.done()
+            deleted = await client.delete("/api/papers/p1")
+            assert deleted.status_code == 200
+            backend.release_answer.set()
+            return await asyncio.gather(first_task, second_task)
+
+    try:
+        first, second = asyncio.run(scenario())
+    finally:
+        llm_mod.set_backend(None)
+
+    assert first.status_code == 200
+    assert second.status_code == 404
+    mem = _mem(main)
+    assert not mem.paper_path("p1").exists()
+    assert mem.profile()["turn_count"] == 0
+    assert main._ask_claims == {}
+
+
+def test_claims_are_removed_after_requests(monkeypatch, tmp_path):
+    main = _load_main(monkeypatch, tmp_path)
+    _use_fake_paper(main, monkeypatch)
+    llm_mod.set_backend(MemoryBackend())
+    try:
+        with TestClient(main.app) as client:
+            for i in range(3):
+                res = client.post(
+                    "/api/papers/p1/ask",
+                    json={
+                        "question": "pairwise structure encoding",
+                        "web": False,
+                        "client_id": f"claim-{i}",
+                    },
+                )
+                assert res.status_code == 200
+            assert main._ask_claims == {}
+
+            res = client.post(
+                "/api/papers/p1/ask",
+                json={"question": "pairwise structure encoding", "web": False},
+            )
+            assert res.status_code == 200
+            assert main._ask_claims == {}
+    finally:
+        llm_mod.set_backend(None)
+
+
+def test_cached_stream_leaves_no_claim(monkeypatch, tmp_path):
+    main = _load_main(monkeypatch, tmp_path)
+    _use_fake_paper(main, monkeypatch)
+    llm_mod.set_backend(MemoryBackend(pieces=["回答", "正文"]))
+    try:
+        with TestClient(main.app) as client:
+            payload = {
+                "question": "pairwise structure encoding",
+                "web": False,
+                "client_id": "cached-stream",
+            }
+            first = client.post("/api/papers/p1/ask", json=payload)
+            assert first.status_code == 200
+            assert main._ask_claims == {}
+
+            cached = client.post("/api/papers/p1/ask/stream", json=payload)
+            assert cached.status_code == 200
+            assert [e["type"] for e in _events(cached.text)][-1] == "done"
+            assert main._ask_claims == {}
+    finally:
+        llm_mod.set_backend(None)
+
+
+def test_unconsumed_stream_releases_claim_via_background(monkeypatch, tmp_path):
+    main = _load_main(monkeypatch, tmp_path)
+    _use_fake_paper(main, monkeypatch)
+
+    async def scenario():
+        resp = await main.ask_stream(
+            "p1",
+            main.AskReq(
+                question="pairwise structure encoding",
+                web=False,
+                client_id="unconsumed",
+            ),
+        )
+        assert main._ask_claims != {}
+        assert resp.background is not None
+        await resp.background()
+        assert main._ask_claims == {}
+        await resp.body_iterator.aclose()
+
+    asyncio.run(scenario())
+
+
 def test_delete_paper_removes_memory_file(monkeypatch, tmp_path):
     main = _load_main(monkeypatch, tmp_path)
     _use_fake_paper(main, monkeypatch)
