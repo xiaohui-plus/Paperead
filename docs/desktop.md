@@ -9,6 +9,7 @@ Python 或 Node。
 安装包发布在 GitHub Releases：
 
 - 安装版：`paper-reflow_<version>_x64-setup.exe`
+- 安装包 ZIP（.exe 被拦截时用）：`paper-reflow_<version>_x64-setup.zip`
 - 便携版：`paper-reflow_<version>_portable_x64.zip`
 - 系统：Windows 10/11 x64
 - 国内镜像：`https://ghproxy.net/https://github.com/xiaohui-plus/Paperead/releases/latest`
