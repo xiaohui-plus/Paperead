@@ -26,3 +26,5 @@ if (-not (Test-Path $exe)) { throw "没有产出 $exe" }
 
 $size = [math]::Round(((Get-ChildItem (Split-Path $exe) -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 1)
 Write-Host "OK: $exe ($size MB)"
+
+& (Join-Path $PSScriptRoot "stage-sidecar.ps1")

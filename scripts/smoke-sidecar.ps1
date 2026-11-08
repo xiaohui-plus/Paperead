@@ -100,6 +100,17 @@ try {
         "http://127.0.0.1:$port/api/papers/$paperId/blocks" | ConvertFrom-Json
     if (-not $blocks.blocks -or $blocks.blocks.Count -lt 1) { throw "解析结果没有 blocks" }
 
+    $importBody = @{ path = $sample } | ConvertTo-Json -Compress
+    $importFile = Join-Path $data "import.json"
+    [System.IO.File]::WriteAllText(
+        $importFile, $importBody, (New-Object System.Text.UTF8Encoding($false))
+    )
+    $imported = & curl.exe -s -b $cookieJar --max-time 30 -H "Content-Type: application/json" `
+        --data-binary "@$importFile" "http://127.0.0.1:$port/api/papers/import" | ConvertFrom-Json
+    if (-not $imported.added -or $imported.added.Count -lt 1) {
+        throw "按路径导入失败：$imported"
+    }
+
     $bad = & curl.exe -s -o NUL -w "%{http_code}" -b $cookieJar --max-time 5 `
         -H "Origin: https://evil.example" "http://127.0.0.1:$port/api/papers"
     if ([int]$bad -ne 403) { throw "坏 Origin 应返回 403，实际 $bad" }

@@ -124,6 +124,10 @@ class PingReq(BaseModel):
     config: LLMConfigIn
 
 
+class ImportReq(BaseModel):
+    path: str = Field(..., min_length=1, description="本机 PDF 绝对路径")
+
+
 def _decode(image_base64: str) -> bytes:
     if "," in image_base64[:80]:  # 容忍 data:image/png;base64, 前缀
         image_base64 = image_base64.split(",", 1)[1]
@@ -242,6 +246,25 @@ async def upload_papers(files: list[UploadFile] = File(...)) -> dict:
         # 上传后立刻后台解析（布局 + 图表 + 公式裁图），不阻塞上传响应
         asyncio.create_task(_parse_task(row["id"]))
     return {"added": added, "failed": failed}
+
+
+@app.post("/api/papers/import")
+async def import_paper(req: ImportReq) -> dict:
+    """从本机路径导入 PDF（桌面壳的原生“打开 PDF”走这里，避免大文件再走 multipart）。"""
+    try:
+        path = Path(req.path).expanduser().resolve(strict=True)
+    except OSError as e:
+        raise HTTPException(status_code=404, detail=f"文件不存在：{e}") from e
+    if not path.is_file():
+        raise HTTPException(status_code=400, detail="不是文件")
+    if path.suffix.lower() != ".pdf":
+        raise HTTPException(status_code=400, detail="只支持 PDF")
+    if path.stat().st_size < 1024:
+        raise HTTPException(status_code=400, detail="文件过小，可能不是有效 PDF")
+
+    row = store.add(path.name, path.read_bytes())
+    asyncio.create_task(_parse_task(row["id"]))
+    return {"added": [_public(row)], "failed": []}
 
 
 @app.delete("/api/papers/{paper_id}")
