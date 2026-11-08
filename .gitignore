@@ -42,6 +42,7 @@ src-tauri/target/
 src-tauri/binaries/
 src-tauri/resources/
 src-tauri/gen/
+release/
 *.exe
 *.msi
 *.nsis
