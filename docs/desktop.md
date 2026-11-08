@@ -39,6 +39,7 @@ npm run verify:release
 ```
 src-tauri\target\release\bundle\nsis\paper-reflow_0.1.0_x64-setup.exe
 release\paper-reflow_0.1.0_portable_x64.zip
+release\paper-reflow_0.1.0_source.zip        # AGPL 对应源码
 ```
 
 构建脚本会：
