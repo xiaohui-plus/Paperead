@@ -1,4 +1,4 @@
-﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent_sidecar;
 mod api;
@@ -40,6 +40,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let handle = app.handle().clone();
+            let data_dir = paths::ensure_data_dir(&handle);
             let sidecar = match Sidecar::start(&handle) {
                 Ok(sidecar) => sidecar,
                 Err(error) => {
@@ -56,7 +57,6 @@ fn main() {
 
             let port = sidecar.port;
             let token = sidecar.token.clone();
-            let data_dir = paths::ensure_data_dir(&handle);
 
             let agent = match AgentSidecar::start(&handle, port, &token, &data_dir) {
                 Ok(agent) => Some(agent),
@@ -90,8 +90,20 @@ fn main() {
 
             let updater_app = handle.clone();
             tauri::async_runtime::spawn(async move {
+                let interval = std::env::var("PAPER_REFLOW_UPDATE_INTERVAL_SECS")
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(6 * 60 * 60)
+                    .max(30);
+                paths::log_line(
+                    &updater_app,
+                    &format!("auto update check enabled, interval={interval}s"),
+                );
                 tokio::time::sleep(std::time::Duration::from_secs(8)).await;
-                check_updates(updater_app, false).await;
+                loop {
+                    check_updates(updater_app.clone(), false).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+                }
             });
             Ok(())
         })

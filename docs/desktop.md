@@ -66,11 +66,16 @@ npm run tauri -- dev
 应用内自动更新面向**安装版**。便携版请下载新版便携 ZIP，覆盖 `paper-reflow-desktop.exe`
 和 `resources\`，保留 `data\`。
 
-当前 `src-tauri/tauri.conf.json` 的更新地址指向本仓库：
+安装版启动 8 秒后静默检查一次，之后每 6 小时检查一次；也可以手动点
+“帮助 → 检查更新”。检查到新版本才弹窗询问，不会自动下载。测试时可用
+`PAPER_REFLOW_UPDATE_INTERVAL_SECS` 覆盖间隔（最小 30 秒）。
+
+当前 `src-tauri/tauri.conf.json` 的更新地址指向本仓库，并带一个国内镜像回退：
 
 ```json
 "endpoints": [
-  "https://github.com/xiaohui-plus/Paperead/releases/latest/download/latest.json"
+  "https://github.com/xiaohui-plus/Paperead/releases/latest/download/latest.json",
+  "https://ghproxy.net/https://github.com/xiaohui-plus/Paperead/releases/latest/download/latest.json"
 ]
 ```
 
