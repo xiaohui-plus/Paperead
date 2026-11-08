@@ -59,6 +59,13 @@ jobs:
         shell: pwsh
         run: .venv-build\Scripts\python.exe scripts\set_version.py "${{ github.ref_name }}"
 
+      - name: Seed NSIS cache
+        shell: pwsh
+        run: |
+          $cache = Join-Path $env:LOCALAPPDATA "tauri\NSIS"
+          New-Item -ItemType Directory -Force $cache | Out-Null
+          Expand-Archive tools\nsis-cache.zip -DestinationPath $cache -Force
+
       - name: Build installer and publish draft release
         uses: tauri-apps/tauri-action@v0
         env:
