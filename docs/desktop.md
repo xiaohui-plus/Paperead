@@ -14,7 +14,8 @@ Python 或 Node。
 - 数据目录：`%LOCALAPPDATA%\paper-reflow-data`（与安装目录分开，卸载/升级不影响文献库）
 - 卸载：默认保留数据；可在应用内打开数据目录手动删除
 
-首次启动会说明本地数据与模型请求范围，然后打开“模型与密钥”设置。
+首次启动会说明本地数据与模型请求范围，然后打开“模型与密钥”设置：回答模型负责问答/翻译，
+识图模型负责论文里的图片识别，两者可以分别配置，推荐模型旁有直达官网的「获取 API Key」按钮。
 
 ## 从源码构建
 
@@ -64,6 +65,25 @@ npm run tauri -- dev
 
 发布前替换成你的实际地址（GitHub Releases 或对象存储/自定义域名）。
 国内用户建议把 `latest.json` 与安装包放到可达的 CDN。
+
+本地联调或自建更新源时，可以用环境变量覆盖配置里的地址（不用重新打包）：
+
+```powershell
+$env:PAPER_REFLOW_UPDATE_ENDPOINT = "http://127.0.0.1:8000/latest.json"
+```
+
+生成更新清单（GitHub Actions 里的 tauri-action 也会自动生成）：
+
+```powershell
+python scripts/make_latest_json.py `
+  --version 0.1.1 `
+  --installer release\paper-reflow_0.1.1_x64-setup.exe `
+  --url https://dl.example.com/paper-reflow_0.1.1_x64-setup.exe `
+  --out release\latest.json
+```
+
+`latest.json` 的 `signature` 来自同名 `.sig` 文件，必须由 `tauri.conf.json`
+里的公钥对应的私钥签名。
 
 生成更新签名密钥：
 

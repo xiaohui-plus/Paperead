@@ -233,7 +233,26 @@ fn maybe_onboard(app: &AppHandle, port: u16, data_dir: &std::path::Path) {
 }
 
 async fn check_updates(app: AppHandle, interactive: bool) {
-    let updater = match app.updater() {
+    let endpoint = std::env::var("PAPER_REFLOW_UPDATE_ENDPOINT")
+        .ok()
+        .and_then(|value| Url::parse(&value).ok());
+    if std::env::var("PAPER_REFLOW_UPDATE_ENDPOINT").is_ok() && endpoint.is_none() {
+        paths::log_line(&app, "invalid PAPER_REFLOW_UPDATE_ENDPOINT, using config endpoint");
+    }
+
+    let builder = if let Some(url) = endpoint {
+        match app.updater_builder().endpoints(vec![url]) {
+            Ok(builder) => builder,
+            Err(error) => {
+                paths::log_line(&app, &format!("invalid update endpoint: {error}"));
+                app.updater_builder()
+            }
+        }
+    } else {
+        app.updater_builder()
+    };
+
+    let updater = match builder.build() {
         Ok(updater) => updater,
         Err(error) => {
             paths::log_line(&app, &format!("updater init failed: {error}"));
