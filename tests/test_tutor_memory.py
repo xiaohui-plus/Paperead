@@ -362,6 +362,7 @@ def test_memory_disabled_writes_no_files(tmp_path, monkeypatch):
     store.seed("p1", title="T", domains=["d"])
     assert store.chat("p1")["messages"] == []
     assert store.page("p1") == {"messages": [], "hasMore": False}
+    assert store.history("p1") == {"turns": [], "hasMore": False}
     assert store.recent_before("p1", msg["id"]) == []
     assert [p for p in store.root.rglob("*") if p.is_file()] == []
 
@@ -381,6 +382,62 @@ def test_page_limit_is_clamped(store):
     wide = store.page("p1", limit=500)
     assert len(wide["messages"]) == 10
     assert wide["hasMore"] is False
+
+
+def test_history_pairs_turns_and_pages(store):
+    sources = [{"type": "paper", "label": "P1"}]
+    for i in range(4):
+        msg, _ = store.begin_question("p1", f"q{i}")
+        store.finish_answer("p1", msg["id"], f"a{i}", sources, i == 1, 0.5 + i)
+
+    latest = store.history("p1", limit=2)
+    assert [t["question"] for t in latest["turns"]] == ["q2", "q3"]
+    assert [t["answer"] for t in latest["turns"]] == ["a2", "a3"]
+    assert latest["turns"][0]["sources"] == sources
+    assert latest["turns"][0]["usedWeb"] is False
+    assert latest["turns"][0]["latency"] == 2.5
+    assert latest["turns"][1]["usedWeb"] is False
+    assert latest["hasMore"] is True
+
+    older = store.history("p1", before=latest["turns"][0]["id"], limit=2)
+    assert [t["question"] for t in older["turns"]] == ["q0", "q1"]
+    assert older["turns"][1]["usedWeb"] is True
+    assert older["hasMore"] is False
+
+    assert len(store.history("p1", limit=0)["turns"]) == 1
+    assert len(store.history("p1", limit=500)["turns"]) == 4
+
+
+def test_history_keeps_unanswered_and_skips_orphan_answer(store):
+    msg, _ = store.begin_question("p1", "还在等回答")
+    data = store.chat("p1")
+    data["messages"].append(
+        {
+            "id": "m_orphan",
+            "role": "ai",
+            "text": "没有对应提问",
+            "answer_to": "m_missing",
+            "sources": [],
+            "used_web": False,
+            "latency": 0.3,
+            "at": 0.0,
+        }
+    )
+    store._save_chat("p1", data)
+
+    turns = store.history("p1")["turns"]
+    assert turns == [
+        {
+            "id": msg["id"],
+            "question": "还在等回答",
+            "answer": "",
+            "sources": [],
+            "usedWeb": False,
+            "latency": 0.0,
+            "at": msg["at"],
+        }
+    ]
+
 
 
 def test_retry_same_client_id_before_answer_does_not_duplicate(store):

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
@@ -191,25 +192,82 @@ async def expand_query(question: str) -> list[str]:
         log.info("查询改写失败：%s", e)
         return []
 
-    import json
-
-    t = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
-    try:
-        data = json.loads(t)
-    except Exception:
-        m = re.search(r"\{.*\}", t, re.S)
-        if not m:
-            return []
-        try:
-            data = json.loads(m.group(0))
-        except Exception:
-            return []
+    data = _parse_json(raw)
+    if not isinstance(data, dict):
+        return []
     words: list[str] = []
     for key in ("en", "zh"):
         for w in data.get(key) or []:
             if isinstance(w, str) and w.strip():
                 words.append(w.strip())
     return words
+
+
+async def rewrite_and_expand(
+    question: str, history: list[dict] | None = None
+) -> tuple[str, list[str]]:
+    """把追问改写成独立问题，并给出中英检索词。一次调用完成两件事。
+
+    没有历史时退化为原来的关键词扩张；解析失败时 standalone 用原问题。
+    """
+    if not history:
+        return question, await expand_query(question)
+
+    recent = "\n".join(
+        f"{'用户' if m.get('role') == 'user' else '助手'}：{str(m.get('text', ''))[:300]}"
+        for m in history[-6:]
+    )
+    try:
+        raw = await chat(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "你在帮用户读论文。根据最近对话，把当前问题改写成不依赖上下文也能看懂的完整问题，"
+                        "并给出用于检索的英文关键词（3-8 个）和中文关键词（3-8 个）。\n"
+                        "只输出 JSON："
+                        '{"standalone": "...", "en": ["..."], "zh": ["..."]}\n'
+                        "当前问题本身已经完整时，standalone 原样返回；不要回答问题。"
+                    ),
+                },
+                {"role": "user", "content": f"最近对话：\n{recent}\n\n当前问题：{question}"},
+            ],
+            temperature=0.1,
+            max_tokens=600,
+        )
+    except Exception as e:
+        log.info("追问改写失败：%s", e)
+        return question, []
+
+    data = _parse_json(raw)
+    if not isinstance(data, dict):
+        return question, []
+
+    standalone = str(data.get("standalone") or "").strip()
+    if not standalone or len(standalone) > 200:
+        standalone = question
+
+    words: list[str] = []
+    for key in ("en", "zh"):
+        for word in data.get(key) or []:
+            if isinstance(word, str) and word.strip():
+                words.append(word.strip())
+    return standalone, words
+
+
+def _parse_json(raw: str) -> dict | list | None:
+    """解析模型返回的 JSON：容忍代码围栏，失败时抓第一个 {...} 块。"""
+    text = re.sub(r"^`{3}(?:json)?\s*|\s*`{3}$", "", (raw or "").strip())
+    try:
+        return json.loads(text)
+    except Exception:
+        match = re.search(r"\{.*\}", text, re.S)
+        if not match:
+            return None
+        try:
+            return json.loads(match.group(0))
+        except Exception:
+            return None
 
 
 def needs_external(question: str, top_score: float) -> bool:
@@ -226,6 +284,12 @@ ANSWER_SYS = """你是论文助教。只根据给定的材料回答，用中文�
    [P3] 第 3 页  |  [R31] 参考文献 31  |  [W2] 网络结果 2
 3. 如果材料之间矛盾，指出矛盾，不要强行统一；
 4. 不要复述问题，直接给答案。"""
+
+MEMORY_RULES = """
+5. 【背景记忆】只用于调整讲法、承接前文、避免重复，不能作为论文事实、数字、结论的依据；
+6. 概念标为"已懂"的不再展开；标为"困惑"的换一种讲法，先补前置；
+7. 用户纠正过的以纠正为准；记忆与材料冲突时以材料为准；
+8. 不要声称"我记得你……"，直接用调整后的讲法。"""
 
 
 def build_context(
@@ -250,26 +314,32 @@ def build_context(
     return "\n\n".join(parts)
 
 
-def _answer_messages(question: str, context: str) -> list[dict]:
+def _answer_messages(question: str, context: str, memory: str = "") -> list[dict]:
+    system = ANSWER_SYS + (MEMORY_RULES if memory else "")
+    user = f"【材料】\n{context}\n\n【问题】{question}"
+    if memory:
+        user = f"【背景记忆】\n{memory}\n\n{user}"
     return [
-        {"role": "system", "content": ANSWER_SYS},
-        {"role": "user", "content": f"【材料】\n{context}\n\n【问题】{question}"},
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
     ]
 
 
-async def answer(question: str, context: str) -> str:
+async def answer(question: str, context: str, memory: str = "") -> str:
     raw = await chat(
-        _answer_messages(question, context),
+        _answer_messages(question, context, memory),
         temperature=0.2,
         max_tokens=4000,
     )
     return raw.strip()
 
 
-async def answer_stream(question: str, context: str) -> AsyncIterator[str]:
+async def answer_stream(
+    question: str, context: str, memory: str = ""
+) -> AsyncIterator[str]:
     """流式回答：逐 delta 产出，调用方负责拼接与发送。"""
     async for piece in chat_stream(
-        _answer_messages(question, context),
+        _answer_messages(question, context, memory),
         temperature=0.2,
         max_tokens=4000,
     ):

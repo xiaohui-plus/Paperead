@@ -354,6 +354,25 @@ def _public_message(msg: dict) -> dict:
     return out
 
 
+def _public_turn(user: dict, answer: dict | None) -> dict:
+    """把一轮问答压成前端历史面板要的形状；未回答的轮保留空回答。"""
+    turn = {
+        "id": user.get("id", ""),
+        "question": user.get("text", ""),
+        "answer": "",
+        "sources": [],
+        "usedWeb": False,
+        "latency": 0.0,
+        "at": user.get("at", 0.0),
+    }
+    if answer is not None:
+        turn["answer"] = answer.get("text", "")
+        turn["sources"] = answer.get("sources") or []
+        turn["usedWeb"] = bool(answer.get("used_web"))
+        turn["latency"] = answer.get("latency", 0.0)
+    return turn
+
+
 class MemoryStore:
     def __init__(self, root: Path):
         self.root = Path(root) / "memory"
@@ -537,6 +556,30 @@ class MemoryStore:
             "messages": [_public_message(m) for m in messages[start:end]],
             "hasMore": start > 0,
         }
+
+    def history(self, paper_id: str, before: str | None = None, limit: int = 50) -> dict:
+        """按轮返回历史：用户消息配它的回答，供前端恢复对话。
+
+        未回答的用户消息保留空回答（由前端按状态展示）；找不到提问的 AI 消息跳过。
+        `before` 是本页第一轮的用户消息 id，用于往前翻。
+        """
+        if not enabled():
+            return {"turns": [], "hasMore": False}
+        messages = self.chat(paper_id)["messages"]
+        answers = {m.get("answer_to"): m for m in messages if m.get("role") == "ai"}
+        turns = [
+            _public_turn(m, answers.get(m["id"]))
+            for m in messages
+            if m.get("role") == "user"
+        ]
+        end = len(turns)
+        if before:
+            index = next((i for i, t in enumerate(turns) if t["id"] == before), None)
+            if index is None:
+                return {"turns": [], "hasMore": False}
+            end = index
+        start = max(0, end - max(1, min(limit, 200)))
+        return {"turns": turns[start:end], "hasMore": start > 0}
 
     # ── 合并（画像 / 概念 / 记忆卡）──────────────────
     def apply_patch(self, paper_id: str, patch: dict, touched: list[str] | None = None) -> None:

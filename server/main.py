@@ -35,6 +35,7 @@ from paper_reflow.formula import recognize_latex
 from paper_reflow.layout import Block, parse_pdf
 from paper_reflow.llm import LLMConfig, OpenAICompatBackend
 from paper_reflow.tutor import build_guide
+from paper_reflow.tutor import memory as memory_engine
 from paper_reflow.tutor import qa as qa_engine
 from paper_reflow.tutor import web as web_search
 from paper_reflow.tutor.citations import find as find_citations, resolve as resolve_citations
@@ -235,6 +236,8 @@ async def ping(req: PingReq) -> dict:
 _parsing: set[str] = set()
 _translating: set[str] = set()
 _locks: dict[str, asyncio.Lock] = {}
+# 后台记忆写手的强引用：只挂在事件循环上的任务可能被 GC 回收
+_bg_tasks: set[asyncio.Task] = set()
 
 
 def _public(row: dict) -> dict:
@@ -294,6 +297,7 @@ async def import_paper(req: ImportReq) -> dict:
 async def delete_paper(paper_id: str) -> dict:
     if not store.remove(paper_id):
         raise HTTPException(status_code=404, detail="论文不存在")
+    memory_engine.get_store(store.root).forget(paper_id)
     return {"ok": True}
 
 
@@ -525,6 +529,7 @@ class AskReq(BaseModel):
     question: str
     config: LLMConfigIn | None = None
     web: bool = True
+    client_id: str | None = None
 
 
 @dataclass
@@ -565,21 +570,73 @@ def _apply_llm_config(config: LLMConfigIn | None) -> None:
         raise HTTPException(status_code=400, detail="未配置模型，无法回答")
 
 
-async def _prepare_ask(paper_id: str, req: AskReq) -> _AskPrep:
+def _seed_memory(mem: memory_engine.MemoryStore, paper_id: str) -> None:
+    """把标题和导读里的领域灌进记忆卡；记忆关闭时 seed 自己会 no-op。"""
+    row = store.get(paper_id) or {}
+    domains: list[str] = []
+    guide_path = store.papers_dir / f"{paper_id}.guide.json"
+    if guide_path.exists():
+        try:
+            guide = json.loads(guide_path.read_text(encoding="utf-8"))
+        except Exception:
+            guide = None
+        if isinstance(guide, dict):
+            domains = [d for d in (guide.get("domains") or []) if isinstance(d, str)]
+    mem.seed(paper_id, title=row.get("title", ""), domains=domains)
+
+
+def _cached_answer(user_msg: dict, cached: dict) -> dict:
+    """同一个 client_id 重试时，直接回放已落盘的答案。"""
+    return {
+        "answer": cached.get("text", ""),
+        "sources": cached.get("sources") or [],
+        "usedWeb": bool(cached.get("used_web")),
+        "latency": cached.get("latency", 0.0),
+        "user_message_id": user_msg["id"],
+        "answer_message_id": cached["id"],
+    }
+
+
+def _schedule_writer(
+    mem: memory_engine.MemoryStore,
+    paper_id: str,
+    question: str,
+    answer: str,
+    standalone: str,
+) -> None:
+    """回答返回后异步整理记忆；MOCK 或关闭记忆时不写。"""
+    if MOCK or not memory_engine.enabled():
+        return
+    task = asyncio.create_task(
+        memory_engine.write_memory(
+            mem,
+            paper_id,
+            question,
+            answer,
+            standalone,
+            mem.touched_concepts(standalone),
+        )
+    )
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+
+
+async def _prepare_ask(
+    paper_id: str, req: AskReq, standalone: str, expanded: list[str]
+) -> _AskPrep:
     """检索论文、必要时联网，返回拼好的材料与可点击的出处。"""
     blocks = store.read_blocks(paper_id) or []
     objs = [Block(**{**b, "bbox": tuple(b["bbox"])}) for b in blocks]
     docs, en, zh = qa_engine.build_index(objs)
 
-    expanded = await qa_engine.expand_query(req.question)
-    query = " ".join([req.question, *expanded])
+    query = " ".join([standalone, *expanded])
     hits = qa_engine.retrieve(docs, en, zh, query, k=6)
     top_score = hits[0][1] if hits else 0.0
 
     web_results: list[dict] = []
-    if req.web and qa_engine.needs_external(req.question, top_score):
+    if req.web and qa_engine.needs_external(standalone, top_score):
         # 用英文关键词去搜学术内容，中文原问在通用搜索里几乎搜不到论文
-        web_query = " ".join(expanded[:6]) if expanded else req.question
+        web_query = " ".join(expanded[:6]) if expanded else standalone
         web_results = await web_search.search(web_query, 4)
 
     # 命中的段落里带的引用，作为补充材料
@@ -625,14 +682,33 @@ async def ask_paper(paper_id: str, req: AskReq) -> dict:
     _apply_llm_config(req.config)
 
     t0 = time.time()
-    prep = await _prepare_ask(paper_id, req)
-    text = await qa_engine.answer(req.question, prep.context)
+    mem = memory_engine.get_store(store.root)
+    _seed_memory(mem, paper_id)
+
+    user_msg, cached = mem.begin_question(paper_id, req.question, req.client_id)
+    if cached is not None:
+        return _cached_answer(user_msg, cached)
+
+    recent = mem.recent_before(paper_id, user_msg["id"], 6)
+    standalone, expanded = await qa_engine.rewrite_and_expand(req.question, recent)
+    brief = mem.build_brief(paper_id, standalone, exclude_message_id=user_msg["id"])
+
+    prep = await _prepare_ask(paper_id, req, standalone, expanded)
+    text = await qa_engine.answer(standalone, prep.context, brief)
+
+    latency = round(time.time() - t0, 1)
+    ai_msg = mem.finish_answer(
+        paper_id, user_msg["id"], text, prep.sources, prep.used_web, latency
+    )
+    _schedule_writer(mem, paper_id, req.question, text, standalone)
 
     return {
-        "answer": text,
+        "answer": ai_msg.get("text", text),
         "sources": prep.sources,
         "usedWeb": prep.used_web,
-        "latency": round(time.time() - t0, 1),
+        "latency": latency,
+        "user_message_id": user_msg["id"],
+        "answer_message_id": ai_msg["id"],
     }
 
 
@@ -641,30 +717,75 @@ async def ask_stream(paper_id: str, req: AskReq) -> StreamingResponse:
     """流式问答：SSE 事件 status → sources → delta×N → done / error。
 
     检索（含查询改写、联网）在 `status` 之后进行；来源先于正文到达，
-    前端可以先渲染出处 chips 再等 token。
+    前端可以先渲染出处 chips 再等 token。同一个 client_id 重试时回放已存答案。
     """
     _require_ask_ready(paper_id, req.question)
     _apply_llm_config(req.config)
+
+    mem = memory_engine.get_store(store.root)
+    _seed_memory(mem, paper_id)
+    user_msg, cached = mem.begin_question(paper_id, req.question, req.client_id)
+
+    if cached is not None:
+
+        async def cached_gen():
+            yield _sse({"type": "status", "stage": "retrieving"})
+            yield _sse(
+                {
+                    "type": "sources",
+                    "sources": cached.get("sources") or [],
+                    "usedWeb": bool(cached.get("used_web")),
+                }
+            )
+            yield _sse({"type": "delta", "text": cached.get("text", "")})
+            yield _sse({"type": "done", "latency": cached.get("latency", 0.0)})
+
+        return StreamingResponse(
+            cached_gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     async def gen():
         t0 = time.time()
         try:
             yield _sse({"type": "status", "stage": "retrieving"})
-            prep = await _prepare_ask(paper_id, req)
+            recent = mem.recent_before(paper_id, user_msg["id"], 6)
+            standalone, expanded = await qa_engine.rewrite_and_expand(
+                req.question, recent
+            )
+            brief = mem.build_brief(
+                paper_id, standalone, exclude_message_id=user_msg["id"]
+            )
+            prep = await _prepare_ask(paper_id, req, standalone, expanded)
             yield _sse(
                 {"type": "sources", "sources": prep.sources, "usedWeb": prep.used_web}
             )
 
+            parts: list[str] = []
             visible = 0
-            async for piece in qa_engine.answer_stream(req.question, prep.context):
+            async for piece in qa_engine.answer_stream(standalone, prep.context, brief):
                 if not piece:
                     continue
+                parts.append(piece)
                 visible += len(piece.strip())
                 yield _sse({"type": "delta", "text": piece})
             if not visible:
                 raise RuntimeError("模型没有返回内容（可能 max_tokens 被 reasoning 耗尽）")
 
-            yield _sse({"type": "done", "latency": round(time.time() - t0, 1)})
+            # 只在完整回答后落盘；出错时只推 error，不留半截回答
+            text = "".join(parts)
+            latency = round(time.time() - t0, 1)
+            mem.finish_answer(
+                paper_id, user_msg["id"], text, prep.sources, prep.used_web, latency
+            )
+            _schedule_writer(mem, paper_id, req.question, text, standalone)
+
+            yield _sse({"type": "done", "latency": latency})
         except asyncio.CancelledError:
             log.info("问答流已取消：%s", paper_id)
             raise
@@ -681,6 +802,14 @@ async def ask_stream(paper_id: str, req: AskReq) -> StreamingResponse:
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.get("/api/papers/{paper_id}/chat")
+async def paper_chat(paper_id: str, before: str | None = None, limit: int = 50) -> dict:
+    """历史对话（按轮配对）：刷新或切回来时恢复聊天气泡。"""
+    if not store.get(paper_id):
+        raise HTTPException(status_code=404, detail="论文不存在")
+    return memory_engine.get_store(store.root).history(paper_id, before, limit)
 
 
 @app.get("/api/papers/{paper_id}/asset/{rel:path}")
