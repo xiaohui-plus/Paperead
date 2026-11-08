@@ -56,11 +56,42 @@ def _now() -> float:
     return time.time()
 
 
+def _coerce_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _backup(path: Path) -> None:
+    """把损坏文件挪到 .bak；备份失败只记日志，记忆是尽力而为。"""
+    target = path.with_name(path.name + ".bak")
+    try:
+        if target.exists():
+            target = path.with_name(
+                f"{path.name}.{int(time.time())}.{uuid.uuid4().hex[:4]}.bak"
+            )
+        path.replace(target)
+    except OSError as e:
+        log.warning("记忆文件备份失败：%s (%s)", path, e)
+
+
 def _atomic_write(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:6]}.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def _load(path: Path, default: dict) -> dict:
@@ -70,16 +101,23 @@ def _load(path: Path, default: dict) -> dict:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
         log.warning("记忆文件损坏，已备份：%s (%s)", path, e)
-        path.replace(path.with_name(path.name + ".bak"))
+        _backup(path)
         return default
     if not isinstance(data, dict):
-        path.replace(path.with_name(path.name + ".bak"))
+        log.warning("记忆文件结构非法，已备份：%s", path)
+        _backup(path)
         return default
-    if int(data.get("version", 0)) > VERSION:
+    try:
+        version = int(data.get("version", 0))
+    except (TypeError, ValueError) as e:
+        log.warning("记忆文件版本非法，已备份：%s (%s)", path, e)
+        _backup(path)
+        return default
+    if version > VERSION:
         log.warning("记忆文件版本过高，已备份：%s", path)
-        path.replace(path.with_name(path.name + ".bak"))
+        _backup(path)
         return default
-    data.setdefault("version", VERSION)
+    data["version"] = VERSION
     return data
 
 
@@ -117,11 +155,61 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _clean_messages(value: Any) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    out: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        message_id = item.get("id")
+        if not isinstance(message_id, str) or not message_id:
+            continue
+        if item.get("role") not in ("user", "ai"):
+            continue
+        msg = dict(item)
+        msg["text"] = _coerce_text(msg.get("text"))
+        out.append(msg)
+    return out
+
+
+def _clean_domains(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        if isinstance(item, (dict, list)):
+            continue
+        text = _coerce_text(item)
+        if not text:
+            continue
+        out.append(text)
+        if len(out) >= 4:
+            break
+    return out
+
+
+def _clean_facts(value: Any) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    out: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        if not isinstance(kind, str) or kind not in FACT_KINDS:
+            continue
+        fact = dict(item)
+        fact["text"] = _coerce_text(fact.get("text"))
+        out.append(fact)
+    return out
+
+
 def _public_message(msg: dict) -> dict:
     out = {
-        "id": msg["id"],
-        "role": msg["role"],
-        "text": msg["text"],
+        "id": msg.get("id", ""),
+        "role": msg.get("role", ""),
+        "text": msg.get("text", ""),
         "at": msg.get("at", 0.0),
     }
     if msg.get("sources"):
@@ -149,14 +237,15 @@ class MemoryStore:
     # ── 读取 ────────────────────────────────────────────
     def chat(self, paper_id: str) -> dict:
         data = _load(self.paper_path(paper_id), _empty_chat(paper_id))
-        if not isinstance(data.get("messages"), list):
-            data["messages"] = []
+        data["messages"] = _clean_messages(data.get("messages"))
         card = data.get("card")
         if not isinstance(card, dict):
             card = _empty_card()
-            data["card"] = card
         for key, value in _empty_card().items():
             card.setdefault(key, value)
+        card["domains"] = _clean_domains(card.get("domains"))
+        card["facts"] = _clean_facts(card.get("facts"))
+        data["card"] = card
         return data
 
     def profile(self) -> dict:
@@ -254,15 +343,29 @@ class MemoryStore:
             return msg
         with self._lock:
             chat = self.chat(paper_id)
+            existing = next(
+                (
+                    x
+                    for x in chat["messages"]
+                    if x.get("role") == "ai" and x.get("answer_to") == user_message_id
+                ),
+                None,
+            )
+            if existing is not None:
+                return existing
             chat["messages"].append(msg)
             self._save_chat(paper_id, chat)
         return msg
 
     def recent_before(self, paper_id: str, message_id: str, n: int = 6) -> list[dict]:
-        if not enabled():
+        if not enabled() or n <= 0:
             return []
         messages = self.chat(paper_id)["messages"]
-        index = next((i for i, m in enumerate(messages) if m["id"] == message_id), len(messages))
+        index = next(
+            (i for i, m in enumerate(messages) if m.get("id") == message_id), None
+        )
+        if index is None:
+            return []
         return messages[:index][-n:]
 
     def page(self, paper_id: str, before: str | None = None, limit: int = 50) -> dict:
@@ -271,7 +374,12 @@ class MemoryStore:
         messages = self.chat(paper_id)["messages"]
         end = len(messages)
         if before:
-            end = next((i for i, m in enumerate(messages) if m["id"] == before), len(messages))
+            index = next(
+                (i for i, m in enumerate(messages) if m.get("id") == before), None
+            )
+            if index is None:
+                return {"messages": [], "hasMore": False}
+            end = index
         start = max(0, end - max(1, min(limit, 200)))
         return {
             "messages": [_public_message(m) for m in messages[start:end]],
@@ -279,14 +387,38 @@ class MemoryStore:
         }
 
     def forget(self, paper_id: str) -> None:
-        self.paper_path(paper_id).unlink(missing_ok=True)
+        with self._lock:
+            path = self.paper_path(paper_id)
+            targets = [path]
+            try:
+                entries = list(self.papers.iterdir())
+            except OSError:
+                entries = []
+            for entry in entries:
+                name = entry.name
+                if name.startswith(path.name + ".") and (
+                    name.endswith(".bak") or name.endswith(".tmp")
+                ):
+                    targets.append(entry)
+            for target in targets:
+                try:
+                    target.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
 
 _stores: dict[str, MemoryStore] = {}
+_stores_lock = threading.Lock()
 
 
 def get_store(root: Path) -> MemoryStore:
     key = str(Path(root).resolve())
-    if key not in _stores:
-        _stores[key] = MemoryStore(Path(root))
-    return _stores[key]
+    store = _stores.get(key)
+    if store is not None:
+        return store
+    with _stores_lock:
+        store = _stores.get(key)
+        if store is None:
+            store = MemoryStore(Path(root))
+            _stores.setdefault(key, store)
+        return store
