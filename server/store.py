@@ -25,6 +25,14 @@ import pymupdf
 
 log = logging.getLogger("paperead.store")
 
+
+class FolderNameError(ValueError):
+    """文件夹名称非法。"""
+
+
+class FolderExistsError(ValueError):
+    """同名文件夹已存在。"""
+
 # 原版 PDF 页图的分辨率范围：太小看不清公式，太大传输慢。
 PAGE_WIDTH_MIN = 480
 PAGE_WIDTH_MAX = 1600
@@ -35,6 +43,7 @@ class LibraryStore:
         self.root = root
         self.papers_dir = root / "papers"
         self.index = root / "library.json"
+        self.folders_path = root / "folders.json"
         self.papers_dir.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()
 
@@ -53,19 +62,47 @@ class LibraryStore:
             json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8"
         )
 
-    def list(self) -> list[dict[str, Any]]:
-        rows = self._read()
+    def list(self, include_project: bool = False) -> list[dict[str, Any]]:
+        """文献库列表。
+
+        带 ``project_id`` 的行属于研究项目自己的论文文件夹，默认不出现在
+        全局文献库里；只有检索索引等内部场景才需要 ``include_project=True``。
+        """
+        rows = [
+            r for r in self._read()
+            if include_project or not r.get("project_id")
+        ]
+        rows.sort(key=lambda r: r.get("created_at", 0), reverse=True)
+        return rows
+
+    def list_project(self, project_id: str) -> list[dict[str, Any]]:
+        """某个研究项目自己的论文（按创建时间倒序）。"""
+        rows = [r for r in self._read() if r.get("project_id") == project_id]
         rows.sort(key=lambda r: r.get("created_at", 0), reverse=True)
         return rows
 
     def get(self, paper_id: str) -> dict[str, Any] | None:
         return next((r for r in self._read() if r["id"] == paper_id), None)
 
-    def find_by_source(self, source_id: str) -> dict[str, Any] | None:
-        """按外部题录 id（如 arxiv:2401.00001）查重，检索页导入时用。"""
+    def find_by_source(
+        self, source_id: str, project_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """按外部题录 id（如 arxiv:2401.00001）查重。
+
+        ``project_id`` 为空时只查全局文献库；给定时只在该项目范围内查重，
+        避免项目论文和全局库互相“命中”。
+        """
         if not source_id:
             return None
-        return next((r for r in self._read() if r.get("source_id") == source_id), None)
+        scope = project_id or None
+        return next(
+            (
+                r for r in self._read()
+                if r.get("source_id") == source_id
+                and (r.get("project_id") or None) == scope
+            ),
+            None,
+        )
 
     def update(self, paper_id: str, **patch: Any) -> dict[str, Any] | None:
         with self._lock:
@@ -76,6 +113,148 @@ class LibraryStore:
                     self._write(rows)
                     return r
         return None
+
+    # ── 文件夹 ──────────────────────────────────────────
+
+    def _read_folders(self) -> list[dict[str, Any]]:
+        if not self.folders_path.exists():
+            return []
+        try:
+            payload = json.loads(self.folders_path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        if isinstance(payload, dict):
+            rows = payload.get("folders") or []
+        elif isinstance(payload, list):
+            rows = payload
+        else:
+            rows = []
+        return [
+            row
+            for row in rows
+            if isinstance(row, dict) and row.get("id") and row.get("name")
+        ]
+
+    def _write_folders(self, folders: list[dict[str, Any]]) -> None:
+        self.folders_path.write_text(
+            json.dumps(
+                {"version": 1, "folders": folders},
+                ensure_ascii=False,
+                indent=1,
+            ),
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _clean_folder_name(name: str) -> str:
+        value = re.sub(r"\s+", " ", (name or "").strip())
+        if not value:
+            raise FolderNameError("文件夹名称不能为空")
+        if len(value) > 40:
+            raise FolderNameError("文件夹名称不能超过 40 个字")
+        return value
+
+    @staticmethod
+    def _folder_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for row in rows:
+            if row.get("project_id"):
+                continue
+            folder_id = row.get("folder_id")
+            if folder_id:
+                counts[str(folder_id)] = counts.get(str(folder_id), 0) + 1
+        return counts
+
+    def list_folders(self) -> list[dict[str, Any]]:
+        with self._lock:
+            folders = self._read_folders()
+            counts = self._folder_counts(self._read())
+        folders.sort(key=lambda row: (row.get("created_at", 0), row["id"]))
+        return [
+            {**row, "paper_count": counts.get(row["id"], 0)}
+            for row in folders
+        ]
+
+    def get_folder(self, folder_id: str) -> dict[str, Any] | None:
+        return next(
+            (row for row in self._read_folders() if row["id"] == folder_id),
+            None,
+        )
+
+    def create_folder(self, name: str) -> dict[str, Any]:
+        cleaned = self._clean_folder_name(name)
+        with self._lock:
+            folders = self._read_folders()
+            if any(row["name"].casefold() == cleaned.casefold() for row in folders):
+                raise FolderExistsError("文件夹名称已存在")
+            folder = {
+                "id": f"f_{uuid.uuid4().hex[:12]}",
+                "name": cleaned,
+                "created_at": time.time(),
+            }
+            folders.append(folder)
+            self._write_folders(folders)
+        return {**folder, "paper_count": 0}
+
+    def rename_folder(self, folder_id: str, name: str) -> dict[str, Any] | None:
+        cleaned = self._clean_folder_name(name)
+        with self._lock:
+            folders = self._read_folders()
+            target = next(
+                (row for row in folders if row["id"] == folder_id),
+                None,
+            )
+            if target is None:
+                return None
+            if any(
+                row["id"] != folder_id
+                and row["name"].casefold() == cleaned.casefold()
+                for row in folders
+            ):
+                raise FolderExistsError("文件夹名称已存在")
+            target["name"] = cleaned
+            self._write_folders(folders)
+            counts = self._folder_counts(self._read())
+        return {**target, "paper_count": counts.get(folder_id, 0)}
+
+    def delete_folder(self, folder_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            folders = self._read_folders()
+            if not any(row["id"] == folder_id for row in folders):
+                return None
+            rows = self._read()
+            moved = 0
+            for row in rows:
+                if row.get("folder_id") == folder_id:
+                    row.pop("folder_id", None)
+                    moved += 1
+            self._write(rows)
+            self._write_folders(
+                [row for row in folders if row["id"] != folder_id]
+            )
+        return {"ok": True, "moved": moved}
+
+    def move_paper(
+        self, paper_id: str, folder_id: str | None
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            rows = self._read()
+            paper = next(
+                (row for row in rows if row["id"] == paper_id),
+                None,
+            )
+            if paper is None:
+                return None
+            if folder_id and not any(
+                row["id"] == folder_id for row in self._read_folders()
+            ):
+                raise LookupError("文件夹不存在")
+            if folder_id:
+                paper["folder_id"] = folder_id
+            else:
+                paper.pop("folder_id", None)
+            self._write(rows)
+        return paper
 
     # ── 增删 ────────────────────────────────────────────
 
