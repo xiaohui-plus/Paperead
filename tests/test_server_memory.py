@@ -182,6 +182,36 @@ def test_ask_stream_event_order_and_persisted_turn(monkeypatch, tmp_path):
     assert [m["role"] for m in _mem(main).chat("p1")["messages"]] == ["user", "ai"]
 
 
+def test_ask_stream_includes_recent_turns(monkeypatch, tmp_path):
+    main = _load_main(monkeypatch, tmp_path)
+    _use_fake_paper(main, monkeypatch)
+    backend = MemoryBackend(pieces=["回答", "正文"])
+    llm_mod.set_backend(backend)
+    try:
+        with TestClient(main.app) as client:
+            first = client.post(
+                "/api/papers/p1/ask",
+                json={"question": "first question", "web": False, "client_id": "s1"},
+            )
+            assert first.status_code == 200
+
+            second = client.post(
+                "/api/papers/p1/ask/stream",
+                json={"question": "第二个问题", "web": False, "client_id": "s2"},
+            )
+            assert second.status_code == 200
+            events = _events(second.text)
+            assert [e["type"] for e in events][-1] == "done"
+    finally:
+        llm_mod.set_backend(None)
+
+    stream_call = backend.calls[-1]
+    user = stream_call[1]["content"]
+    assert "【最近对话】" in user
+    assert "first question" in user
+    assert "回答正文" in user
+
+
 def test_follow_up_rewrites_with_history_and_injects_memory(monkeypatch, tmp_path):
     main = _load_main(monkeypatch, tmp_path)
     _use_fake_paper(main, monkeypatch)
@@ -222,7 +252,16 @@ def test_follow_up_rewrites_with_history_and_injects_memory(monkeypatch, tmp_pat
 
     answer_call = backend.calls[3]
     assert "只用于调整讲法" in answer_call[0]["content"]
-    assert answer_call[1]["content"].startswith("【背景记忆】")
+    answer_user = answer_call[1]["content"]
+    assert answer_user.startswith("【背景记忆】")
+    assert "【最近对话】" in answer_user
+    assert "first question" in answer_user
+    assert "回答正文" in answer_user
+    assert (
+        answer_user.index("【背景记忆】")
+        < answer_user.index("【最近对话】")
+        < answer_user.index("【材料】")
+    )
 
 
 def test_delete_paper_removes_memory_file(monkeypatch, tmp_path):

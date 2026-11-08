@@ -314,9 +314,25 @@ def build_context(
     return "\n\n".join(parts)
 
 
-def _answer_messages(question: str, context: str, memory: str = "") -> list[dict]:
+def _recent_block(recent: list[dict] | None) -> str:
+    """最近几轮只留角色和正文，不带 client_id / sources 等内部字段。"""
+    lines = [
+        f"{'用户' if m.get('role') == 'user' else '助手'}：{str(m.get('text', ''))[:300]}"
+        for m in (recent or [])[-6:]
+    ]
+    return "【最近对话】\n" + "\n".join(lines)
+
+
+def _answer_messages(
+    question: str,
+    context: str,
+    memory: str = "",
+    recent: list[dict] | None = None,
+) -> list[dict]:
     system = ANSWER_SYS + (MEMORY_RULES if memory else "")
     user = f"【材料】\n{context}\n\n【问题】{question}"
+    if recent:
+        user = f"{_recent_block(recent)}\n\n{user}"
     if memory:
         user = f"【背景记忆】\n{memory}\n\n{user}"
     return [
@@ -325,9 +341,14 @@ def _answer_messages(question: str, context: str, memory: str = "") -> list[dict
     ]
 
 
-async def answer(question: str, context: str, memory: str = "") -> str:
+async def answer(
+    question: str,
+    context: str,
+    memory: str = "",
+    recent: list[dict] | None = None,
+) -> str:
     raw = await chat(
-        _answer_messages(question, context, memory),
+        _answer_messages(question, context, memory, recent),
         temperature=0.2,
         max_tokens=4000,
     )
@@ -335,11 +356,14 @@ async def answer(question: str, context: str, memory: str = "") -> str:
 
 
 async def answer_stream(
-    question: str, context: str, memory: str = ""
+    question: str,
+    context: str,
+    memory: str = "",
+    recent: list[dict] | None = None,
 ) -> AsyncIterator[str]:
     """流式回答：逐 delta 产出，调用方负责拼接与发送。"""
     async for piece in chat_stream(
-        _answer_messages(question, context, memory),
+        _answer_messages(question, context, memory, recent),
         temperature=0.2,
         max_tokens=4000,
     ):

@@ -694,7 +694,7 @@ async def ask_paper(paper_id: str, req: AskReq) -> dict:
     brief = mem.build_brief(paper_id, standalone, exclude_message_id=user_msg["id"])
 
     prep = await _prepare_ask(paper_id, req, standalone, expanded)
-    text = await qa_engine.answer(standalone, prep.context, brief)
+    text = await qa_engine.answer(standalone, prep.context, brief, recent)
 
     latency = round(time.time() - t0, 1)
     ai_msg = mem.finish_answer(
@@ -768,7 +768,9 @@ async def ask_stream(paper_id: str, req: AskReq) -> StreamingResponse:
 
             parts: list[str] = []
             visible = 0
-            async for piece in qa_engine.answer_stream(standalone, prep.context, brief):
+            async for piece in qa_engine.answer_stream(
+                standalone, prep.context, brief, recent
+            ):
                 if not piece:
                     continue
                 parts.append(piece)
