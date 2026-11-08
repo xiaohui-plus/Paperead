@@ -1,0 +1,40 @@
+# 运行产物
+output/
+assets/
+*.blocks.json
+
+# 前端
+node_modules/
+dist/
+.vite/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+.venv/
+venv/
+
+# 环境
+.env
+
+# 测试
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 文献库数据
+data/
+
+# 桌面构建
+.venv-build/
+build-sidecar/
+dist-sidecar/
+src-tauri/target/
+src-tauri/binaries/
+src-tauri/gen/
+*.exe
+*.msi
+*.nsis
+*.zip

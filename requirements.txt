@@ -1,0 +1,7 @@
+# 运行时依赖（pip install -r requirements.txt 等价于 pip install -e ".[server]"）
+pymupdf>=1.26
+openai>=1.0
+httpx>=0.27
+fastapi>=0.110
+uvicorn>=0.29
+python-multipart>=0.0.9
