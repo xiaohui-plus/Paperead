@@ -708,6 +708,36 @@ def test_fallback_rules_mark_concept_confused(store):
     assert any(f["kind"] == "open_question" for f in store.chat("p1")["card"]["facts"])
 
 
+@pytest.mark.parametrize(
+    ("question", "expected_state", "expect_open_question", "expect_stance"),
+    [
+        ("我不懂了", "confused", True, False),
+        ("不懂了", "confused", True, False),
+        ("不明白", "confused", True, False),
+        ("还是不明白", "confused", True, False),
+        ("懂了", "understood", False, False),
+        ("不对", None, False, True),
+        ("我懂了，不对", "understood", False, True),
+        ("不对，我还是不懂", "confused", True, True),
+    ],
+)
+def test_fallback_classification(
+    store, question, expected_state, expect_open_question, expect_stance
+):
+    patch = store.fallback_patch(question, ["消息传递"])
+    assert [c["state"] for c in patch["concepts"]] == (
+        [expected_state] if expected_state else []
+    )
+    assert all(c["explicit"] is True for c in patch["concepts"])
+    assert (
+        any(f["kind"] == "open_question" for f in patch["facts"])
+        is expect_open_question
+    )
+    assert (
+        any(f["kind"] == "user_stance" for f in patch["facts"]) is expect_stance
+    )
+
+
 def test_clean_facts_over_cap_keeps_user_stance(store):
     facts = [{"kind": "user_stance", "text": "用户认为本文的消融实验缺少 width 维度"}]
     facts += [
@@ -788,9 +818,9 @@ def test_chat_card_normalizes_scalar_fields(store):
 
 
 def test_seed_normalizes_non_string_domains(store):
-    store.seed("p1", title=123, domains=[{"x": 1}, "图学习", 7])
+    store.seed("p1", title={"a": 1}, domains=[{"x": 1}, "图学习", 7])
     card = store.chat("p1")["card"]
-    assert card["title"] == "123"
+    assert card["title"] == ""
     assert card["domains"] == ["图学习"]
 
 

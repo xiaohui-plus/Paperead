@@ -202,6 +202,7 @@ def _clean_facts(value: Any) -> list[dict]:
     if not isinstance(value, list):
         return []
     out: list[dict] = []
+    seen: set[str] = set()
     for item in value:
         if not isinstance(item, dict):
             continue
@@ -212,17 +213,18 @@ def _clean_facts(value: Any) -> list[dict]:
         if not isinstance(text, str):
             continue
         text = text.strip()
-        if not 2 <= len(text) <= 120 or any(f["text"] == text for f in out):
+        if not 2 <= len(text) <= 120 or text in seen:
             continue
+        seen.add(text)
         fact = dict(item)
         fact["text"] = text
         out.append(fact)
-    while len(out) > MAX_FACTS:
-        index = min(
+    if len(out) > MAX_FACTS:
+        keep = sorted(
             range(len(out)),
             key=lambda i: (FACT_PRIORITY.get(out[i].get("kind"), 0), i),
-        )
-        out.pop(index)
+        )[-MAX_FACTS:]
+        out = [out[i] for i in sorted(keep)]
     return out
 
 
@@ -413,7 +415,7 @@ class MemoryStore:
     def seed(self, paper_id: str, title: str = "", domains: list[str] | None = None) -> None:
         if not enabled():
             return
-        title = _coerce_text(title).strip()
+        title = _card_text(title, 200)
         domains = _clean_domains(domains)
         with self._lock:
             chat = self.chat(paper_id)
@@ -714,13 +716,13 @@ class MemoryStore:
         names = [n for n in (touched or []) if n][:1]
         patch: dict = {"concepts": [], "facts": []}
 
-        if re.search(r"懂了|明白了|清楚了|可以了|理解了", q) and names:
-            patch["concepts"].append(
-                {"name": names[0], "state": "understood", "evidence": "用户表示已懂", "explicit": True}
-            )
-            return patch
+        if re.search(r"不对|错了|不是这个|(?<!没)有误|不是这样", q):
+            patch["facts"].append({"kind": "user_stance", "text": f"用户纠正：{_clip(q, 80)}"})
 
-        if re.search(r"不懂|没懂|没看懂|再说一遍|换个说法|不理解", q):
+        if re.search(
+            r"不懂|没懂|没看懂|看不懂|不明白|没明白|不清楚|没清楚|不理解|不太懂|没搞懂|再说一遍|换个说法",
+            q,
+        ):
             if names:
                 patch["concepts"].append(
                     {"name": names[0], "state": "confused", "evidence": "用户表示没懂", "explicit": True}
@@ -730,8 +732,10 @@ class MemoryStore:
                 patch["facts"].append({"kind": "open_question", "text": "有一个问题还没搞懂"})
             return patch
 
-        if re.search(r"不对|错了|不是这个|有误|不是这样", q):
-            patch["facts"].append({"kind": "user_stance", "text": f"用户纠正：{_clip(q, 80)}"})
+        if re.search(r"(?<![不没])(懂了|明白了|清楚了|可以了|理解了)", q) and names:
+            patch["concepts"].append(
+                {"name": names[0], "state": "understood", "evidence": "用户表示已懂", "explicit": True}
+            )
         return patch
 
     def forget(self, paper_id: str) -> None:
