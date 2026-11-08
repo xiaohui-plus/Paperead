@@ -354,21 +354,27 @@ fn install_downloaded_update(
 ) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
 
-    let dir = std::env::temp_dir().join("paper-reflow-update");
-    std::fs::create_dir_all(&dir).map_err(|error| format!("创建更新目录失败：{error}"))?;
-    let installer = dir.join(format!("paper-reflow-{version}-setup.exe"));
+    let temp_dir = paths::ensure_data_dir(app).join("update-temp");
+    std::fs::create_dir_all(&temp_dir).map_err(|error| format!("创建更新目录失败：{error}"))?;
+    let installer = temp_dir.join(format!("paper-reflow-{version}-setup.exe"));
     std::fs::write(&installer, bytes).map_err(|error| format!("写入更新包失败：{error}"))?;
 
     let cmd = std::env::var("SystemRoot")
         .map(|root| format!("{root}\\System32\\cmd.exe"))
         .unwrap_or_else(|_| "cmd.exe".into());
-    // 先等桌面进程退出，再启动 NSIS，避免更新包覆盖正在运行的 exe。
-    let script = format!(
-        "ping 127.0.0.1 -n 12 >nul & start \"\" \"{}\" /P /UPDATE /R",
+    // 用批处理延迟启动 NSIS：避免 exe 仍被占用，也避免 Rust 参数转义破坏 start 的引号。
+    let batch = temp_dir.join("run-update.bat");
+    let batch_content = format!(
+        "@echo off\r\nset \"TEMP={}\"\r\nset \"TMP={}\"\r\nping 127.0.0.1 -n 12 >nul\r\nstart \"\" \"{}\" /P /UPDATE /R\r\n",
+        temp_dir.display(),
+        temp_dir.display(),
         installer.display()
     );
+    std::fs::write(&batch, batch_content).map_err(|error| format!("写入更新脚本失败：{error}"))?;
     std::process::Command::new(cmd)
-        .args(["/C", &script])
+        .env("TEMP", &temp_dir)
+        .env("TMP", &temp_dir)
+        .args(["/C", &batch.to_string_lossy()])
         .creation_flags(0x0800_0000)
         .spawn()
         .map_err(|error| format!("启动更新安装器失败：{error}"))?;
