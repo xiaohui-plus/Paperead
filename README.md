@@ -7,9 +7,10 @@
 
 ## 桌面版（Windows）
 
-Windows 10/11 x64 安装包发布在 GitHub Releases，构建、签名与自动更新说明见
+Windows 10/11 x64 安装包与便携 ZIP 发布在 GitHub Releases，构建、签名与自动更新说明见
 [docs/desktop.md](docs/desktop.md)。桌面版自带 Python sidecar，使用者不需要安装
-Python/Node；数据默认在 `%LOCALAPPDATA%\paper-reflow-data`。
+Python/Node；安装版数据默认在 `%LOCALAPPDATA%\paper-reflow-data`，便携版数据在同级
+`data\` 目录。
 
 ## 能解决什么
 
@@ -197,6 +198,27 @@ POST /api/papers/{id}/ask/stream                → 同上，SSE 流式（status
 解析不到就只显示文献条目和链接，不硬凑。
 
 阅读页里段落 hover 会出现「引」按钮；也可以用 `?p={id}&prov={blockId}` 直接打开某段的出处。
+
+## 问答记忆
+
+问答不再是无状态的：每篇论文一条长会话，刷新 / 切 tab 不丢，追问能接上，答法会逐渐适配你。
+记忆全部落在 `data/memory/`（纯 JSON，可备份、可整体删除），分四层：
+
+| 层 | 记什么 | 作用域 |
+|---|---|---|
+| 对话流 | 原始问答 + 出处 + 耗时 | 每篇论文，永久 |
+| 论文记忆卡 | 这篇聊过什么、你的判断、未解决问题 | 每篇论文 |
+| 研究者画像 | 背景 / 理解深度 / 答法偏好等 6 维，带置信度与 180 天半衰 | 全局 |
+| 概念台账 | 每个概念已懂 / 在学 / 困惑 | 全局 |
+
+读路径不额外调模型：追问改写并进原来那次查询改写，记忆块本地拼装（总预算 ≤1300 字符），
+并单独注入最近 6 轮对话。每轮回答后后台跑一次小调用做整理（约 ¥0.003/轮），失败不影响回答。
+记忆文本会做控制字符与标题转义，且只用于调整讲法，不作为论文事实依据。
+
+- `GET /api/papers/{id}/chat` → `{ turns, hasMore }`，按轮配对，供前端恢复历史
+- `POST /ask` / `POST /ask/stream` 支持可选 `client_id`，重试不会重复落盘
+- 不提供记忆管理界面；删 `data/memory/` 等于"忘掉我"
+- `PAPER_REFLOW_MEMORY=0` 可整体关闭，回到无记忆问答
 
 ## 前端（论文阅读页）
 

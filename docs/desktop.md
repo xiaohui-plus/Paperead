@@ -8,10 +8,12 @@ Python 或 Node。
 
 安装包发布在 GitHub Releases：
 
-- 文件名：`paper-reflow_<version>_x64-setup.exe`
+- 安装版：`paper-reflow_<version>_x64-setup.exe`
+- 便携版：`paper-reflow_<version>_portable_x64.zip`
 - 系统：Windows 10/11 x64
 - 安装方式：per-user（安装目录 `%LOCALAPPDATA%\paper-reflow`），不弹 UAC
-- 数据目录：`%LOCALAPPDATA%\paper-reflow-data`（与安装目录分开，卸载/升级不影响文献库）
+- 安装版数据目录：`%LOCALAPPDATA%\paper-reflow-data`（与安装目录分开，卸载/升级不影响文献库）
+- 便携版：解压后双击 `启动.cmd`，数据在同级 `data\`；更新时下载新 ZIP，保留 `data\`
 - 卸载：默认保留数据；可在应用内打开数据目录手动删除
 
 首次启动会说明本地数据与模型请求范围，然后打开“模型与密钥”设置：回答模型负责问答/翻译，
@@ -28,12 +30,14 @@ npm ci --prefix web
 uv venv .venv-build --python 3.12
 uv pip install --python .venv-build\Scripts\python.exe -e ".[server]" "pyinstaller>=6.10"
 npm run build:installer
+npm run build:portable
 ```
 
 产物：
 
 ```
 src-tauri\target\release\bundle\nsis\paper-reflow_0.1.0_x64-setup.exe
+release\paper-reflow_0.1.0_portable_x64.zip
 ```
 
 构建脚本会：
@@ -54,6 +58,9 @@ npm run tauri -- dev
 ```
 
 ## 自动更新
+
+应用内自动更新面向**安装版**。便携版请下载新版便携 ZIP，覆盖 `paper-reflow-desktop.exe`
+和 `resources\`，保留 `data\`。
 
 当前 `src-tauri/tauri.conf.json` 里的更新地址是占位符：
 
