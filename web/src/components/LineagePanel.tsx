@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
 import { getLineage, makeLineage, type Lineage, type LineageNode } from '../lib/library'
-import { isConfigured, loadSettings } from '../lib/settings'
+import { loadModelSettings, readyModel, toPayload } from '../lib/settings'
 import { IconSpark } from './icons'
 
 interface Props {
   paperId: string
   onOpenSettings: () => void
+  settingsVersion?: number
 }
 
 const ROLE_CLASS: Record<string, string> = {
@@ -15,7 +16,7 @@ const ROLE_CLASS: Record<string, string> = {
   tool: 'r-tool',
 }
 
-export function LineagePanel({ paperId, onOpenSettings }: Props) {
+export function LineagePanel({ paperId, onOpenSettings, settingsVersion = 0 }: Props) {
   const [data, setData] = useState<Lineage | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -24,8 +25,8 @@ export function LineagePanel({ paperId, onOpenSettings }: Props) {
 
   const generate = useCallback(
     async (refresh = false) => {
-      const cfg = loadSettings()
-      if (!isConfigured(cfg)) {
+      const cfg = readyModel(loadModelSettings(), 'answer')
+      if (!cfg) {
         setNeedsConfig(true)
         setLoading(false)
         return
@@ -34,13 +35,7 @@ export function LineagePanel({ paperId, onOpenSettings }: Props) {
       setError('')
       setNeedsConfig(false)
       try {
-        setData(
-          await makeLineage(
-            paperId,
-            { base_url: cfg.baseUrl, api_key: cfg.apiKey, model: cfg.model },
-            refresh,
-          ),
-        )
+        setData(await makeLineage(paperId, toPayload(cfg), refresh))
       } catch (e) {
         setError(e instanceof Error ? e.message : '生成失败')
       } finally {
@@ -74,6 +69,13 @@ export function LineagePanel({ paperId, onOpenSettings }: Props) {
       alive = false
     }
   }, [paperId, generate])
+
+  // 之前因为没配置模型停在「去设置」时，保存配置后自动继续生成
+  useEffect(() => {
+    if (!needsConfig) return
+    if (!readyModel(loadModelSettings(), 'answer')) return
+    void generate(false)
+  }, [settingsVersion, needsConfig, generate])
 
   if (loading) {
     return (

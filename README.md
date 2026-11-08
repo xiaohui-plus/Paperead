@@ -41,7 +41,9 @@ pip install pymupdf openai
   不会停在"一直转圈但不动"
 - **优先翻译停留页**：滚动停稳 700ms 才开始翻译；如果正在翻的页已经被划走，直接中止，
   把配额让给真正停留的那一页
-- **未配置时始终可见**：顶栏常驻「未配置模型」橙色提示，点击直达设置——不会出现"什么都没发生"
+- **未配置时始终可见**：顶栏常驻「未配置回答模型」橙色提示，点击直达设置——不会出现"什么都没发生"
+- **问答框直接切模型**：输入框下方显示当前回答模型，点开即可在已配置的回答模型间切换；
+  回答模型与识图模型分开设置，互不干扰
 - **状态**：`解析中 → 已就绪`，失败可重试
 - **检索与整理**：搜索（标题 / 作者 / 文件名）、筛选（全部 / 已就绪 / 未翻译 / 解析失败）、排序（最近 / 标题 / 页数）、网格与列表切换
 - **从 Zotero 导入**：读本机 Zotero 7 的本地 API，只导入带 PDF 附件的条目。
@@ -49,6 +51,46 @@ pip install pymupdf openai
 - 点卡片进入阅读页，左上角返回
 
 数据落在 `data/`：`papers/{id}.pdf`、`{id}.thumb.png`（首页缩略图）、`{id}.blocks.json`，索引在 `library.json`。
+
+## 文献检索
+
+![文献检索](docs/preview-search.png)
+
+侧栏「文献检索」直连 arXiv / PubMed / OpenAlex / Europe PMC，替代原来的「参考文献引用助手」占位：
+
+- **四个源**：arXiv（预印本，遵守 3 秒 1 次的官方限流）、PubMed（E-utilities）、
+  OpenAlex（全学科 + 被引量）、Europe PMC（生物医学 + 开放获取全文）
+- **高级检索**：字段（全部 / 标题 / 摘要 / 作者）、arXiv 分类、年份区间、短语精确匹配、每页条数
+- **每日推荐**：没有关键词时按「热度 × 时间衰减 + 分类均衡」给出 12 篇；同一天结果稳定，
+  「换一批」按全天队列切窗口，相邻两批不重叠
+- **一键导入文献库**：详情页「导入文献库并阅读」会下载开放获取 PDF
+  （arXiv 直链 / OpenAlex / Europe PMC / Unpaywall 兜底），写进文献库后立刻后台解析，
+  随即可用重排阅读与逐段翻译；已导入过的按题录 id 去重，重复导入直接打开原条目
+- **引用与导出**：GB/T 7714、APA、MLA、IEEE、BibTeX、RIS 一键复制；结果页可导出 BibTeX / RIS
+- **中文检索**：查询含中文时先译成英文再检索，界面回显实际检索词；翻译失败退回原查询
+
+```bash
+GET  /api/scholar/search    q, source, sort, page, field, phrase, category, from_year, to_year, per_page
+GET  /api/scholar/daily     round
+GET  /api/scholar/paper     id=arxiv:2401.00001
+GET  /api/scholar/fulltext  doi
+POST /api/scholar/import    { id }
+POST /api/scholar/cite      { paper, style }
+POST /api/scholar/export    { papers, format }
+```
+
+数据源都是公开接口，不需要 Key；OpenAlex / Unpaywall 用 `PAPER_REFLOW_MAILTO`
+（默认 `paper-reflow@users.noreply.github.com`）走礼貌池。Unpaywall 会拒绝 example.com 这类占位邮箱，
+建议把它换成你自己的邮箱。检索页状态都在 URL 里
+（`?v=search&q=&src=&sort=&page=...`），刷新、前进后退、从阅读页返回都能还原。
+
+以下环境变量可选：
+
+| 环境变量 | 说明 | 默认 |
+|---|---|---|
+| `PAPER_REFLOW_MAILTO` | OpenAlex / Unpaywall 的联系邮箱 | `paper-reflow@users.noreply.github.com` |
+| `PAPER_REFLOW_OPENALEX` | OpenAlex 兼容地址（旧版导读检索仍用） | `https://api.openalex.org` |
+
 
 ## 快速开始
 
@@ -71,7 +113,7 @@ cd web && npm run dev                   # 终端 2：前端（5173，/api 已代
 
 ```bash
 export PAPER_REFLOW_API_KEY=sk-xxx          # 或 OPENAI_API_KEY
-export PAPER_REFLOW_MODEL=deepseek-chat
+export PAPER_REFLOW_MODEL=deepseek-flash
 
 # 只解析
 paper-reflow paper.pdf -o out
@@ -95,12 +137,23 @@ paper-reflow paper.pdf -o out --formula
 识别在**解析阶段**完成并写入 `blocks[].latex`，阅读时不再调模型；结果按图片 sha1 缓存在
 `~/.cache/paper-reflow/formula/`，同一公式重跑零成本。识别失败或 KaTeX 不支持时，前端自动回落到裁图。
 
+识图模型在「设置 → 识图模型」里单独配置，和回答模型互不影响；推荐服务商旁有「获取 API Key」
+直达官网，配置后可以点「测试」用一张示例公式验证识图能力。
+
 ### 设置模型与密钥
 
 ![设置](docs/preview-settings.png)
 
-右上角齿轮打开设置，填服务商 / 接口地址 / 模型名 / API Key。配置存在**本机 localStorage**。
-浏览器直连国内厂商接口会被 CORS 拦，所以需要一层本地服务：
+右上角齿轮打开设置。配置分成两套，互不影响：
+
+- **回答模型**：论文问答、翻译、导读、脉络等所有文字任务。
+- **识图模型**：论文阅读里的图片理解（公式裁图 → LaTeX）。
+
+推荐服务商都带「获取 API Key」按钮，直接跳到官方创建密钥页面；每个服务商卡片里还有**模型下拉框**，
+可以选择该平台当前提供的模型（DeepSeek：V4.1 Flash / V4 Pro；智谱：GLM-5.3 / 5.2 / 5 / 4.6；
+Kimi：K3.1 Pro / 高速版 / K3；豆包：Seed 2.0 Pro / Lite；通义：Qwen3-Max-Thinking / Qwen-Plus）。
+选中模型后只需要粘贴 API Key，接口地址和模型名会自动填好。也可以添加自定义模型，只填接口地址、模型名、
+API Key 三项即可。配置存在**本机 localStorage**，两套密钥互相独立。浏览器直连国内厂商接口会被 CORS 拦，所以需要一层本地服务：
 
 ```bash
 pip install -e ".[server]"
@@ -125,11 +178,13 @@ GET  /api/papers/{id}/block/{bid}/provenance    → 这段引用了谁、原文�
 POST /api/papers/{id}/lineage                   → 生成思路来源图（谁启发了本文、改了什么）
 GET  /api/papers/{id}/lineage                   → 读取缓存
 POST /api/papers/{id}/ask                       → 三路问答（本文 / 引用文献 / 网页），带出处
+POST /api/papers/{id}/ask/stream                → 同上，SSE 流式（status → sources → delta → done）
 ```
 
 **问答不是纯 Agent**：默认走确定性管道（BM25 检索论文段落 → 生成带页码引用的回答，约 6s）；
 只有问题涉及"最新进展/其他方法/领域对比"或论文内检索分数过低时，才升级为网络检索（Tavily）。
 网络结果在回答里用 `[W1]` 标注，和 `[P3]`（第 3 页）、`[R31]`（参考文献 31）区分开。
+前端走 `/ask/stream`：先显示检索状态和出处，正文逐字出现，完成后按 Markdown 文档排版（标题、列表、表格、KaTeX 公式）。
 
 **脉络**只保留"作者在正文里描述过关系"的文献，每条边绑定一句原文证据；判不出关系的直接丢弃。
 同一类"借了什么"会去重，避免 5 篇特征选择方法都显示成同一句背景。
@@ -151,16 +206,21 @@ POST /api/papers/{id}/ask                       → 三路问答（本文 / 引�
 
 - **左侧阅读助手**，五个标签切换：
   - **导读**（默认）—— 3 分钟读懂这篇：一句话总结、领域、难度、**前置知识清单**（附"为什么"和对应文献）、**推荐阅读顺序**
-  - **问答** —— 快速问题（总结 / 大纲 / 学习指南）+ 输入框
+  - **问答** —— 快速问题（总结 / 大纲 / 学习指南）+ 输入框；回答流式输出，按文档排版
   - **目录** —— 一二级标题，随滚动高亮
   - **阅读重点** —— 每个章节取首句，用于扫读
   - **图表** —— 全部插图与表格的缩略图，点击跳转
 - **正文**：英文原文在上、中文译文在下（术语用蓝色虚线下划线标注，悬停显示英文原词）；
   三档模式切换（对照 / 译文 / 原文）、字号调节、段落复制、页内深链（`#b0013`）
+- **原版 PDF**：顶栏的文档图标一键切到原版排版（逐页图、连续滚动、可缩放），
+  切过去时停留在当前页，切回来时重排阅读的滚动位置不变；「新窗口 ↗」可交给系统阅读器打开原始 PDF。
+  页图由本地服务用 PyMuPDF 渲染并按页缓存，不依赖浏览器/WebView 的 PDF 插件
 - **表格只做整图切片**，不解析表结构——合并单元格、跨行跨列交给原始排版，避免提取出错误的数据
 - 导出 Markdown、打印/存 PDF
 
 ![图表切片](docs/preview-content.png)
+
+![原版 PDF](docs/preview-pdf.png)
 
 ```bash
 cd web
@@ -249,7 +309,7 @@ asyncio.run(main())
 |---|---|---|
 | `PAPER_REFLOW_API_KEY` / `OPENAI_API_KEY` | API Key | 必填 |
 | `PAPER_REFLOW_BASE_URL` / `OPENAI_BASE_URL` | OpenAI 兼容地址 | `https://api.deepseek.com/v1` |
-| `PAPER_REFLOW_MODEL` / `OPENAI_MODEL` | 模型名 | `deepseek-chat` |
+| `PAPER_REFLOW_MODEL` / `OPENAI_MODEL` | 模型名 | `deepseek-flash` |
 | `PAPER_REFLOW_TIMEOUT` | 单请求超时（秒） | `300` |
 
 任意 OpenAI 兼容服务都能接（SiliconFlow / vLLM / Ollama / OneAPI）。宿主应用也可以注入自己的实现：
@@ -309,18 +369,21 @@ paper_reflow/
   translate.py  术语表 + 占位符 + 逐段翻译
   llm.py        LLM 接入（默认 OpenAI 兼容，可注入）
   cli.py        命令行入口
+  scholar/      外部文献检索（arXiv / PubMed / OpenAlex / Europe PMC / 每日推荐 / 引用格式）
 server/          本地服务
-  main.py        API：文献库 / 公式识别 / Zotero / 静态托管
+  main.py        API：文献库 / 检索挂载 / 公式识别 / Zotero / 静态托管
+  scholar_api.py 检索接口（检索逻辑在 paper_reflow/scholar，文献库能力由 main 注入）
   store.py       论文文件与元信息、首页缩略图
 web/             前端（React + Vite + KaTeX）
   src/components/  LibraryPage · PaperCard · Sidebar（文献库）
+                   ScholarPage · ScholarSearchBar · ScholarResult · ScholarDetail（文献检索）
                    ReaderView · TopBar · LeftPanel · Reader · BlockView（阅读页）
-                   SettingsDialog · Katex
-  src/lib/         api · library · settings · blocks · highlight · assistant · markdown
+                   SettingsDialog · Katex · MathText
+  src/lib/         api · library · scholar · scholarUrl · math · settings · blocks · highlight · assistant · markdown
   public/demo/     真实论文的示例数据
 tests/
 examples/
-docs/           预览截图
+docs/           预览截图与设计文档
 ```
 
 ## License

@@ -1,5 +1,6 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent_sidecar;
 mod api;
 mod paths;
 mod sidecar;
@@ -12,12 +13,14 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::UpdaterExt;
 use url::Url;
 
+use agent_sidecar::AgentSidecar;
 use sidecar::Sidecar;
 
 struct AppState {
     port: u16,
     token: String,
     sidecar: Mutex<Option<Sidecar>>,
+    agent: Mutex<Option<AgentSidecar>>,
 }
 
 fn main() {
@@ -52,14 +55,26 @@ fn main() {
             };
 
             let port = sidecar.port;
+            let token = sidecar.token.clone();
+            let data_dir = paths::ensure_data_dir(&handle);
+
+            let agent = match AgentSidecar::start(&handle, port, &token, &data_dir) {
+                Ok(agent) => Some(agent),
+                Err(error) => {
+                    // Research is optional: the library and reader must still open.
+                    paths::log_line(&handle, &format!("agent start failed: {error}"));
+                    None
+                }
+            };
+
             app.manage(AppState {
                 port,
-                token: sidecar.token.clone(),
+                token,
                 sidecar: Mutex::new(Some(sidecar)),
+                agent: Mutex::new(agent),
             });
 
             paths::log_line(&handle, "creating main window");
-            let data_dir = paths::ensure_data_dir(&handle);
             if let Err(error) = create_main_window(app, port, &data_dir) {
                 paths::log_line(&handle, &format!("create window failed: {error}"));
                 return Err(Box::new(error));
@@ -280,9 +295,23 @@ async fn check_updates(app: AppHandle, interactive: bool) {
                         return;
                     }
                     let app_for_update = app_for_dialog.clone();
+                    let version_for_update = version.clone();
                     tauri::async_runtime::spawn(async move {
-                        match update.download_and_install(|_, _| {}, || {}).await {
-                            Ok(_) => app_for_update.restart(),
+                        match update.download(|_, _| {}, || {}).await {
+                            Ok(bytes) => {
+                                if let Err(error) = install_downloaded_update(
+                                    &app_for_update,
+                                    &version_for_update,
+                                    &bytes,
+                                ) {
+                                    app_for_update
+                                        .dialog()
+                                        .message(format!("更新失败：{error}"))
+                                        .title("更新失败")
+                                        .kind(MessageDialogKind::Error)
+                                        .show(|_| {});
+                                }
+                            }
                             Err(error) => {
                                 app_for_update
                                     .dialog()
@@ -317,8 +346,51 @@ async fn check_updates(app: AppHandle, interactive: bool) {
     }
 }
 
-fn show_about(app: &AppHandle) {
-    let message = format!(
+#[cfg(windows)]
+fn install_downloaded_update(
+    app: &AppHandle,
+    version: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
+    let dir = std::env::temp_dir().join("paper-reflow-update");
+    std::fs::create_dir_all(&dir).map_err(|error| format!("创建更新目录失败：{error}"))?;
+    let installer = dir.join(format!("paper-reflow-{version}-setup.exe"));
+    std::fs::write(&installer, bytes).map_err(|error| format!("写入更新包失败：{error}"))?;
+
+    let cmd = std::env::var("SystemRoot")
+        .map(|root| format!("{root}\\System32\\cmd.exe"))
+        .unwrap_or_else(|_| "cmd.exe".into());
+    // 先等桌面进程退出，再启动 NSIS，避免更新包覆盖正在运行的 exe。
+    let script = format!(
+        "ping 127.0.0.1 -n 12 >nul & start \"\" \"{}\" /P /UPDATE /R",
+        installer.display()
+    );
+    std::process::Command::new(cmd)
+        .args(["/C", &script])
+        .creation_flags(0x0800_0000)
+        .spawn()
+        .map_err(|error| format!("启动更新安装器失败：{error}"))?;
+
+    paths::log_line(
+        app,
+        &format!("update installer scheduled: {}", installer.display()),
+    );
+    app.exit(0);
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn install_downloaded_update(
+    _app: &AppHandle,
+    _version: &str,
+    _bytes: &[u8],
+) -> Result<(), String> {
+    Err("当前平台暂不支持自动安装更新".into())
+}
+
+fn show_about(app: &AppHandle) {    let message = format!(
         "paper-reflow {}\n\nAGPL-3.0 开源\n源码与安装包见 GitHub Releases。",
         env!("CARGO_PKG_VERSION")
     );
@@ -330,6 +402,11 @@ fn show_about(app: &AppHandle) {
 
 fn shutdown(app: &AppHandle) {
     if let Some(state) = app.try_state::<AppState>() {
+        if let Ok(mut guard) = state.agent.lock() {
+            if let Some(mut agent) = guard.take() {
+                agent.stop();
+            }
+        }
         if let Ok(mut guard) = state.sidecar.lock() {
             if let Some(mut sidecar) = guard.take() {
                 sidecar.stop();
@@ -337,3 +414,4 @@ fn shutdown(app: &AppHandle) {
         }
     }
 }
+

@@ -14,10 +14,11 @@ from __future__ import annotations
 import logging
 import math
 import re
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
 from ..layout import Block
-from ..llm import chat
+from ..llm import chat, chat_stream
 
 log = logging.getLogger(__name__)
 
@@ -249,13 +250,27 @@ def build_context(
     return "\n\n".join(parts)
 
 
+def _answer_messages(question: str, context: str) -> list[dict]:
+    return [
+        {"role": "system", "content": ANSWER_SYS},
+        {"role": "user", "content": f"【材料】\n{context}\n\n【问题】{question}"},
+    ]
+
+
 async def answer(question: str, context: str) -> str:
     raw = await chat(
-        [
-            {"role": "system", "content": ANSWER_SYS},
-            {"role": "user", "content": f"【材料】\n{context}\n\n【问题】{question}"},
-        ],
+        _answer_messages(question, context),
         temperature=0.2,
         max_tokens=4000,
     )
     return raw.strip()
+
+
+async def answer_stream(question: str, context: str) -> AsyncIterator[str]:
+    """流式回答：逐 delta 产出，调用方负责拼接与发送。"""
+    async for piece in chat_stream(
+        _answer_messages(question, context),
+        temperature=0.2,
+        max_tokens=4000,
+    ):
+        yield piece

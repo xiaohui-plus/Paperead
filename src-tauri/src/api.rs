@@ -14,6 +14,18 @@ pub fn health(port: u16, token: &str) -> Result<Value, String> {
         .map_err(|error| error.to_string())
 }
 
+pub fn agent_health(port: u16, token: &str) -> Result<Value, String> {
+    let url = format!("http://127.0.0.1:{port}/v1/health");
+    let response = ureq::get(&url)
+        .set("X-Agent-Token", token)
+        .timeout(Duration::from_millis(800))
+        .call()
+        .map_err(|error| error.to_string())?;
+    response
+        .into_json::<Value>()
+        .map_err(|error| error.to_string())
+}
+
 pub fn import_pdf(port: u16, token: &str, path: &str) -> Result<String, String> {
     let url = format!("http://127.0.0.1:{port}/api/papers/import");
     let response = ureq::post(&url)

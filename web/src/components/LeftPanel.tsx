@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import type { Block, Paper } from '../types'
 import type { KeyPoint } from '../lib/assistant'
+import type { ModelKind } from '../lib/settings'
 import { ChatPanel } from './ChatPanel'
 import { OutlinePanel } from './OutlinePanel'
 import { KeyPointsPanel } from './KeyPointsPanel'
@@ -18,7 +19,8 @@ interface Props {
   points: KeyPoint[]
   activeId: string
   onJump: (id: string) => void
-  onOpenSettings: () => void
+  onOpenSettings: (kind?: ModelKind) => void
+  settingsVersion?: number
 }
 
 const TABS: { key: TabKey; label: string; icon: ReactNode }[] = [
@@ -43,6 +45,7 @@ export function LeftPanel({
   activeId,
   onJump,
   onOpenSettings,
+  settingsVersion = 0,
 }: Props) {
   const [tab, setTab] = useState<TabKey>(initialTab)
 
@@ -76,15 +79,24 @@ export function LeftPanel({
           paper={paper}
           paperId={paperId}
           onJump={onJump}
-          onOpenSettings={onOpenSettings}
+          onOpenSettings={() => onOpenSettings('answer')}
+          settingsVersion={settingsVersion}
         />
       ) : (
         <div className="tab-body">
           {tab === 'guide' && (
-            <GuidePanel paperId={paperId} onOpenSettings={onOpenSettings} />
+            <GuidePanel
+              paperId={paperId}
+              onOpenSettings={() => onOpenSettings('answer')}
+              settingsVersion={settingsVersion}
+            />
           )}
           {tab === 'lineage' && (
-            <LineagePanel paperId={paperId} onOpenSettings={onOpenSettings} />
+            <LineagePanel
+              paperId={paperId}
+              onOpenSettings={() => onOpenSettings('answer')}
+              settingsVersion={settingsVersion}
+            />
           )}
           {tab === 'outline' && (
             <OutlinePanel items={outline} activeId={activeId} onJump={onJump} />

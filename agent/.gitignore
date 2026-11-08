@@ -1,0 +1,11 @@
+node_modules/
+.pnpm-store/
+profiles/node_modules/
+sessions/
+settings.yaml
+.credentials.yaml
+.anonymous-user-id
+dump.txt
+agent-run.log
+test/*.log
+*.log

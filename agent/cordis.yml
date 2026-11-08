@@ -1,0 +1,4 @@
+# Root config for the direct boot path.
+# The actual rows come from the dsh-base patch plus the research bundle patch;
+# this file is the empty profile root the patches are applied to.
+[]

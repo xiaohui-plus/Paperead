@@ -1,19 +1,24 @@
-import { IconBook, IconSettings, IconSpark } from './icons'
+import type { ReactElement } from 'react'
+import { IconBook, IconList, IconSearch, IconSettings, IconSpark } from './icons'
+
+type NavKey = 'library' | 'search' | 'research' | 'review'
 
 interface Props {
-  active: 'library'
-  count: number
+  active: 'library' | 'search'
+  /** 文献库条数；检索页不传就不显示角标 */
+  count?: number
+  onNav: (key: 'library' | 'search') => void
   onSettings: () => void
 }
 
-const NAV = [
-  { key: 'library', label: '文献库', enabled: true },
-  { key: 'research', label: '研究', enabled: false },
-  { key: 'review', label: '写综述报告', enabled: false },
-  { key: 'cite', label: '参考文献引用助手', enabled: false },
-] as const
+const NAV: { key: NavKey; label: string; enabled: boolean; icon: () => ReactElement }[] = [
+  { key: 'library', label: '文献库', enabled: true, icon: IconBook },
+  { key: 'search', label: '文献检索', enabled: true, icon: IconSearch },
+  { key: 'research', label: '研究', enabled: false, icon: IconSpark },
+  { key: 'review', label: '写综述报告', enabled: false, icon: IconList },
+]
 
-export function Sidebar({ count, onSettings }: Props) {
+export function Sidebar({ active, count, onNav, onSettings }: Props) {
   return (
     <aside className="library-side">
       <div className="library-brand">
@@ -24,19 +29,25 @@ export function Sidebar({ count, onSettings }: Props) {
       </div>
 
       <nav className="library-nav">
-        {NAV.map((item) => (
-          <button
-            key={item.key}
-            className="library-nav-item"
-            data-active={item.key === 'library'}
-            disabled={!item.enabled}
-            title={item.enabled ? '' : '即将上线'}
-          >
-            <IconBook />
-            <span>{item.label}</span>
-            {item.key === 'library' && <em>{count}</em>}
-          </button>
-        ))}
+        {NAV.map((item) => {
+          const Icon = item.icon
+          return (
+            <button
+              key={item.key}
+              className="library-nav-item"
+              data-active={item.key === active}
+              disabled={!item.enabled}
+              title={item.enabled ? '' : '即将上线'}
+              onClick={() => {
+                if (item.key === 'library' || item.key === 'search') onNav(item.key)
+              }}
+            >
+              <Icon />
+              <span>{item.label}</span>
+              {item.key === 'library' && count != null && <em>{count}</em>}
+            </button>
+          )
+        })}
       </nav>
 
       <div className="library-folders">

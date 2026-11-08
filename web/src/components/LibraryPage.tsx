@@ -18,9 +18,10 @@ type Sort = 'recent' | 'title' | 'pages'
 
 interface Props {
   onOpenPaper: (id: string) => void
+  onNav: (key: 'library' | 'search') => void
 }
 
-export function LibraryPage({ onOpenPaper }: Props) {
+export function LibraryPage({ onOpenPaper, onNav }: Props) {
   const [papers, setPapers] = useState<PaperRow[]>([])
   const [loading, setLoading] = useState(true)
   const [demoMode, setDemoMode] = useState(false)
@@ -159,7 +160,7 @@ export function LibraryPage({ onOpenPaper }: Props) {
       onDragLeave={() => setDragOver(false)}
       onDrop={onDrop}
     >
-      <Sidebar active="library" count={papers.length} onSettings={() => setSettingsOpen(true)} />
+      <Sidebar active="library" count={papers.length} onNav={onNav} onSettings={() => setSettingsOpen(true)} />
 
       <main className="library-main">
         <header className="library-head">
@@ -292,7 +293,7 @@ export function LibraryPage({ onOpenPaper }: Props) {
       <SettingsDialog
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
-        onSaved={() => notify('已保存模型配置')}
+        onSaved={() => notify('模型配置已更新')}
       />
     </div>
   )

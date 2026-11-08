@@ -4,9 +4,15 @@ import { loadPaper } from '../lib/api'
 import { outlineOf } from '../lib/blocks'
 import { keyPoints } from '../lib/assistant'
 import { translateStream } from '../lib/library'
-import { isConfigured, loadSettings } from '../lib/settings'
+import {
+  loadModelSettings,
+  readyModel,
+  toPayload,
+  type ModelKind,
+} from '../lib/settings'
 import { TopBar } from './TopBar'
 import { LeftPanel } from './LeftPanel'
+import { PdfPages } from './PdfPages'
 import { Reader } from './Reader'
 import { SettingsDialog } from './SettingsDialog'
 
@@ -25,11 +31,27 @@ export function ReaderView({ paperId, onBack }: Props) {
   const [visiblePage, setVisiblePage] = useState(1)
   const [settledPage, setSettledPage] = useState(1)
   const [translating, setTranslating] = useState(false)
+  // 示例数据只有 paper.json，没有 PDF 可看
+  const pdfHref = `/api/papers/${encodeURIComponent(paperId)}/file`
+  const canShowPdf = paperId !== 'demo'
+  const [pdfMode, setPdfMode] = useState(
+    () =>
+      paperId !== 'demo' &&
+      new URLSearchParams(window.location.search).get('view') === 'pdf',
+  )
+  // 原版 PDF 的显示宽度与当前页码；页码跟着 PDF 滚动更新，顶栏显示 P{n}
+  const [pdfWidth, setPdfWidth] = useState(1000)
+  const [pdfPage, setPdfPage] = useState(1)
   const [settingsOpen, setSettingsOpen] = useState(
     () => new URLSearchParams(window.location.search).get('settings') === '1',
   )
-  const [configured, setConfigured] = useState(() => isConfigured(loadSettings()))
+  const [configured, setConfigured] = useState(() =>
+    Boolean(readyModel(loadModelSettings(), 'answer')),
+  )
+  const [settingsKind, setSettingsKind] = useState<ModelKind>('answer')
+  const [settingsVersion, setSettingsVersion] = useState(0)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const savedScroll = useRef(0)
   const paperRef = useRef<Paper | null>(null)
   const pageById = useRef<Map<string, number>>(new Map())
   const requested = useRef<Set<number>>(new Set())
@@ -87,8 +109,8 @@ export function ReaderView({ paperId, onBack }: Props) {
     async (pages: number[]) => {
       const current = paperRef.current
       if (!current || paperId === 'demo') return
-      const cfg = loadSettings()
-      if (!isConfigured(cfg)) return
+      const cfg = readyModel(loadModelSettings(), 'answer')
+      if (!cfg) return
       // 同一时刻只跑一条流。用户快速滑动时：若正在翻的页已经离开视野，
       // 直接中止它，把配额让给用户真正停下来的那一页；否则排到队尾。
       if (inFlight.current) {
@@ -118,7 +140,7 @@ export function ReaderView({ paperId, onBack }: Props) {
       try {
         await translateStream(
           paperId,
-          { base_url: cfg.baseUrl, api_key: cfg.apiKey, model: cfg.model },
+          toPayload(cfg),
           need,
           (evt) => {
             if (evt.type === 'block' && evt.block) {
@@ -176,8 +198,8 @@ export function ReaderView({ paperId, onBack }: Props) {
       if (inFlight.current) return
       const current = paperRef.current
       if (!current) return
-      const cfg = loadSettings()
-      if (!isConfigured(cfg)) return
+      const cfg = readyModel(loadModelSettings(), 'answer')
+      if (!cfg) return
       const maxPage = current.page_count || 1
       const pages = [settledPage, settledPage + 1].filter((p) => p >= 1 && p <= maxPage)
       const hasPending = pages.some((pg) =>
@@ -192,7 +214,7 @@ export function ReaderView({ paperId, onBack }: Props) {
 
   // ── 深链 / 目录高亮 / 当前页 ───────────────────────────
   useEffect(() => {
-    if (!paper) return
+    if (!paper || pdfMode) return
     const hash = decodeURIComponent(window.location.hash.slice(1))
     if (!hash) return
     const timer = window.setTimeout(() => {
@@ -203,11 +225,11 @@ export function ReaderView({ paperId, onBack }: Props) {
       el?.dispatchEvent(new Event('scroll'))
     }, 120)
     return () => window.clearTimeout(timer)
-  }, [paper])
+  }, [paper, pdfMode])
 
   useEffect(() => {
     const el = scrollRef.current
-    if (!el || !paper) return
+    if (!el || !paper || pdfMode) return
 
     const onScroll = () => {
       const threshold = el.getBoundingClientRect().top + 140
@@ -226,12 +248,40 @@ export function ReaderView({ paperId, onBack }: Props) {
     el.addEventListener('scroll', onScroll, { passive: true })
     onScroll()
     return () => el.removeEventListener('scroll', onScroll)
-  }, [paper])
+    // 从 PDF 切回重排时 Reader 会重新挂载，必须重新绑定滚动监听
+  }, [paper, pdfMode])
 
   const jump = (id: string) => {
     const node = scrollRef.current?.querySelector<HTMLElement>(`#${CSS.escape(id)}`)
     node?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
+
+  // 切到原版 PDF 时把当前页码带过去；切回来时恢复重排阅读的滚动位置
+  const togglePdf = () => {
+    if (!canShowPdf) return
+    const next = !pdfMode
+    if (next) {
+      savedScroll.current = scrollRef.current?.scrollTop ?? 0
+      setPdfPage(visiblePage)
+    }
+    setPdfMode(next)
+    const url = new URL(window.location.href)
+    if (next) url.searchParams.set('view', 'pdf')
+    else url.searchParams.delete('view')
+    window.history.replaceState({}, '', url)
+  }
+
+  // 原版视图里 Reader 是卸载状态，滚动位置存在内存里，切回来补上
+  useEffect(() => {
+    if (pdfMode) return
+    const el = scrollRef.current
+    if (!el || !savedScroll.current) return
+    const top = savedScroll.current
+    const timer = window.setTimeout(() => {
+      el.scrollTop = top
+    }, 60)
+    return () => window.clearTimeout(timer)
+  }, [pdfMode])
 
   if (error) {
     return (
@@ -273,52 +323,86 @@ export function ReaderView({ paperId, onBack }: Props) {
         mode={mode}
         onMode={setMode}
         scale={scale}
-        onScale={(v) => setScale(Math.min(1.35, Math.max(0.85, v)))}
+        onScale={(v) => {
+          if (pdfMode) {
+            // 原版视图下 ± 控制页面宽度
+            const step = v > scale ? 120 : -120
+            setPdfWidth((w) => Math.min(1200, Math.max(600, w + step)))
+          } else {
+            setScale(Math.min(1.35, Math.max(0.85, v)))
+          }
+        }}
         translated={translated}
         total={total}
         onOpenSettings={() => {
+          setSettingsKind('answer')
           setSettingsOpen(true)
         }}
         configured={configured}
         onBack={onBack}
         hasTranslation={translated > 0}
         translating={translating}
-        page={visiblePage}
+        page={pdfMode ? pdfPage : visiblePage}
+        canShowPdf={canShowPdf}
+        pdfMode={pdfMode}
+        onTogglePdf={togglePdf}
+        pdfHref={pdfHref}
       />
 
-      <div className="workspace">
-        <LeftPanel
-          paperId={paperId}
-          paper={paper}
-          outline={outline}
-          points={points}
-          activeId={activeId}
-          onJump={jump}
-          onOpenSettings={() => setSettingsOpen(true)}
-        />
-        <Reader
-          paper={paper}
-          mode={mode}
-          scale={scale}
-          scrollRef={scrollRef}
-          canTranslate={configured}
-          onOpenSettings={() => setSettingsOpen(true)}
-          hint={
-            !configured
-              ? '未配置模型，翻译未开启。填写模型与密钥后，打开论文会自动翻译当前页和下一页。'
-              : translating
-                ? '正在翻译当前页…'
-                : '当前页还没有译文，停在这里几秒会自动开始翻译。'
-          }
-        />
+      <div className={`workspace ${pdfMode ? 'is-pdf' : ''}`}>
+        {!pdfMode && (
+          <LeftPanel
+            paperId={paperId}
+            paper={paper}
+            outline={outline}
+            points={points}
+            activeId={activeId}
+            onJump={jump}
+            onOpenSettings={(kind) => {
+              setSettingsKind(kind ?? 'answer')
+              setSettingsOpen(true)
+            }}
+            settingsVersion={settingsVersion}
+          />
+        )}
+        {pdfMode ? (
+          <PdfPages
+            paperId={paperId}
+            pageCount={paper.page_count}
+            initialPage={visiblePage}
+            width={pdfWidth}
+            onPageChange={setPdfPage}
+          />
+        ) : (
+          <Reader
+            paper={paper}
+            mode={mode}
+            scale={scale}
+            scrollRef={scrollRef}
+            canTranslate={configured}
+            onOpenSettings={() => {
+              setSettingsKind('answer')
+              setSettingsOpen(true)
+            }}
+            hint={
+              !configured
+                ? '未配置回答模型，翻译未开启。填写模型与密钥后，打开论文会自动翻译当前页和下一页。'
+                : translating
+                  ? '正在翻译当前页…'
+                  : '当前页还没有译文，停在这里几秒会自动开始翻译。'
+            }
+          />
+        )}
       </div>
 
       <SettingsDialog
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
+        initialKind={settingsKind}
         sampleImage={sampleImage}
-        onSaved={() => {
-          setConfigured(isConfigured(loadSettings()))
+        onSaved={(next) => {
+          setConfigured(Boolean(readyModel(next, 'answer')))
+          setSettingsVersion((v) => v + 1)
           requested.current.clear() // 换模型后允许重翻
         }}
       />

@@ -60,6 +60,34 @@ export async function translatePaper(id: string, config: LLMConfigPayload): Prom
   })
 }
 
+/** 逐条读取 SSE `data:` 事件；翻译与问答共用。 */
+async function readSSE<T>(res: Response, onEvent: (event: T) => void): Promise<void> {
+  const reader = res.body?.getReader()
+  if (!reader) throw new Error('无法读取响应流')
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let sep = buffer.indexOf('\n\n')
+    while (sep >= 0) {
+      const chunk = buffer.slice(0, sep)
+      buffer = buffer.slice(sep + 2)
+      for (const line of chunk.split('\n')) {
+        if (!line.startsWith('data:')) continue
+        try {
+          onEvent(JSON.parse(line.slice(5).trim()) as T)
+        } catch {
+          // 半行/坏行直接忽略
+        }
+      }
+      sep = buffer.indexOf('\n\n')
+    }
+  }
+}
+
 /**
  * 按页流式翻译：服务端每翻完一段推一条 `block` 事件，前端逐段渲染。
  * 首段通常 2–3 秒出现，不用等整页翻完。
@@ -91,30 +119,7 @@ export async function translateStream(
     const data = await res.json().catch(() => ({}))
     throw new Error((data as any).detail || `HTTP ${res.status}`)
   }
-  const reader = res.body?.getReader()
-  if (!reader) throw new Error('无法读取响应流')
-
-  const decoder = new TextDecoder()
-  let buffer = ''
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    let sep = buffer.indexOf('\n\n')
-    while (sep >= 0) {
-      const chunk = buffer.slice(0, sep)
-      buffer = buffer.slice(sep + 2)
-      for (const line of chunk.split('\n')) {
-        if (!line.startsWith('data:')) continue
-        try {
-          onEvent(JSON.parse(line.slice(5).trim()) as TranslateEvent)
-        } catch {
-          // 半行/坏行直接忽略
-        }
-      }
-      sep = buffer.indexOf('\n\n')
-    }
-  }
+  await readSSE<TranslateEvent>(res, onEvent)
 }
 
 export async function probeZotero(): Promise<{ ok: boolean; error?: string }> {
@@ -207,6 +212,50 @@ export async function askPaper(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ config, question, web }),
   })
+}
+
+export interface AskStreamEvent {
+  type: 'status' | 'sources' | 'delta' | 'done' | 'error'
+  stage?: string
+  sources?: AskSource[]
+  usedWeb?: boolean
+  text?: string
+  latency?: number
+  message?: string
+}
+
+/**
+ * 流式问答：`status`（检索中）→ `sources`（出处）→ `delta`×N → `done` / `error`。
+ * 出错时已经收到的增量仍然有效，调用方保留即可。
+ */
+export async function askPaperStream(
+  id: string,
+  config: LLMConfigPayload,
+  question: string,
+  web: boolean,
+  onEvent: (event: AskStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(`/api/papers/${id}/ask/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ config, question, web }),
+    signal,
+  })
+  if (res.status === 404) {
+    // 兼容旧服务 / 旧桌面 sidecar：没有流式端点时退回一次性接口，
+    // 前端仍然按 Markdown 渲染，只是不再逐字出现。
+    const legacy = await askPaper(id, config, question, web)
+    onEvent({ type: 'sources', sources: legacy.sources, usedWeb: legacy.usedWeb })
+    if (legacy.answer) onEvent({ type: 'delta', text: legacy.answer })
+    onEvent({ type: 'done', latency: legacy.latency })
+    return
+  }
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}))
+    throw new Error((data as any).detail || `HTTP ${res.status}`)
+  }
+  await readSSE<AskStreamEvent>(res, onEvent)
 }
 
 // ── 思路来源图 ──────────────────────────────────────────

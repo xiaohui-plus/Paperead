@@ -10,7 +10,7 @@ interface Props {
   scrollRef: RefObject<HTMLDivElement | null>
   /** 没有译文时顶部提示的文案 */
   hint?: string
-  /** 是否配置了模型：没配置时不要显示"等待翻译"的骨架条 */
+  /** 是否配置了回答模型：没配置时不要显示"等待翻译"的骨架条 */
   canTranslate?: boolean
   onOpenSettings?: () => void
 }

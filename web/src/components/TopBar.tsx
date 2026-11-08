@@ -1,6 +1,6 @@
 import type { Paper, ViewMode } from '../types'
 import { downloadMarkdown } from '../lib/markdown'
-import { IconBack, IconDownload, IconMinus, IconPlus, IconPrint, IconSettings } from './icons'
+import { IconBack, IconDownload, IconMinus, IconPdf, IconPlus, IconPrint, IconSettings } from './icons'
 
 interface Props {
   paper: Paper
@@ -17,6 +17,11 @@ interface Props {
   hasTranslation?: boolean
   translating?: boolean
   page?: number
+  /** 有可查看的原始 PDF（示例数据没有） */
+  canShowPdf: boolean
+  pdfMode: boolean
+  onTogglePdf: () => void
+  pdfHref: string
 }
 
 const MODES: { key: ViewMode; label: string }[] = [
@@ -40,6 +45,10 @@ export function TopBar({
   hasTranslation = true,
   translating = false,
   page,
+  canShowPdf,
+  pdfMode,
+  onTogglePdf,
+  pdfHref,
 }: Props) {
   const pct = total ? Math.round((translated / total) * 100) : 0
 
@@ -65,32 +74,70 @@ export function TopBar({
       </div>
 
       <div className="tools">
-        <div className="segmented" role="tablist" aria-label="阅读模式">
-          {MODES.map((m) => (
-            <button
-              key={m.key}
-              role="tab"
-              aria-selected={mode === m.key}
-              data-active={mode === m.key}
-              disabled={!hasTranslation && m.key !== 'en'}
-              title={!hasTranslation && m.key !== 'en' ? '这篇还没有译文' : undefined}
-              onClick={() => onMode(m.key)}
-            >
-              {m.label}
-            </button>
-          ))}
-        </div>
+        {!pdfMode && (
+          <div className="segmented" role="tablist" aria-label="阅读模式">
+            {MODES.map((m) => (
+              <button
+                key={m.key}
+                role="tab"
+                aria-selected={mode === m.key}
+                data-active={mode === m.key}
+                disabled={!hasTranslation && m.key !== 'en'}
+                title={!hasTranslation && m.key !== 'en' ? '这篇还没有译文' : undefined}
+                onClick={() => onMode(m.key)}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+        )}
 
-        <button className="icon-btn" title="缩小字号" onClick={() => onScale(scale - 0.08)}>
+        <button
+          className="icon-btn"
+          title={pdfMode ? '缩小页面' : '缩小字号'}
+          onClick={() => onScale(scale - 0.08)}
+        >
           <IconMinus />
         </button>
-        <button className="icon-btn" title="放大字号" onClick={() => onScale(scale + 0.08)}>
+        <button
+          className="icon-btn"
+          title={pdfMode ? '放大页面' : '放大字号'}
+          onClick={() => onScale(scale + 0.08)}
+        >
           <IconPlus />
         </button>
 
+        {canShowPdf && (
+          <button
+            className="icon-btn pdf-toggle"
+            data-active={pdfMode}
+            aria-pressed={pdfMode}
+            title={pdfMode ? '返回重排阅读' : '查看原版 PDF'}
+            onClick={onTogglePdf}
+          >
+            <IconPdf />
+          </button>
+        )}
+
+        {pdfMode && (
+          <a
+            className="pill"
+            href={pdfHref}
+            target="_blank"
+            rel="noreferrer"
+            title="在新标签页打开 PDF（浏览器自带阅读器）"
+          >
+            新窗口 ↗
+          </a>
+        )}
+
         {!configured && (
-          <button className="pill warn" onClick={onOpenSettings} title="未配置模型，翻译不会启动">
-            未配置模型
+          <button
+            className="pill warn"
+            onClick={onOpenSettings}
+            title="未配置回答模型，翻译不会启动"
+          >
+            未配置回答模型
           </button>
         )}
 
@@ -113,7 +160,7 @@ export function TopBar({
 
         <button
           className="icon-btn settings-btn"
-          title={configured ? '模型与密钥（已配置）' : '模型与密钥（未配置）'}
+          title={configured ? '模型设置（回答模型已配置）' : '模型设置（未配置回答模型）'}
           onClick={onOpenSettings}
         >
           <IconSettings />

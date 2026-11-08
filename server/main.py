@@ -20,12 +20,13 @@ import json
 import logging
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -47,6 +48,7 @@ from paper_reflow.translate import (
     translate_paper,
 )
 from server.store import LibraryStore
+from server.scholar_api import build_router as build_scholar_router
 from server.runtime import (
     allowed_origins,
     default_data_dir,
@@ -90,10 +92,14 @@ async def guard(request: Request, call_next):
 
     response = await call_next(request)
     content_type = response.headers.get("content-type", "")
-    if content_type.startswith("text/html") and TOKEN and "pr_token" not in request.cookies:
-        response.set_cookie(
-            "pr_token", TOKEN, httponly=True, samesite="strict", path="/"
-        )
+    if content_type.startswith("text/html"):
+        # 前端更新后 index.html 引用的是新 hash；禁止缓存 HTML，
+        # 避免用户刷新后仍加载旧的 assets/*.js。
+        response.headers["Cache-Control"] = "no-store, must-revalidate"
+        if TOKEN and "pr_token" not in request.cookies:
+            response.set_cookie(
+                "pr_token", TOKEN, httponly=True, samesite="strict", path="/"
+            )
     return response
 
 
@@ -149,6 +155,22 @@ async def health() -> dict:
     }
 
 
+@app.get("/api/research/agent")
+async def research_agent() -> dict:
+    """A0 spike handshake: the desktop shell writes agent.json after the Node
+    agent is healthy. A2 replaces this direct endpoint with a Python proxy."""
+    path = DATA_DIR / "agent.json"
+    if not path.exists():
+        raise HTTPException(status_code=503, detail="研究 agent 尚未启动")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"agent.json 无效：{e}") from e
+    if not isinstance(data, dict) or not data.get("port"):
+        raise HTTPException(status_code=503, detail="agent.json 缺少 port")
+    return data
+
+
 @app.post("/api/formula")
 async def formula(req: FormulaReq) -> dict:
     """一张公式裁图 → LaTeX。"""
@@ -196,10 +218,11 @@ async def ping(req: PingReq) -> dict:
     started = time.time()
     try:
         reply = await backend.chat(
-            [{"role": "user", "content": "回复两个字：正常"}],
+            [{"role": "user", "content": "只回复两个字：正常"}],
             model=req.config.model,
             temperature=0.0,
-            max_tokens=16,
+            # 新一代思考模型会先花 reasoning token；给小了会只思考不输出
+            max_tokens=512,
         )
     except Exception as e:
         log.warning("连通性测试失败：%s", e)
@@ -288,6 +311,21 @@ async def paper_thumb(paper_id: str) -> FileResponse:
     if not path:
         raise HTTPException(status_code=404, detail="缩略图不存在")
     return FileResponse(path, media_type="image/png")
+
+
+@app.get("/api/papers/{paper_id}/page/{page}.png")
+async def paper_page(paper_id: str, page: int, width: int = 1400) -> Response:
+    """原版 PDF 的单页图。阅读页切到「原版」时按需取，服务端按页缓存。"""
+    if not store.get(paper_id):
+        raise HTTPException(status_code=404, detail="论文不存在")
+    data = await asyncio.to_thread(store.render_page, paper_id, page, width)
+    if data is None:
+        raise HTTPException(status_code=404, detail="这一页不存在")
+    return Response(
+        content=data,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 @app.get("/api/papers/{paper_id}/blocks")
@@ -489,34 +527,47 @@ class AskReq(BaseModel):
     web: bool = True
 
 
-@app.post("/api/papers/{paper_id}/ask")
-async def ask_paper(paper_id: str, req: AskReq) -> dict:
-    """论文问答：先论文内检索，必要时升级到网络搜索，答案带出处。"""
+@dataclass
+class _AskPrep:
+    context: str
+    sources: list[dict]
+    used_web: bool
+
+
+def _require_ask_ready(paper_id: str, question: str) -> None:
     if not store.get(paper_id):
         raise HTTPException(status_code=404, detail="论文不存在")
-    blocks = store.read_blocks(paper_id)
-    if blocks is None:
+    if store.read_blocks(paper_id) is None:
         raise HTTPException(status_code=409, detail="还在解析中，请稍后再试")
-    if not req.question.strip():
+    if not question.strip():
         raise HTTPException(status_code=400, detail="问题不能为空")
 
-    if req.config:
+
+def _apply_llm_config(config: LLMConfigIn | None) -> None:
+    """把前端带来的模型配置注入全局后端；没有配置时要求环境变量兜底。"""
+    if config:
         from paper_reflow.llm import set_backend
 
-        set_backend(
-            OpenAICompatBackend(
-                LLMConfig(
-                    api_key=req.config.api_key,
-                    base_url=req.config.base_url.rstrip("/"),
-                    model=req.config.model,
-                    timeout=req.config.timeout,
+        try:
+            set_backend(
+                OpenAICompatBackend(
+                    LLMConfig(
+                        api_key=config.api_key,
+                        base_url=config.base_url.rstrip("/"),
+                        model=config.model,
+                        timeout=config.timeout,
+                    )
                 )
             )
-        )
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"模型配置有误：{e}") from e
     elif not os.getenv("PAPER_REFLOW_API_KEY"):
         raise HTTPException(status_code=400, detail="未配置模型，无法回答")
 
-    t0 = time.time()
+
+async def _prepare_ask(paper_id: str, req: AskReq) -> _AskPrep:
+    """检索论文、必要时联网，返回拼好的材料与可点击的出处。"""
+    blocks = store.read_blocks(paper_id) or []
     objs = [Block(**{**b, "bbox": tuple(b["bbox"])}) for b in blocks]
     docs, en, zh = qa_engine.build_index(objs)
 
@@ -542,7 +593,6 @@ async def ask_paper(paper_id: str, req: AskReq) -> dict:
     refs = dict(list(refs.items())[:4])
 
     context = qa_engine.build_context(hits, refs, web_results, docs)
-    text = await qa_engine.answer(req.question, context)
 
     sources = []
     floor = top_score * 0.4
@@ -565,12 +615,72 @@ async def ask_paper(paper_id: str, req: AskReq) -> dict:
             {"type": "web", "label": f"W{i}", "title": w["title"], "url": w["url"]}
         )
 
+    return _AskPrep(context=context, sources=sources, used_web=bool(web_results))
+
+
+@app.post("/api/papers/{paper_id}/ask")
+async def ask_paper(paper_id: str, req: AskReq) -> dict:
+    """论文问答：先论文内检索，必要时升级到网络搜索，答案带出处。"""
+    _require_ask_ready(paper_id, req.question)
+    _apply_llm_config(req.config)
+
+    t0 = time.time()
+    prep = await _prepare_ask(paper_id, req)
+    text = await qa_engine.answer(req.question, prep.context)
+
     return {
         "answer": text,
-        "sources": sources,
-        "usedWeb": bool(web_results),
+        "sources": prep.sources,
+        "usedWeb": prep.used_web,
         "latency": round(time.time() - t0, 1),
     }
+
+
+@app.post("/api/papers/{paper_id}/ask/stream")
+async def ask_stream(paper_id: str, req: AskReq) -> StreamingResponse:
+    """流式问答：SSE 事件 status → sources → delta×N → done / error。
+
+    检索（含查询改写、联网）在 `status` 之后进行；来源先于正文到达，
+    前端可以先渲染出处 chips 再等 token。
+    """
+    _require_ask_ready(paper_id, req.question)
+    _apply_llm_config(req.config)
+
+    async def gen():
+        t0 = time.time()
+        try:
+            yield _sse({"type": "status", "stage": "retrieving"})
+            prep = await _prepare_ask(paper_id, req)
+            yield _sse(
+                {"type": "sources", "sources": prep.sources, "usedWeb": prep.used_web}
+            )
+
+            visible = 0
+            async for piece in qa_engine.answer_stream(req.question, prep.context):
+                if not piece:
+                    continue
+                visible += len(piece.strip())
+                yield _sse({"type": "delta", "text": piece})
+            if not visible:
+                raise RuntimeError("模型没有返回内容（可能 max_tokens 被 reasoning 耗尽）")
+
+            yield _sse({"type": "done", "latency": round(time.time() - t0, 1)})
+        except asyncio.CancelledError:
+            log.info("问答流已取消：%s", paper_id)
+            raise
+        except Exception as e:
+            log.exception("流式问答失败 %s", paper_id)
+            yield _sse({"type": "error", "message": str(e)[:300]})
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/papers/{paper_id}/asset/{rel:path}")
@@ -862,7 +972,7 @@ ZOTERO_BASE = os.getenv("PAPER_REFLOW_ZOTERO", "http://127.0.0.1:23119/api/users
 async def zotero_probe() -> dict:
     """探测本机 Zotero 7 的本地 API 是否开启。"""
     try:
-        async with httpx.AsyncClient(timeout=3) as c:
+        async with httpx.AsyncClient(timeout=3, trust_env=False) as c:
             r = await c.get(f"{ZOTERO_BASE}/items", params={"limit": 1})
         return {"ok": r.status_code == 200, "status": r.status_code}
     except Exception as e:
@@ -881,7 +991,7 @@ async def zotero_import(req: ZoteroImportReq) -> dict:
     """
     imported, skipped, errors = 0, 0, []
     try:
-        async with httpx.AsyncClient(timeout=20) as c:
+        async with httpx.AsyncClient(timeout=20, trust_env=False) as c:
             r = await c.get(
                 f"{ZOTERO_BASE}/items",
                 params={"limit": req.limit, "itemType": "-attachment || note"},
@@ -895,7 +1005,7 @@ async def zotero_import(req: ZoteroImportReq) -> dict:
             "或直接把 PDF 拖进来。",
         ) from e
 
-    async with httpx.AsyncClient(timeout=60) as c:
+    async with httpx.AsyncClient(timeout=60, trust_env=False) as c:
         for item in items:
             data = item.get("data") or {}
             if data.get("itemType") in ("attachment", "note"):
@@ -932,6 +1042,21 @@ def _zotero_name(data: dict) -> str:
     title = (data.get("title") or "zotero-paper")[:80]
     safe = "".join(ch for ch in title if ch not in '\\/:*?"<>|').strip() or "zotero"
     return f"{safe}.pdf"
+
+
+# ── 文献检索（外部学术库） ──────────────────────────────────────────────
+
+
+def _add_scholar_pdf(
+    filename: str, data: bytes, meta: dict
+) -> dict:
+    """检索页导入：落盘 + 建索引 + 立刻后台解析，返回原始行。"""
+    row = store.add(filename, data, meta)
+    asyncio.create_task(_parse_task(row["id"]))
+    return row
+
+
+app.include_router(build_scholar_router(store, _add_scholar_pdf, _public))
 
 
 if WEB_DIST.exists():

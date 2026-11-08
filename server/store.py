@@ -25,6 +25,10 @@ import pymupdf
 
 log = logging.getLogger("paper-reflow.store")
 
+# 原版 PDF 页图的分辨率范围：太小看不清公式，太大传输慢。
+PAGE_WIDTH_MIN = 480
+PAGE_WIDTH_MAX = 1600
+
 
 class LibraryStore:
     def __init__(self, root: Path):
@@ -57,6 +61,12 @@ class LibraryStore:
     def get(self, paper_id: str) -> dict[str, Any] | None:
         return next((r for r in self._read() if r["id"] == paper_id), None)
 
+    def find_by_source(self, source_id: str) -> dict[str, Any] | None:
+        """按外部题录 id（如 arxiv:2401.00001）查重，检索页导入时用。"""
+        if not source_id:
+            return None
+        return next((r for r in self._read() if r.get("source_id") == source_id), None)
+
     def update(self, paper_id: str, **patch: Any) -> dict[str, Any] | None:
         with self._lock:
             rows = self._read()
@@ -69,7 +79,9 @@ class LibraryStore:
 
     # ── 增删 ────────────────────────────────────────────
 
-    def add(self, filename: str, data: bytes) -> dict[str, Any]:
+    def add(
+        self, filename: str, data: bytes, meta: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         paper_id = f"p_{uuid.uuid4().hex[:12]}"
         pdf = self.papers_dir / f"{paper_id}.pdf"
         pdf.write_bytes(data)
@@ -88,6 +100,11 @@ class LibraryStore:
             "translated": 0,
             "blocks": 0,
         }
+        # 检索页导入时带上来源信息：source / source_id 用于去重，标题作者兜底用
+        if meta:
+            for key, value in meta.items():
+                if value not in (None, ""):
+                    row[key] = value
         with self._lock:
             rows = self._read()
             rows.append(row)
@@ -110,6 +127,9 @@ class LibraryStore:
             path = self.papers_dir / f"{paper_id}{suffix}"
             if path.exists():
                 path.unlink(missing_ok=True)
+        pages = self.page_dir(paper_id)
+        if pages.exists():
+            shutil.rmtree(pages, ignore_errors=True)
         return True
 
     # ── 文件 ────────────────────────────────────────────
@@ -121,6 +141,38 @@ class LibraryStore:
     def thumb_path(self, paper_id: str) -> Path | None:
         p = self.papers_dir / f"{paper_id}.thumb.png"
         return p if p.exists() else None
+
+    def page_dir(self, paper_id: str) -> Path:
+        return self.papers_dir / f"{paper_id}_pages"
+
+    def render_page(self, paper_id: str, page: int, width: int = 1400) -> bytes | None:
+        """把 PDF 的第 N 页（1 起）渲染成 PNG。用于阅读页「原版 PDF」视图。
+
+        结果按「页码 + 宽度」缓存在 `{id}_pages/`：同一页只渲染一次，
+        删论文时整目录一起清掉。
+        """
+        pdf = self.pdf_path(paper_id)
+        if not pdf:
+            return None
+        width = max(PAGE_WIDTH_MIN, min(int(width or 1400), PAGE_WIDTH_MAX))
+        cached = self.page_dir(paper_id) / f"p{page:04d}@{width}.png"
+        if cached.exists():
+            return cached.read_bytes()
+
+        doc = pymupdf.open(str(pdf))
+        try:
+            if page < 1 or page > len(doc):
+                return None
+            target = doc[page - 1]
+            zoom = width / target.rect.width if target.rect.width else 1.0
+            pix = target.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+            data = pix.tobytes("png")
+        finally:
+            doc.close()
+
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        cached.write_bytes(data)
+        return data
 
     def blocks_path(self, paper_id: str) -> Path:
         return self.papers_dir / f"{paper_id}.blocks.json"

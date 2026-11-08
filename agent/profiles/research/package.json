@@ -1,0 +1,12 @@
+{
+  "name": "paper-reflow-research-profile",
+  "private": true,
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@paper-reflow/dsh-research"
+      ]
+    }
+  }
+}

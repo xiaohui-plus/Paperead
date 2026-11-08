@@ -1,18 +1,19 @@
 import { useCallback, useEffect, useState } from 'react'
 import { getGuide, makeGuide, type Guide } from '../lib/library'
-import { isConfigured, loadSettings } from '../lib/settings'
+import { loadModelSettings, readyModel, toPayload } from '../lib/settings'
 import { IconSpark } from './icons'
 
 interface Props {
   paperId: string
   onOpenSettings: () => void
+  settingsVersion?: number
 }
 
 function masteredKey(paperId: string) {
   return `paper-reflow.mastered.${paperId}`
 }
 
-export function GuidePanel({ paperId, onOpenSettings }: Props) {
+export function GuidePanel({ paperId, onOpenSettings, settingsVersion = 0 }: Props) {
   const [guide, setGuide] = useState<Guide | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -27,8 +28,8 @@ export function GuidePanel({ paperId, onOpenSettings }: Props) {
 
   const generate = useCallback(
     async (refresh = false) => {
-      const cfg = loadSettings()
-      if (!isConfigured(cfg)) {
+      const cfg = readyModel(loadModelSettings(), 'answer')
+      if (!cfg) {
         setNeedsConfig(true)
         setLoading(false)
         return
@@ -37,11 +38,7 @@ export function GuidePanel({ paperId, onOpenSettings }: Props) {
       setError('')
       setNeedsConfig(false)
       try {
-        const g = await makeGuide(
-          paperId,
-          { base_url: cfg.baseUrl, api_key: cfg.apiKey, model: cfg.model },
-          refresh,
-        )
+        const g = await makeGuide(paperId, toPayload(cfg), refresh)
         setGuide(g)
       } catch (e) {
         setError(e instanceof Error ? e.message : '导读生成失败')
@@ -76,6 +73,13 @@ export function GuidePanel({ paperId, onOpenSettings }: Props) {
       alive = false
     }
   }, [paperId, generate])
+
+  // 之前因为没配置模型停在「去设置」时，保存配置后自动继续生成
+  useEffect(() => {
+    if (!needsConfig) return
+    if (!readyModel(loadModelSettings(), 'answer')) return
+    void generate(false)
+  }, [settingsVersion, needsConfig, generate])
 
   const toggleMastered = (concept: string) => {
     setMastered((prev) => {

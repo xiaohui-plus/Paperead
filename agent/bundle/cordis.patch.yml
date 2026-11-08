@@ -1,0 +1,68 @@
+# paper-reflow research bundle, applied on top of @deepseek-ai/dsh-base.
+#
+# A0 keeps the surface deliberately small: one HTTP/SSE host, one echo tool,
+# and the DeepSeek adapter. Later phases add the real research tools.
+
+- insert:
+    - id: research-webserver
+      name: '@deepseek-ai/dsh-host-webserver'
+      config:
+        host: 127.0.0.1
+        port: !!js Number(process.env.PAPER_REFLOW_AGENT_PORT || 0)
+
+    - id: research-host
+      name: '@paper-reflow/dsh-research'
+      config:
+        token: !!js process.env.PAPER_REFLOW_AGENT_TOKEN || ''
+        defaultModel: !!js process.env.PAPER_REFLOW_MODEL || 'deepseek-v4-flash'
+
+    - id: research-tools
+      name: '@paper-reflow/dsh-research/tools'
+
+# Keep one credential source for chat and web search.
+- id: llm-deepseek
+  config:
+    apiKeyEnv: PAPER_REFLOW_LLM_KEY
+    baseURL: !!js process.env.PAPER_REFLOW_LLM_BASE || 'https://api.deepseek.com'
+    thinking: enabled
+    reasoningEffort: high
+
+- id: web-search-deepseek
+  config:
+    apiKeyEnv: PAPER_REFLOW_LLM_KEY
+
+# A research agent must not get a shell or an arbitrary filesystem.
+- id: tool-bash
+  disabled: true
+- id: tool-pwsh
+  disabled: true
+- id: tool-fs
+  disabled: true
+- id: tool-fs-search
+  disabled: true
+- id: tool-str-replace-editor
+  disabled: true
+- id: tool-jobs
+  disabled: true
+- id: tool-ralph
+  disabled: true
+- id: tool-workflow
+  disabled: true
+- id: tool-goal
+  disabled: true
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-subagent-list-agents
+  disabled: true
+- id: tool-subagent-report
+  disabled: true
+- id: plan-mode
+  disabled: true
+- id: agent-instructions
+  disabled: true
+- id: session-telemetry-otel
+  disabled: true

@@ -19,12 +19,23 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Protocol, Sequence, runtime_checkable
+from typing import AsyncIterator, Protocol, Sequence, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
-DEFAULT_MODEL = "deepseek-chat"
+# DeepSeek V4.1 Flash（2026-09），原生多模态；旧名 deepseek-chat 仍可用但不推荐
+DEFAULT_MODEL = "deepseek-flash"
+
+
+def _fixed_temperature_model(model: str | None) -> bool:
+    """有些新推理模型把 temperature 固定为 1.0，显式传值会报错。
+
+    Kimi K3.1 Pro 的文档明确写了 temperature=1.0 是固定值、建议不要显式传入；
+    这里对这些模型不发送 temperature，交给服务端默认值。
+    """
+    name = (model or "").lower()
+    return name.startswith("kimi-k3") or name.startswith("kimi-k2.5")
 
 
 def _sanitize_proxy_env() -> None:
@@ -120,17 +131,50 @@ class OpenAICompatBackend:
         temperature: float = 0.25,
         max_tokens: int | None = None,
     ) -> str:
-        resp = await self._client.chat.completions.create(
-            model=model or self.config.model,
-            messages=list(messages),
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        actual_model = model or self.config.model
+        kwargs: dict[str, object] = {
+            "model": actual_model,
+            "messages": list(messages),
+            "max_tokens": max_tokens,
+        }
+        if not _fixed_temperature_model(actual_model):
+            kwargs["temperature"] = temperature
+        resp = await self._client.chat.completions.create(**kwargs)
         content = (resp.choices[0].message.content or "").strip()
         if not content:
             # 推理模型的 reasoning token 也计入 max_tokens，给小了会只思考不输出
             raise RuntimeError("模型返回空内容（可能 max_tokens 被 reasoning 耗尽）")
         return content
+
+    async def chat_stream(
+        self,
+        messages: Sequence[dict],
+        *,
+        model: str | None = None,
+        temperature: float = 0.25,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[str]:
+        """流式版本：按 delta 产出文本，调用方负责拼接。"""
+        actual_model = model or self.config.model
+        kwargs: dict[str, object] = {
+            "model": actual_model,
+            "messages": list(messages),
+            "max_tokens": max_tokens,
+            "stream": True,
+        }
+        if not _fixed_temperature_model(actual_model):
+            kwargs["temperature"] = temperature
+        stream = await self._client.chat.completions.create(**kwargs)
+        try:
+            async for chunk in stream:
+                # 部分兼容实现会在末尾补一个只带 usage 的 chunk
+                if not getattr(chunk, "choices", None):
+                    continue
+                text = getattr(chunk.choices[0].delta, "content", None)
+                if text:
+                    yield text
+        finally:
+            await stream.close()
 
 
 _backend: LLMBackend | None = None
@@ -160,3 +204,32 @@ async def chat(
     return await get_backend().chat(
         messages, model=model, temperature=temperature, max_tokens=max_tokens
     )
+
+
+async def chat_stream(
+    messages: Sequence[dict],
+    *,
+    model: str | None = None,
+    temperature: float = 0.25,
+    max_tokens: int | None = None,
+) -> AsyncIterator[str]:
+    """流式调用当前后端，逐段产出文本。
+
+    ``LLMBackend`` 只要求实现 ``chat``；自定义后端如果没有 ``chat_stream``，
+    这里退化成一次性返回整段文本，调用方逻辑不需要区分。
+    """
+    backend = get_backend()
+    streamer = getattr(backend, "chat_stream", None)
+    if streamer is not None:
+        async for piece in streamer(
+            messages, model=model, temperature=temperature, max_tokens=max_tokens
+        ):
+            if piece:
+                yield piece
+        return
+
+    text = await backend.chat(
+        messages, model=model, temperature=temperature, max_tokens=max_tokens
+    )
+    if text:
+        yield text
