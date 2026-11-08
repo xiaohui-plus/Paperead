@@ -3,6 +3,14 @@
   "private": true,
   "version": "0.1.0",
   "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiaohui-plus/Paperead.git"
+  },
+  "homepage": "https://github.com/xiaohui-plus/Paperead",
+  "bugs": {
+    "url": "https://github.com/xiaohui-plus/Paperead/issues"
+  },
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",

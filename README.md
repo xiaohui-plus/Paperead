@@ -7,10 +7,10 @@
 
 ## 桌面版（Windows）
 
-Windows 10/11 x64 安装包与便携 ZIP 发布在 GitHub Releases，构建、签名与自动更新说明见
-[docs/desktop.md](docs/desktop.md)。桌面版自带 Python sidecar，使用者不需要安装
-Python/Node；安装版数据默认在 `%LOCALAPPDATA%\paper-reflow-data`，便携版数据在同级
-`data\` 目录。
+Windows 10/11 x64 安装包与便携 ZIP：[下载最新版](https://github.com/xiaohui-plus/Paperead/releases/latest)。
+构建、签名与自动更新说明见 [docs/desktop.md](docs/desktop.md)。桌面版自带 Python
+sidecar，使用者不需要安装 Python/Node；安装版数据默认在
+`%LOCALAPPDATA%\paper-reflow-data`，便携版数据在同级 `data\` 目录。
 
 ## 能解决什么
 
@@ -234,11 +234,15 @@ POST /api/papers/{id}/ask/stream                → 同上，SSE 流式（status
   - **图表** —— 全部插图与表格的缩略图，点击跳转
 - **正文**：英文原文在上、中文译文在下（术语用蓝色虚线下划线标注，悬停显示英文原词）；
   三档模式切换（对照 / 译文 / 原文）、字号调节、段落复制、页内深链（`#b0013`）
-- **原版 PDF**：顶栏的文档图标一键切到原版排版（逐页图、连续滚动、可缩放），
+- **原版 PDF**：顶栏的文档图标一键切到原版排版（逐页图、连续滚动、可缩放）。
+  默认只替换右侧正文区，左侧阅读助手（导读 / 问答 / 目录 / 脉络 / 重点 / 图表）照常可用，
+  点目录或图表会跳到对应页；顶栏的展开图标可把原版切成整行宽度，再点收起。
   切过去时停留在当前页，切回来时重排阅读的滚动位置不变；「新窗口 ↗」可交给系统阅读器打开原始 PDF。
   页图由本地服务用 PyMuPDF 渲染并按页缓存，不依赖浏览器/WebView 的 PDF 插件
 - **表格只做整图切片**，不解析表结构——合并单元格、跨行跨列交给原始排版，避免提取出错误的数据
 - 导出 Markdown、打印/存 PDF
+- **界面缩放**：整站默认按 120% 渲染（`styles.css` 顶部的 `--ui-zoom`，改成 `1` 即 100%），
+  高分屏上文字与按钮更清楚；满屏高度用 `--app-h` 折算，窗口不会被撑出外层滚动条
 
 ![图表切片](docs/preview-content.png)
 

@@ -82,3 +82,18 @@ jobs:
           includeUpdaterJson: true
           updaterJsonPreferNsis: true
           args: --bundles nsis
+
+      - name: Build portable ZIP and source archive
+        shell: pwsh
+        run: |
+          .\scripts\build-portable.ps1
+          git archive --format=zip --prefix=paper-reflow-${{ github.ref_name }}/ --output=release/paper-reflow_${{ github.ref_name }}_source.zip HEAD
+
+      - name: Upload portable and source to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: |
+            release/paper-reflow_*_portable_x64.zip
+            release/paper-reflow_*_source.zip

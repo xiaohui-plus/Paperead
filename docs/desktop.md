@@ -64,15 +64,15 @@ npm run tauri -- dev
 应用内自动更新面向**安装版**。便携版请下载新版便携 ZIP，覆盖 `paper-reflow-desktop.exe`
 和 `resources\`，保留 `data\`。
 
-当前 `src-tauri/tauri.conf.json` 里的更新地址是占位符：
+当前 `src-tauri/tauri.conf.json` 的更新地址指向本仓库：
 
 ```json
 "endpoints": [
-  "https://github.com/paper-reflow/paper-reflow/releases/latest/download/latest.json"
+  "https://github.com/xiaohui-plus/Paperead/releases/latest/download/latest.json"
 ]
 ```
 
-发布前替换成你的实际地址（GitHub Releases 或对象存储/自定义域名）。
+如果 fork 到别的仓库，替换成你的实际地址（GitHub Releases 或对象存储/自定义域名）。
 国内用户建议把 `latest.json` 与安装包放到可达的 CDN。
 
 本地联调或自建更新源时，可以用环境变量覆盖配置里的地址（不用重新打包）：
@@ -106,7 +106,9 @@ npx tauri signer generate -w .tauri/updater.key
   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
 - 私钥务必离线备份。丢失后老用户无法再收到自动更新。
 
-仓库当前配置里的公钥是开发测试密钥，正式发布前必须换成自己的密钥。
+本仓库已经生成了发布密钥：私钥在本机 `.tauri/updater.prod.key`（已 gitignore），
+密码在 `.tauri/updater.prod.password`；同时写入 GitHub Actions Secrets。请把这两个
+文件离线备份，不要提交到仓库。公钥已经在 `src-tauri/tauri.conf.json` 里。
 
 ## 发布流程
 

@@ -15,7 +15,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
@@ -23,23 +25,28 @@
       "icons/128x128@2x.png",
       "icons/icon.ico"
     ],
-    "resources": ["resources/paper-reflow-server"],
+    "resources": [
+      "resources/paper-reflow-server"
+    ],
     "windows": {
       "webviewInstallMode": {
         "type": "embedBootstrapper"
       },
       "nsis": {
         "installMode": "currentUser",
-        "languages": ["SimpChinese", "English"]
+        "languages": [
+          "SimpChinese",
+          "English"
+        ]
       }
     }
   },
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/paper-reflow/paper-reflow/releases/latest/download/latest.json"
+        "https://github.com/xiaohui-plus/Paperead/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU3OUEwODgwQzc1MTU4QkQKUldTOVdGSEhnQWlhNTJvTlNyamxuN2VRYk81VEJEN0h3YWpLZUIyMzRkWXJSNkJBK3JpQ1lBTjcK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEEwNUM5N0ZEMjI0QjZERkEKUldUNmJVc2kvWmRjb09OUU5qRCtBWGpGK0tqQWxXMktWUnFEd2Z3eG5BZ3NlcDJEWlJNZDNHQzAK"
     }
   }
 }

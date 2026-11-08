@@ -26,6 +26,11 @@ server = [
 [project.scripts]
 paper-reflow = "paper_reflow.cli:main"
 
+[project.urls]
+Homepage = "https://github.com/xiaohui-plus/Paperead"
+Repository = "https://github.com/xiaohui-plus/Paperead"
+Issues = "https://github.com/xiaohui-plus/Paperead/issues"
+
 [tool.setuptools.packages.find]
 include = ["paper_reflow*"]
 
