@@ -23,12 +23,13 @@ import time
 from pathlib import Path
 
 import httpx
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from paper_reflow import __version__
 from paper_reflow.formula import recognize_latex
 from paper_reflow.layout import Block, parse_pdf
 from paper_reflow.llm import LLMConfig, OpenAICompatBackend
@@ -46,18 +47,55 @@ from paper_reflow.translate import (
     translate_paper,
 )
 from server.store import LibraryStore
+from server.runtime import (
+    allowed_origins,
+    default_data_dir,
+    ensure_data_dir,
+    is_frozen,
+    web_dist,
+)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("paper-reflow.server")
 
-ROOT = Path(__file__).resolve().parent.parent
-WEB_DIST = ROOT / "web" / "dist"
-DATA_DIR = Path(os.getenv("PAPER_REFLOW_DATA", str(ROOT / "data")))
+WEB_DIST = web_dist()
+DATA_DIR = ensure_data_dir(default_data_dir())
+PORT = int(os.getenv("PAPER_REFLOW_PORT", "8010"))
+TOKEN = os.getenv("PAPER_REFLOW_TOKEN", "")
+ORIGINS = allowed_origins(PORT)
 MOCK = os.getenv("PAPER_REFLOW_MOCK") == "1"
 
 store = LibraryStore(DATA_DIR)
 
-app = FastAPI(title="paper-reflow", version="0.1.0")
+app = FastAPI(title="paper-reflow", version=__version__)
+
+
+@app.middleware("http")
+async def guard(request: Request, call_next):
+    """本地 API 防护：cookie/header token + Origin 校验。
+
+    桌面壳把随机 token 作为 HttpOnly cookie 在首页下发，前端无需改代码；
+    壳自己用 X-Paper-Reflow-Token 调 health。直接 python -m server.main 时
+    TOKEN 为空，鉴权关闭，保持原有开发体验。
+    """
+    path = request.url.path
+    if path.startswith("/api"):
+        supplied = request.cookies.get("pr_token") or request.headers.get(
+            "x-paper-reflow-token"
+        )
+        if TOKEN and supplied != TOKEN:
+            return JSONResponse({"detail": "unauthorized"}, status_code=403)
+        origin = request.headers.get("origin")
+        if origin and origin not in ORIGINS:
+            return JSONResponse({"detail": "origin not allowed"}, status_code=403)
+
+    response = await call_next(request)
+    content_type = response.headers.get("content-type", "")
+    if content_type.startswith("text/html") and TOKEN and "pr_token" not in request.cookies:
+        response.set_cookie(
+            "pr_token", TOKEN, httponly=True, samesite="strict", path="/"
+        )
+    return response
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -97,7 +135,14 @@ def _decode(image_base64: str) -> bytes:
 
 @app.get("/api/health")
 async def health() -> dict:
-    return {"ok": True, "mock": MOCK, "web": WEB_DIST.exists()}
+    return {
+        "ok": True,
+        "mock": MOCK,
+        "web": WEB_DIST.exists(),
+        "version": __version__,
+        "frozen": is_frozen(),
+        "data": str(DATA_DIR),
+    }
 
 
 @app.post("/api/formula")
@@ -871,11 +916,38 @@ if WEB_DIST.exists():
     app.mount("/", StaticFiles(directory=str(WEB_DIST), html=True), name="web")
 
 
+def _setup_logging() -> None:
+    from logging.handlers import RotatingFileHandler
+
+    handlers: list[logging.Handler] = [
+        RotatingFileHandler(
+            DATA_DIR / "logs" / "server.log",
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+    ]
+    if not is_frozen():
+        handlers.append(logging.StreamHandler())
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        handlers=handlers,
+        force=True,
+    )
+
+
 def main() -> None:
     import uvicorn
 
-    port = int(os.getenv("PAPER_REFLOW_PORT", "8010"))
-    uvicorn.run("server.main:app", host="127.0.0.1", port=port, reload=False)
+    _setup_logging()
+    log.info(
+        "paper-reflow %s 启动：http://127.0.0.1:%d（数据：%s）",
+        __version__,
+        PORT,
+        DATA_DIR,
+    )
+    uvicorn.run(app, host="127.0.0.1", port=PORT, log_config=None, access_log=False)
 
 
 if __name__ == "__main__":

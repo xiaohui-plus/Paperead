@@ -1,0 +1,2 @@
+# 仅用于打 sidecar，不进入运行时
+pyinstaller>=6.10

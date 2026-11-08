@@ -28,6 +28,7 @@ htmlcov/
 data/
 
 # 桌面构建
+.uv-cache/
 .venv-build/
 build-sidecar/
 dist-sidecar/
