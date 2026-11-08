@@ -102,14 +102,88 @@ def test_invalid_version_is_backed_up_and_reset(store, bad_version):
     assert json.loads(backup.read_text(encoding="utf-8"))["version"] == bad_version
 
 
+def test_overflow_version_is_backed_up(store):
+    store.profile_path.write_text('{"version": 1e400, "traits": {}}', encoding="utf-8")
+    assert store.profile()["version"] == memlib.VERSION
+    backup = store.profile_path.with_name("profile.json.bak")
+    assert backup.exists()
+    assert json.loads(backup.read_text(encoding="utf-8"))["version"] == float("inf")
+
+
 def test_older_version_is_accepted_and_normalized(store):
     store.profile_path.write_text(
-        json.dumps({"version": 0, "traits": {"depth": "intro"}}), encoding="utf-8"
+        json.dumps(
+            {
+                "version": 0,
+                "traits": {
+                    "depth": {
+                        "value": "需要类比",
+                        "confidence": 0.6,
+                        "evidence": ["x"],
+                        "updated_at": 0,
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
     )
     profile = store.profile()
     assert profile["version"] == memlib.VERSION
-    assert profile["traits"] == {"depth": "intro"}
+    assert profile["traits"] == {
+        "depth": {
+            "value": "需要类比",
+            "confidence": 0.6,
+            "evidence": ["x"],
+            "updated_at": 0.0,
+        }
+    }
+    assert isinstance(profile["traits"]["depth"]["updated_at"], float)
     assert not store.profile_path.with_name("profile.json.bak").exists()
+
+
+def test_profile_normalizes_and_drops_invalid_traits(store):
+    store.profile_path.write_text(
+        json.dumps(
+            {
+                "version": memlib.VERSION,
+                "traits": {
+                    "depth": {
+                        "value": "  需要类比  ",
+                        "confidence": 1.7,
+                        "evidence": ["a", "b", "c", "d"],
+                        "updated_at": "3.5",
+                    },
+                    "goal": "想用于自己的数据",
+                    "favorite_color": {
+                        "value": "蓝色",
+                        "confidence": 0.6,
+                        "evidence": ["x"],
+                        "updated_at": 0,
+                    },
+                    "language": {"value": "中", "confidence": 0.6, "evidence": ["x"]},
+                    "answer_style": {"value": "先给结论", "evidence": "not a list"},
+                    "math_comfort": ["不是字典"],
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    traits = store.profile()["traits"]
+    assert set(traits) == {"depth", "answer_style"}
+    assert traits["depth"] == {
+        "value": "需要类比",
+        "confidence": 0.9,
+        "evidence": ["b", "c", "d"],
+        "updated_at": 3.5,
+    }
+    assert traits["answer_style"] == {
+        "value": "先给结论",
+        "confidence": 0.5,
+        "evidence": [],
+        "updated_at": 0.0,
+    }
 
 
 def test_version_too_new_is_backed_up(store):
@@ -119,6 +193,46 @@ def test_version_too_new_is_backed_up(store):
     )
     assert store.concepts() == {"version": memlib.VERSION, "concepts": []}
     assert store.concepts_path.with_name("concepts.json.bak").exists()
+
+
+def test_concepts_drop_invalid_entries_and_normalize_key(store):
+    store.concepts_path.write_text(
+        json.dumps(
+            {
+                "version": memlib.VERSION,
+                "concepts": [
+                    {
+                        "name": "Message Passing",
+                        "state": "learning",
+                        "confidence": 0.5,
+                        "aliases": ["消息传递", 3, ""],
+                        "papers": ["p1", 7],
+                        "evidence": [{"paper_id": "p1", "quote": "x"}, "bad"],
+                        "times_asked": "3",
+                        "last_seen": "1.5",
+                    },
+                    {"key": "消息传递", "state": "understood", "confidence": 0.8},
+                    "not a concept",
+                    {"name": "没有状态", "confidence": 0.5},
+                    {"name": "状态非法", "state": "bogus", "confidence": 0.5},
+                    {"name": "置信度非法", "state": "learning", "confidence": "high"},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    items = store.concepts()["concepts"]
+    assert [c["name"] for c in items] == ["Message Passing", "消息传递"]
+    first = items[0]
+    assert first["key"] == "message passing"
+    assert first["aliases"] == ["消息传递"]
+    assert first["papers"] == ["p1"]
+    assert first["evidence"] == [{"paper_id": "p1", "quote": "x"}]
+    assert first["times_asked"] == 3
+    assert first["last_seen"] == 1.5
+    assert items[1]["key"] == "消息传递"
+    assert items[1]["confidence"] == 0.8
 
 
 def test_structurally_corrupt_chat_is_sanitized(store):
@@ -297,6 +411,26 @@ def test_get_store_returns_singleton_under_threads(tmp_path):
     assert all(store is results[0] for store in results)
 
 
+def test_concurrent_begin_question_keeps_all_messages(store):
+    count = 16
+    barrier = threading.Barrier(count)
+
+    def worker(index: int) -> None:
+        barrier.wait(timeout=5)
+        store.begin_question("p1", f"q{index}")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    data = json.loads(store.paper_path("p1").read_text(encoding="utf-8"))
+    assert len(data["messages"]) == count
+    assert len(store.chat("p1")["messages"]) == count
+    assert list(store.papers.glob("*.tmp")) == []
+
+
 def test_no_tmp_files_left_after_writes(store):
     for i in range(3):
         msg, _ = store.begin_question("p1", f"q{i}")
@@ -311,3 +445,60 @@ def test_recent_before_n_zero_returns_empty(store):
     store.finish_answer("p1", user["id"], "a", [], False, 0.1)
     assert store.recent_before("p1", user["id"], 0) == []
     assert store.recent_before("p1", user["id"], -2) == []
+
+
+def test_merge_trait_updates_confidence_conservatively(store):
+    store.apply_patch(
+        "p1",
+        {"traits": [{"key": "depth", "value": "需要类比", "confidence": 0.6, "evidence": "要求类比"}]},
+    )
+    first = store.profile()["traits"]["depth"]
+    assert first["value"] == "需要类比"
+    assert first["confidence"] == pytest.approx(0.6, abs=0.01)
+
+    store.apply_patch(
+        "p1",
+        {"traits": [{"key": "depth", "value": "需要类比和前置", "confidence": 0.9, "evidence": "再次要求"}]},
+    )
+    second = store.profile()["traits"]["depth"]
+    # 0.6*0.6 + 0.4*0.9 = 0.72，单轮变化不超过 ±0.2
+    assert second["confidence"] == pytest.approx(0.72, abs=0.01)
+    assert len(second["evidence"]) == 2
+
+
+def test_merge_rejects_unknown_trait_and_empty_evidence(store):
+    store.apply_patch("p1", {"traits": [{"key": "favorite_color", "value": "blue", "confidence": 0.9, "evidence": "x"}]})
+    store.apply_patch("p1", {"traits": [{"key": "depth", "value": "需要类比", "confidence": 0.9, "evidence": ""}]})
+    assert store.profile()["traits"] == {}
+
+
+def test_concept_state_can_go_up_but_not_down_without_explicit(store):
+    store.apply_patch("p1", {"concepts": [{"name": "消息传递", "state": "confused", "evidence": "没看懂", "explicit": True}]})
+    store.apply_patch("p1", {"concepts": [{"name": "消息传递", "state": "understood", "evidence": "懂了"}]})
+    assert store.concepts()["concepts"][0]["state"] == "understood"
+
+    store.apply_patch("p1", {"concepts": [{"name": "消息传递", "state": "confused", "evidence": "又糊涂了"}]})
+    assert store.concepts()["concepts"][0]["state"] == "understood"
+
+    store.apply_patch("p1", {"concepts": [{"name": "消息传递", "state": "confused", "evidence": "还是不懂", "explicit": True}]})
+    assert store.concepts()["concepts"][0]["state"] == "confused"
+
+
+def test_concept_alias_merges_same_entry(store):
+    store.apply_patch(
+        "p1",
+        {
+            "concepts": [
+                {
+                    "name": "Message Passing",
+                    "aliases": ["消息传递"],
+                    "state": "learning",
+                    "evidence": "a",
+                }
+            ]
+        },
+    )
+    store.apply_patch("p1", {"concepts": [{"name": "消息传递", "state": "understood", "evidence": "b"}]})
+    items = store.concepts()["concepts"]
+    assert len(items) == 1
+    assert items[0]["state"] == "understood"

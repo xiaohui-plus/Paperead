@@ -100,21 +100,21 @@ def _load(path: Path, default: dict) -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
-        log.warning("记忆文件损坏，已备份：%s (%s)", path, e)
+        log.warning("记忆文件损坏，准备备份：%s (%s)", path, e)
         _backup(path)
         return default
     if not isinstance(data, dict):
-        log.warning("记忆文件结构非法，已备份：%s", path)
+        log.warning("记忆文件结构非法，准备备份：%s", path)
         _backup(path)
         return default
     try:
         version = int(data.get("version", 0))
-    except (TypeError, ValueError) as e:
-        log.warning("记忆文件版本非法，已备份：%s (%s)", path, e)
+    except (TypeError, ValueError, OverflowError) as e:
+        log.warning("记忆文件版本非法，准备备份：%s (%s)", path, e)
         _backup(path)
         return default
     if version > VERSION:
-        log.warning("记忆文件版本过高，已备份：%s", path)
+        log.warning("记忆文件版本过高，准备备份：%s", path)
         _backup(path)
         return default
     data["version"] = VERSION
@@ -205,6 +205,113 @@ def _clean_facts(value: Any) -> list[dict]:
     return out
 
 
+def _concept_key(name: str) -> str:
+    return re.sub(r"[\s。，、！？!?.,;；:：]+", " ", (name or "").strip().lower()).strip()
+
+
+def _clean_traits(value: Any) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, dict] = {}
+    for key, raw in value.items():
+        if key not in TRAIT_KEYS or not isinstance(raw, dict):
+            continue
+        text = raw.get("value")
+        if not isinstance(text, str):
+            continue
+        text = text.strip()
+        if not 2 <= len(text) <= 40:
+            continue
+        try:
+            confidence = float(raw.get("confidence", 0.5))
+        except (TypeError, ValueError, OverflowError):
+            confidence = 0.5
+        confidence = min(0.9, max(0.3, confidence))
+        evidence: list[str] = []
+        raw_evidence = raw.get("evidence")
+        if isinstance(raw_evidence, list):
+            for item in raw_evidence:
+                if isinstance(item, str) and item.strip():
+                    evidence.append(item.strip()[:60])
+        try:
+            updated_at = float(raw.get("updated_at", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            updated_at = 0.0
+        out[key] = {
+            "value": text,
+            "confidence": round(confidence, 3),
+            "evidence": evidence[-3:],
+            "updated_at": updated_at,
+        }
+    return out
+
+
+def _clean_concepts(value: Any) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    out: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        raw_name = item.get("name")
+        raw_key = item.get("key")
+        name = raw_name.strip() if isinstance(raw_name, str) else ""
+        key = raw_key.strip() if isinstance(raw_key, str) else ""
+        if not name:
+            name = key
+        if not name:
+            continue
+        key = _concept_key(key or name)
+        if not key:
+            continue
+        state = item.get("state")
+        if not isinstance(state, str) or state not in STATE_RANK:
+            continue
+        try:
+            confidence = float(item.get("confidence"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        confidence = min(0.9, max(0.3, confidence))
+        aliases: list[str] = []
+        raw_aliases = item.get("aliases")
+        if isinstance(raw_aliases, list):
+            for alias in raw_aliases:
+                if isinstance(alias, str) and alias.strip():
+                    aliases.append(alias.strip()[:40])
+        papers: list[str] = []
+        raw_papers = item.get("papers")
+        if isinstance(raw_papers, list):
+            for paper_id in raw_papers:
+                if isinstance(paper_id, str) and paper_id.strip():
+                    papers.append(paper_id)
+        evidence: list[dict] = []
+        raw_evidence = item.get("evidence")
+        if isinstance(raw_evidence, list):
+            evidence = [dict(entry) for entry in raw_evidence if isinstance(entry, dict)]
+        try:
+            times_asked = max(1, int(item.get("times_asked", 1)))
+        except (TypeError, ValueError, OverflowError):
+            times_asked = 1
+        try:
+            last_seen = float(item.get("last_seen", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            last_seen = 0.0
+        out.append(
+            {
+                "key": key,
+                "name": name[:40],
+                "aliases": list(dict.fromkeys(aliases))[-5:],
+                "state": state,
+                "confidence": round(confidence, 3),
+                "evidence": evidence[-5:],
+                "papers": list(dict.fromkeys(papers))[-20:],
+                "times_asked": times_asked,
+                "last_seen": last_seen,
+            }
+        )
+    return out
+
+
 def _public_message(msg: dict) -> dict:
     out = {
         "id": msg.get("id", ""),
@@ -250,14 +357,12 @@ class MemoryStore:
 
     def profile(self) -> dict:
         data = _load(self.profile_path, _empty_profile())
-        if not isinstance(data.get("traits"), dict):
-            data["traits"] = {}
+        data["traits"] = _clean_traits(data.get("traits"))
         return data
 
     def concepts(self) -> dict:
         data = _load(self.concepts_path, _empty_concepts())
-        if not isinstance(data.get("concepts"), list):
-            data["concepts"] = []
+        data["concepts"] = _clean_concepts(data.get("concepts"))
         return data
 
     # ── 保存 ────────────────────────────────────────────
@@ -386,6 +491,169 @@ class MemoryStore:
             "hasMore": start > 0,
         }
 
+    # ── 合并（画像 / 概念 / 记忆卡）──────────────────
+    def apply_patch(self, paper_id: str, patch: dict, touched: list[str] | None = None) -> None:
+        if not enabled() or not isinstance(patch, dict):
+            return
+        now = _now()
+        with self._lock:
+            profile = self.profile()
+            self._merge_traits(profile, patch.get("traits") or [], now)
+
+            concepts = self.concepts()
+            self._merge_concepts(concepts, patch.get("concepts") or [], paper_id, now)
+
+            chat = self.chat(paper_id)
+            self._merge_card(chat, patch, now)
+
+            profile["updated_at"] = now
+            profile["turn_count"] = int(profile.get("turn_count", 0)) + 1
+            _atomic_write(self.profile_path, profile)
+            _atomic_write(self.concepts_path, concepts)
+            self._save_chat(paper_id, chat)
+
+    def _merge_traits(self, profile: dict, items: list, now: float) -> None:
+        if not isinstance(items, list):
+            return
+        traits = profile.setdefault("traits", {})
+        for item in (items or [])[:3]:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key", "")).strip()
+            value = str(item.get("value", "")).strip()
+            evidence = str(item.get("evidence", "")).strip()
+            if key not in TRAIT_KEYS or not (2 <= len(value) <= 40) or not evidence:
+                continue
+            try:
+                confidence = float(item.get("confidence", 0.5))
+            except (TypeError, ValueError):
+                confidence = 0.5
+            confidence = min(0.9, max(0.3, confidence))
+
+            old = traits.get(key)
+            if old is not None and not isinstance(old, dict):
+                continue
+            if old:
+                base = float(old.get("confidence", 0.5))
+                merged = 0.6 * base + 0.4 * confidence
+                merged = max(base - 0.2, min(base + 0.2, merged))
+                merged = min(0.9, max(0.3, merged))
+                evidence_list = list(old.get("evidence") or [])[-2:] + [evidence[:60]]
+                old.update(
+                    value=value,
+                    confidence=round(merged, 3),
+                    evidence=evidence_list[-3:],
+                    updated_at=now,
+                )
+            else:
+                traits[key] = {
+                    "value": value,
+                    "confidence": round(confidence, 3),
+                    "evidence": [evidence[:60]],
+                    "updated_at": now,
+                }
+
+    def _merge_concepts(self, bucket: dict, items: list, paper_id: str, now: float) -> None:
+        if not isinstance(items, list):
+            return
+        concepts = bucket.setdefault("concepts", [])
+        for item in (items or [])[:4]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()[:40]
+            state = str(item.get("state", "")).strip()
+            if not name or state not in STATE_RANK:
+                continue
+            explicit = bool(item.get("explicit"))
+            evidence = str(item.get("evidence", "")).strip()[:80]
+            aliases = [
+                str(a).strip()[:40]
+                for a in (item.get("aliases") or [])
+                if isinstance(a, str) and a.strip()
+            ]
+            key = _concept_key(name)
+            concept = _find_concept(concepts, key, name)
+
+            if concept is None:
+                concepts.append(
+                    {
+                        "key": key,
+                        "name": name,
+                        "aliases": list(
+                            dict.fromkeys(([name] if name != key else []) + aliases)
+                        )[:5],
+                        "state": state,
+                        "confidence": 0.4,
+                        "evidence": [{"paper_id": paper_id, "quote": evidence, "at": now}],
+                        "papers": [paper_id],
+                        "times_asked": 1,
+                        "last_seen": now,
+                    }
+                )
+                continue
+
+            concept["aliases"] = list(
+                dict.fromkeys([*(concept.get("aliases") or []), name, *aliases])
+            )[:5]
+
+            old_state = concept.get("state", "learning")
+            confidence = float(concept.get("confidence", 0.4))
+            if STATE_RANK[state] < STATE_RANK[old_state]:
+                if not explicit:
+                    continue
+                concept["state"] = state
+                concept["confidence"] = round(max(0.3, confidence - 0.2), 3)
+            elif STATE_RANK[state] > STATE_RANK[old_state]:
+                concept["state"] = state
+                concept["confidence"] = round(min(0.9, confidence + 0.1), 3)
+            else:
+                concept["confidence"] = round(min(0.9, confidence + 0.05), 3)
+
+            evidence_list = list(concept.get("evidence") or [])[-4:]
+            if evidence:
+                evidence_list.append({"paper_id": paper_id, "quote": evidence, "at": now})
+            concept["evidence"] = evidence_list[-5:]
+            papers = list(concept.get("papers") or [])
+            if paper_id not in papers:
+                papers.append(paper_id)
+            concept["papers"] = papers[-20:]
+            concept["times_asked"] = int(concept.get("times_asked", 1)) + 1
+            concept["last_seen"] = now
+
+    def _merge_card(self, chat: dict, patch: dict, now: float) -> None:
+        card = chat.setdefault("card", _empty_card())
+        summary = str(patch.get("summary") or "").strip()
+        if 40 <= len(summary) <= 400 and summary != card.get("summary"):
+            card["summary"] = summary
+            card["summarized_through"] = chat["messages"][-1]["id"] if chat.get("messages") else ""
+            card["updated_at"] = now
+
+        facts = card.setdefault("facts", [])
+        fact_items = patch.get("facts")
+        for item in (fact_items if isinstance(fact_items, list) else [])[:2]:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind", ""))
+            text = str(item.get("text", "")).strip()
+            if kind not in FACT_KINDS or not (2 <= len(text) <= 120):
+                continue
+            if any(_jaccard(text, f.get("text", "")) >= 0.7 for f in facts):
+                continue
+            facts.append({"kind": kind, "text": text, "at": now})
+
+        while len(facts) > MAX_FACTS:
+            index = next((i for i, f in enumerate(facts) if f["kind"] == "conclusion"), 0)
+            facts.pop(index)
+
+        card_patch = patch.get("card") if isinstance(patch.get("card"), dict) else {}
+        one_liner = str(card_patch.get("one_liner") or "").strip()
+        if one_liner and not card.get("one_liner") and len(one_liner) <= 60:
+            card["one_liner"] = one_liner
+        domains = card_patch.get("domains") or []
+        if isinstance(domains, list):
+            merged = list(dict.fromkeys([*card.get("domains", []), *[str(d)[:20] for d in domains]]))
+            card["domains"] = merged[:4]
+
     def forget(self, paper_id: str) -> None:
         with self._lock:
             path = self.paper_path(paper_id)
@@ -405,6 +673,34 @@ class MemoryStore:
                     target.unlink(missing_ok=True)
                 except OSError:
                     pass
+
+
+def _norm_alias(text: str) -> str:
+    return _concept_key(text)
+
+
+def _find_concept(concepts: list, key: str, name: str) -> dict | None:
+    wanted = {key, _norm_alias(name)}
+    for concept in concepts:
+        if not isinstance(concept, dict):
+            continue
+        candidates = {_norm_alias(concept.get("key", "")), _norm_alias(concept.get("name", ""))}
+        candidates |= {_norm_alias(a) for a in concept.get("aliases") or []}
+        if wanted & candidates:
+            return concept
+        for candidate in candidates:
+            if len(candidate) >= 3 and (candidate in key or key in candidate):
+                return concept
+    return None
+
+
+def _jaccard(a: str, b: str) -> float:
+    from .qa import tokenize
+
+    sa, sb = set(tokenize(a)), set(tokenize(b))
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
 
 
 _stores: dict[str, MemoryStore] = {}
