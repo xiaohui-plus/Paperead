@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from ..llm import chat as llm_chat
 from .qa import BM25, tokenize
 
 log = logging.getLogger(__name__)
@@ -1029,6 +1030,21 @@ def _patch_text(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def _parse_json(raw: str) -> dict | list | None:
+    """解析模型返回的 JSON：容忍代码围栏，失败时抓第一个 {...} 块。"""
+    text = re.sub(r"^`{3}(?:json)?\s*|\s*`{3}$", "", (raw or "").strip())
+    try:
+        return json.loads(text)
+    except Exception:
+        match = re.search(r"\{.*\}", text, re.S)
+        if not match:
+            return None
+        try:
+            return json.loads(match.group(0))
+        except Exception:
+            return None
+
+
 def _norm_alias(text: str) -> str:
     return _concept_key(text)
 
@@ -1074,3 +1090,73 @@ def get_store(root: Path) -> MemoryStore:
             store = MemoryStore(Path(root))
             _stores.setdefault(key, store)
         return store
+
+
+WRITER_SYS = """你是论文问答的记忆整理器。根据本轮问答和现有记忆，输出需要更新的字段。
+
+规则：
+1. 只记录用户透露的、稳定的信息；论文内容本身不要写进记忆。
+2. 不确定的不写；不要为了填满字段而编造。
+3. traits 的 key 只能是：domain_background, depth, answer_style, language, goal, math_comfort。
+4. concepts 的 state 只能是 understood / learning / confused；用户明确说"不懂"时把 explicit 设为 true。
+5. summary 40-400 字，覆盖：聊了什么、已确认的结论、未解决疑问、用户的判断。
+6. facts 只记用户明确表达过的立场（user_stance）、已确认结论（conclusion）、未解决问题（open_question）。
+7. 只输出 JSON，不要解释：
+
+{"traits": [{"key": "depth", "value": "…", "confidence": 0.6, "evidence": "…"}],
+ "concepts": [{"name": "…", "state": "learning", "evidence": "…", "explicit": false}],
+ "summary": "…",
+ "facts": [{"kind": "user_stance", "text": "…"}],
+ "card": {"one_liner": "…", "domains": ["…"]}}"""
+
+
+async def write_memory(
+    store: MemoryStore,
+    paper_id: str,
+    question: str,
+    answer: str,
+    standalone: str,
+    touched: list[str] | None = None,
+) -> None:
+    """回答返回后异步跑一次小调用，把本轮问答整理成记忆 patch。
+
+    写手失败不影响回答：解析失败走规则兜底，任何异常只记日志。
+    """
+    if not enabled():
+        return
+    try:
+        chat_data = store.chat(paper_id)
+        card = chat_data.get("card") or {}
+        profile = store.profile()
+        traits = {
+            key: {"value": value.get("value", ""), "confidence": value.get("confidence", 0)}
+            for key, value in (profile.get("traits") or {}).items()
+        }
+        payload = {
+            "本轮问题": _clip(standalone or question, 1200),
+            "本轮回答": _clip(answer, 1200),
+            "现有小结": card.get("summary", ""),
+            "现有事实": [f.get("text", "") for f in (card.get("facts") or [])[-3:]],
+            "现有画像": traits,
+            "涉及概念": touched or [],
+        }
+        raw = await llm_chat(
+            [
+                {"role": "system", "content": WRITER_SYS},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            temperature=0.1,
+            max_tokens=700,
+        )
+        patch = _parse_json(raw)
+        if not isinstance(patch, dict):
+            log.info("记忆整理返回非法 JSON，走规则兜底")
+            patch = store.fallback_patch(question, touched)
+        store.apply_patch(paper_id, patch, touched=touched)
+    except Exception as e:
+        log.info("记忆写入失败（不影响回答）：%s", e)
+        try:
+            store.apply_patch(paper_id, store.fallback_patch(question, touched), touched=touched)
+        except Exception:
+            log.exception("记忆兜底也失败")
+
