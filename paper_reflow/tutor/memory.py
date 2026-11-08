@@ -742,6 +742,13 @@ class MemoryStore:
         return patch
 
     # ── 注入块 ──────────────────────────────────────────
+    BRIEF_TOTAL_LIMIT = 1300
+    BRIEF_PROFILE_LIMIT = 200
+    BRIEF_CONCEPT_LIMIT = 160
+    BRIEF_CARD_LIMIT = 300
+    BRIEF_OLD_LIMIT = 450
+    BRIEF_CROSS_LIMIT = 200
+
     def build_brief(
         self, paper_id: str, question: str, exclude_message_id: str | None = None
     ) -> str:
@@ -749,32 +756,70 @@ class MemoryStore:
             return ""
         now = _now()
         chat = self.chat(paper_id)
-        parts: list[str] = []
+        blocks: list[str] = []
 
         profile_lines = self._profile_lines(now)
         if profile_lines:
-            parts.append("【关于读者】\n" + "\n".join(profile_lines))
+            blocks.append(
+                _clip_block(
+                    "【关于读者】\n" + "\n".join(profile_lines),
+                    self.BRIEF_PROFILE_LIMIT,
+                )
+            )
 
         concept_lines = self._concept_lines(question)
         if concept_lines:
-            parts.append("【概念理解】\n" + "\n".join(concept_lines))
+            blocks.append(
+                _clip_block(
+                    "【概念理解】\n" + "\n".join(concept_lines),
+                    self.BRIEF_CONCEPT_LIMIT,
+                )
+            )
 
         card_block = self._card_block(chat)
         if card_block:
-            parts.append(card_block)
+            blocks.append(_clip_block(card_block, self.BRIEF_CARD_LIMIT))
 
         old_lines = self._old_turns(chat, question, exclude_message_id)
         if old_lines:
-            parts.append("【此前问答】\n" + "\n".join(old_lines))
+            blocks.append(
+                _clip_block(
+                    "【此前问答】\n" + "\n".join(old_lines),
+                    self.BRIEF_OLD_LIMIT,
+                )
+            )
 
         cross_lines = self._cross_paper(paper_id, question)
         if cross_lines:
-            parts.append("【读过的相关论文】\n" + "\n".join(cross_lines))
+            blocks.append(
+                _clip_block(
+                    "【读过的相关论文】\n" + "\n".join(cross_lines),
+                    self.BRIEF_CROSS_LIMIT,
+                )
+            )
 
         repeat = self._repeat_block(chat, question, exclude_message_id)
         if repeat:
-            parts.append(repeat)
-        return "\n\n".join(parts)
+            blocks.append(repeat)
+
+        total = len("\n\n".join(blocks))
+        for marker in ("【此前问过】", "【读过的相关论文】", "【此前问答】"):
+            if total <= self.BRIEF_TOTAL_LIMIT:
+                break
+            index = next((i for i, b in enumerate(blocks) if b.startswith(marker)), None)
+            if index is not None:
+                total -= len(blocks.pop(index)) + 2
+
+        if not blocks:
+            return ""
+        brief = "\n\n".join(blocks)
+        if len(brief) > self.BRIEF_TOTAL_LIMIT:
+            # 画像/概念/卡片的上限之和远小于总预算，这里只做最后兜底
+            blocks[-1] = _clip_block(
+                blocks[-1], max(0, len(blocks[-1]) - (len(brief) - self.BRIEF_TOTAL_LIMIT))
+            )
+            brief = "\n\n".join(blocks)
+        return brief
 
     def _profile_lines(self, now: float) -> list[str]:
         profile = self.profile()
@@ -786,20 +831,28 @@ class MemoryStore:
             days = max(0.0, (now - float(trait.get("updated_at", 0))) / 86400)
             effective = float(trait.get("confidence", 0)) * (0.5 ** (days / 180))
             if effective >= 0.55:
-                lines.append(f"- {TRAIT_LABELS[key]}：{trait.get('value', '')}")
+                lines.append(
+                    f"- {TRAIT_LABELS[key]}：{_sanitize_memory_text(trait.get('value', ''))}"
+                )
         return lines
 
     def _concept_lines(self, question: str) -> list[str]:
         items = self.match_concepts(question)[:4]
-        return [f"- {c['name']}：{STATE_LABELS.get(c.get('state', 'learning'), '在学')}" for c in items]
+        return [
+            f"- {_sanitize_memory_text(c.get('name', ''))}："
+            f"{STATE_LABELS.get(c.get('state', 'learning'), '在学')}"
+            for c in items
+        ]
 
     def _card_block(self, chat: dict) -> str:
         card = chat.get("card") or {}
         lines = []
-        if card.get("summary"):
-            lines.append(card["summary"])
+        summary = _sanitize_memory_text(card.get("summary", ""))
+        if summary:
+            lines.append(summary)
         for fact in (card.get("facts") or [])[-2:]:
-            lines.append(f"- {FACT_LABELS.get(fact.get('kind'), '记录')}：{fact.get('text', '')}")
+            text = _sanitize_memory_text(fact.get("text", ""))
+            lines.append(f"- {FACT_LABELS.get(fact.get('kind'), '记录')}：{text}")
         return "【这篇聊到哪】\n" + "\n".join(lines) if lines else ""
 
     def _old_turns(self, chat: dict, question: str, exclude_id: str | None) -> list[str]:
@@ -817,24 +870,20 @@ class MemoryStore:
             if msg.get("role") != "user" or msg["id"] in recent_ids:
                 continue
             answer = answers.get(msg["id"])
-            text = msg.get("text", "")
-            if answer:
-                text = f"{text}\n{answer.get('text', '')}"
-            candidates.append((msg, text))
+            q_text = _sanitize_memory_text(msg.get("text", ""))
+            a_text = _sanitize_memory_text(answer.get("text", "")) if answer else ""
+            text = f"{q_text}\n{a_text}" if answer else q_text
+            candidates.append((q_text, a_text, text))
         if not candidates:
             return []
-        bm = BM25([tokenize(text) for _, text in candidates])
+        bm = BM25([tokenize(text) for _, _, text in candidates])
         scores = bm.score(tokenize(question))
         ranked = sorted(zip(candidates, scores), key=lambda item: item[1], reverse=True)
         lines = []
-        for (msg, text), score in ranked[:3]:
+        for (q_text, a_text, _text), score in ranked[:3]:
             if score <= 0:
                 continue
-            answer = answers.get(msg["id"])
-            lines.append(
-                f"问：{_clip(msg.get('text', ''), 120)}\n"
-                f"答：{_clip(answer.get('text', '') if answer else '', 180)}"
-            )
+            lines.append(f"问：{_clip(q_text, 120)}\n答：{_clip(a_text, 180)}")
         return lines
 
     def _cross_paper(self, paper_id: str, question: str) -> list[str]:
@@ -847,16 +896,17 @@ class MemoryStore:
             card = self.chat(other_id)["card"]
             if not card.get("summary") and not card.get("one_liner"):
                 continue
-            facts = "；".join(f.get("text", "") for f in (card.get("facts") or [])[-2:])
-            text = " ".join(
-                [
-                    card.get("title", ""),
-                    " ".join(card.get("domains") or []),
-                    card.get("one_liner", ""),
-                    card.get("summary", ""),
-                    facts,
-                ]
+            title = _sanitize_memory_text(card.get("title", ""))
+            domains = " ".join(
+                _sanitize_memory_text(d) for d in (card.get("domains") or [])
             )
+            one_liner = _sanitize_memory_text(card.get("one_liner", ""))
+            summary = _sanitize_memory_text(card.get("summary", ""))
+            facts = "；".join(
+                _sanitize_memory_text(f.get("text", ""))
+                for f in (card.get("facts") or [])[-2:]
+            )
+            text = " ".join([title, domains, one_liner, summary, facts])
             docs.append((card, text))
         if not docs:
             return []
@@ -867,11 +917,20 @@ class MemoryStore:
         for (card, _), score in ranked[:2]:
             if score < 0.3:
                 continue
-            stance = next(
-                (f.get("text", "") for f in reversed(card.get("facts") or []) if f.get("kind") == "user_stance"),
-                "",
+            title = _sanitize_memory_text(card.get("title", ""))
+            one_liner = _sanitize_memory_text(card.get("one_liner", ""))
+            summary = _sanitize_memory_text(card.get("summary", ""))
+            stance = _sanitize_memory_text(
+                next(
+                    (
+                        f.get("text", "")
+                        for f in reversed(card.get("facts") or [])
+                        if f.get("kind") == "user_stance"
+                    ),
+                    "",
+                )
             )
-            line = f"《{_clip(card.get('title', '未命名'), 60)}》：{_clip(card.get('one_liner') or card.get('summary', ''), 90)}"
+            line = f"《{_clip(title or '未命名', 60)}》：{_clip(one_liner or summary, 90)}"
             if stance:
                 line += f"；你当时的判断：{_clip(stance, 60)}"
             lines.append(line)
@@ -883,12 +942,14 @@ class MemoryStore:
         for msg in reversed(messages[:-1]):
             if msg.get("role") != "user" or msg.get("id") == exclude_id:
                 continue
-            if _jaccard(question, msg.get("text", "")) >= 0.6:
+            q_text = _sanitize_memory_text(msg.get("text", ""))
+            if _jaccard(question, q_text) >= 0.6:
                 answer = answers.get(msg["id"])
+                a_text = _sanitize_memory_text(answer.get("text", "")) if answer else ""
                 return (
                     "【此前问过】\n"
-                    f"问：{_clip(msg.get('text', ''), 120)}\n"
-                    f"答：{_clip(answer.get('text', '') if answer else '', 200)}\n"
+                    f"问：{_clip(q_text, 120)}\n"
+                    f"答：{_clip(a_text, 200)}\n"
                     "（若本轮没有新增信息，简要复述结论并说明是否有变化，不要装作第一次被问）"
                 )
         return ""
@@ -934,6 +995,34 @@ class MemoryStore:
                     target.unlink(missing_ok=True)
                 except OSError:
                     pass
+
+
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _sanitize_memory_text(text: Any) -> str:
+    """记忆文本压成单行：去掉控制字符与换行，替换全角方括号防止伪造块标题。"""
+    value = _coerce_text(text)
+    value = _CONTROL_RE.sub("", value)
+    value = value.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    value = re.sub(r"\s+", " ", value)
+    value = value.replace("【", "［").replace("】", "］")
+    return value.strip()
+
+
+def _clip_block(block: str, limit: int) -> str:
+    """按字符截断整块：标题行保持完整，正文超出部分以省略号收尾。"""
+    if limit <= 0:
+        return ""
+    if len(block) <= limit:
+        return block
+    head, _, body = block.partition("\n")
+    if not body:
+        return head[: limit - 1] + "…" if limit > 1 else head[:limit]
+    budget = limit - len(head) - 1
+    if budget <= 1:
+        return head[:limit]
+    return head + "\n" + body[: budget - 1] + "…"
 
 
 def _patch_text(value: Any) -> str:

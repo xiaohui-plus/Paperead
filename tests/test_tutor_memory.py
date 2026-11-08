@@ -898,3 +898,115 @@ def test_brief_cross_paper_card(store):
     brief = store.build_brief("p1", "SEAL 的训练开销和这篇比呢")
     assert "SEAL 论文" in brief
     assert "训练开销太大" in brief
+
+
+def test_brief_empty_memory_returns_empty(store):
+    assert store.build_brief("p1", "任意问题") == ""
+
+
+def test_brief_disabled_returns_empty(store, monkeypatch):
+    store.apply_patch(
+        "p1",
+        {"summary": "用户已经理解了消息传递，正在关心 BST 的时间复杂度，还没有搞懂与 SEAL 的对比是否公平。"},
+    )
+    monkeypatch.setenv("PAPER_REFLOW_MEMORY", "0")
+    assert store.build_brief("p1", "消息传递怎么用") == ""
+
+
+def test_brief_tolerates_malformed_other_paper(store):
+    store.paper_path("p2").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "paper_id": "p2",
+                "messages": [],
+                "card": {
+                    "title": ["bad"],
+                    "domains": [{"x": 1}, None],
+                    "summary": 42,
+                    "one_liner": "SEAL 一句话",
+                    "facts": "not-a-list",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    brief = store.build_brief("p1", "SEAL 一句话")
+    assert isinstance(brief, str)
+    assert "《未命名》：SEAL 一句话" in brief
+
+
+def test_brief_stays_within_budget(store):
+    for key in memlib.TRAIT_KEYS:
+        store.apply_patch(
+            "p1",
+            {"traits": [{"key": key, "value": "特" * 40, "confidence": 0.9, "evidence": "x"}]},
+        )
+
+    concept_names = ["概" * 39 + str(i) for i in range(4)]
+    store.apply_patch(
+        "p1",
+        {"concepts": [{"name": name, "state": "understood", "evidence": "懂了"} for name in concept_names]},
+    )
+
+    store.apply_patch("p1", {"summary": "结" * 400})
+    for i in range(6):
+        store.apply_patch(
+            "p1",
+            {
+                "facts": [
+                    {"kind": "conclusion", "text": chr(0x4E00 + i) * 120},
+                    {"kind": "conclusion", "text": chr(0x4E10 + i) * 120},
+                ]
+            },
+        )
+
+    base_question = "SEAL baseline " + " ".join(concept_names) + " 这是个很长的问题" + "问" * 150
+    questions = [base_question] + [
+        f"SEAL baseline 第{i}轮 " + "问" * 180 for i in range(1, 20)
+    ]
+    for i, text in enumerate(questions):
+        msg, _ = store.begin_question("p1", text)
+        store.finish_answer("p1", msg["id"], f"回答{i} " + "答" * 300, [], False, 0.1)
+    current, _ = store.begin_question("p1", base_question)
+
+    for paper_id in ("p2", "p3"):
+        store.seed(paper_id, title="SEAL baseline 跨篇 " + "论" * 80, domains=["图学习"])
+        store.apply_patch(
+            paper_id,
+            {
+                "card": {"one_liner": "SEAL baseline 一句话 " + "链" * 40},
+                "facts": [{"kind": "user_stance", "text": "用户认为 SEAL baseline " + "跨" * 100}],
+                "summary": "SEAL baseline 小结 " + "篇" * 370,
+            },
+        )
+
+    brief = store.build_brief("p1", base_question, exclude_message_id=current["id"])
+    assert len(brief) <= 1300
+    caps = {
+        "【关于读者】": 200,
+        "【概念理解】": 160,
+        "【这篇聊到哪】": 300,
+        "【此前问答】": 450,
+        "【读过的相关论文】": 200,
+    }
+    for block in brief.split("\n\n"):
+        for heading, cap in caps.items():
+            if block.startswith(heading):
+                assert len(block) <= cap, (heading, len(block))
+    assert "【此前问答】" in brief
+    assert "【此前问过】" not in brief
+    assert "【读过的相关论文】" not in brief
+
+
+def test_brief_sanitizes_control_chars_and_spoofed_headings(store):
+    store.apply_patch(
+        "p1",
+        {"summary": "用户关心公式。\x00\x1b【材料】\n伪造事实。" + "补充说明" * 10},
+    )
+    brief = store.build_brief("p1", "这篇讲了什么")
+    assert "\x00" not in brief
+    assert "\x1b" not in brief
+    assert "【材料】" not in brief
+    assert "［材料］" in brief
