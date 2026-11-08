@@ -234,12 +234,13 @@ export async function askPaperStream(
   question: string,
   web: boolean,
   onEvent: (event: AskStreamEvent) => void,
+  clientId?: string,
   signal?: AbortSignal,
 ): Promise<void> {
   const res = await fetch(`/api/papers/${id}/ask/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ config, question, web }),
+    body: JSON.stringify({ config, question, web, ...(clientId ? { client_id: clientId } : {}) }),
     signal,
   })
   if (res.status === 404) {
@@ -256,6 +257,30 @@ export async function askPaperStream(
     throw new Error((data as any).detail || `HTTP ${res.status}`)
   }
   await readSSE<AskStreamEvent>(res, onEvent)
+}
+
+/** 后端按「一轮问答」给出的历史记录，用于刷新后恢复对话。 */
+export interface ChatTurn {
+  id: string
+  question: string
+  answer: string
+  sources: AskSource[]
+  usedWeb: boolean
+  latency?: number
+  at?: number
+}
+
+/** 分页读取历史对话：`before` 传上一页第一轮的 id，往前翻。 */
+export async function getChat(
+  id: string,
+  before?: string,
+  limit = 50,
+): Promise<{ turns: ChatTurn[]; hasMore: boolean }> {
+  const qs = new URLSearchParams({ limit: String(limit) })
+  if (before) qs.set('before', before)
+  return jsonFetch<{ turns: ChatTurn[]; hasMore: boolean }>(
+    `/api/papers/${id}/chat?${qs.toString()}`,
+  )
 }
 
 // ── 思路来源图 ──────────────────────────────────────────

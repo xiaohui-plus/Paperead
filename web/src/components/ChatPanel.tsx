@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Paper } from '../types'
-import { askPaperStream, type AskSource } from '../lib/library'
+import { askPaperStream, getChat, type AskSource } from '../lib/library'
 import {
   isModelReady,
   loadModelSettings,
@@ -49,6 +49,8 @@ export function ChatPanel({
   settingsVersion?: number
 }) {
   const [turns, setTurns] = useState<Turn[]>([])
+  // 演示论文没有后端历史，直接算就绪
+  const [historyReady, setHistoryReady] = useState(paperId === 'demo')
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [useWeb, setUseWeb] = useState(true)
@@ -93,6 +95,44 @@ export function ChatPanel({
   }, [pickerOpen])
 
   useEffect(() => () => abortRef.current?.abort(), [])
+
+  // 挂载（或换论文）时恢复上次的对话；演示论文没有历史，直接标记就绪
+  useEffect(() => {
+    if (paperId === 'demo') {
+      setHistoryReady(true)
+      return
+    }
+    let alive = true
+    setHistoryReady(false)
+    getChat(paperId)
+      .then(({ turns: history }) => {
+        if (!alive || history.length === 0) return
+        const restored: Turn[] = history.map((t): Turn => {
+          seq.current += 1
+          return {
+            id: seq.current,
+            question: t.question,
+            answer: t.answer,
+            sources: t.sources ?? [],
+            usedWeb: !!t.usedWeb,
+            latency: t.latency,
+            // 上一轮没答完（例如中途停止）就没有 answer，按 stopped 展示
+            status: t.answer ? 'done' : 'stopped',
+          }
+        })
+        // 恢复只填补空白面板：已经有（或刚发出的）对话就不要再插历史
+        setTurns((prev) => (prev.length === 0 ? restored : prev))
+      })
+      .catch(() => {
+        // 历史读不出来不影响问答
+      })
+      .finally(() => {
+        if (alive) setHistoryReady(true)
+      })
+    return () => {
+      alive = false
+    }
+  }, [paperId])
 
   const onScroll = () => {
     const el = listRef.current
@@ -145,6 +185,12 @@ export function ChatPanel({
 
     const controller = new AbortController()
     abortRef.current = controller
+
+    // 同一个 client id 重试时服务端直接回放已存答案，避免重复落盘
+    const clientId =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`
 
     // 增量先攒在 buffer 里，每 50ms 合并一次 setState：
     // 既能逐字出现，又不会因为每个 token 重渲染整段 Markdown 而抖动。
@@ -208,6 +254,7 @@ export function ChatPanel({
               break
           }
         },
+        clientId,
         controller.signal,
       )
 
@@ -242,21 +289,28 @@ export function ChatPanel({
     void ask(q)
   }
 
-  // 深链 ?ask=xxx 自动提问（也方便分享一个问题）
+  // 深链 ?ask=xxx 自动提问（也方便分享一个问题）；等历史恢复完再发，避免和恢复互相插队
   const asked = useRef(false)
   useEffect(() => {
-    if (asked.current) return
+    if (!historyReady || asked.current) return
     const q = new URLSearchParams(window.location.search).get('ask')
     if (!q) return
     asked.current = true
     void ask(q)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [historyReady])
 
   return (
     <div className="chat">
       <div className="chat-list" ref={listRef} onScroll={onScroll}>
-        {turns.length === 0 && (
+        {!historyReady && turns.length === 0 && (
+          <div className="turn-status">
+            <span className="turn-dot" />
+            正在恢复上次的对话…
+          </div>
+        )}
+
+        {turns.length === 0 && historyReady && (
           <>
             <p className="greeting">Hi，准备好阅读了吗？你想从哪里开始？</p>
             <div className="quick-label">
