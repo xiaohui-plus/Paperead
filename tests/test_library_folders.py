@@ -111,3 +111,97 @@ def test_project_papers_do_not_count_in_folders(tmp_path: Path):
     folders = store.list_folders()
     assert folders[0]["paper_count"] == 1
     assert [row["id"] for row in store.list()] == ["p1"]
+
+from fastapi.testclient import TestClient
+
+import server.main as main
+
+
+@pytest.fixture()
+def api(tmp_path: Path, monkeypatch):
+    store = LibraryStore(tmp_path / "api-lib")
+    monkeypatch.setattr(main, "store", store)
+    monkeypatch.setattr(main, "TOKEN", "")
+
+    async def _noop(_paper_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(main, "_parse_task", _noop)
+    with TestClient(main.app) as client:
+        yield client, store
+
+
+def test_api_folder_crud_and_paper_move(api):
+    client, store = api
+    _seed(store, [_paper("p1")])
+
+    created = client.post("/api/folders", json={"name": "免疫治疗"})
+    assert created.status_code == 201
+    folder = created.json()
+    assert folder["paper_count"] == 0
+
+    listed = client.get("/api/folders")
+    assert listed.status_code == 200
+    assert listed.json()["folders"][0]["id"] == folder["id"]
+
+    renamed = client.patch(
+        f"/api/folders/{folder['id']}",
+        json={"name": "肿瘤免疫"},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == "肿瘤免疫"
+
+    moved = client.patch(
+        "/api/papers/p1/folder",
+        json={"folder_id": folder["id"]},
+    )
+    assert moved.status_code == 200
+    assert moved.json()["folder_id"] == folder["id"]
+    assert client.get("/api/papers").json()["papers"][0]["folder_id"] == folder["id"]
+
+    deleted = client.delete(f"/api/folders/{folder['id']}")
+    assert deleted.status_code == 200
+    assert deleted.json() == {"ok": True, "moved": 1}
+    assert client.get("/api/papers").json()["papers"][0].get("folder_id") is None
+
+
+def test_api_errors(api):
+    client, _ = api
+    assert client.post("/api/folders", json={"name": "  "}).status_code == 400
+
+    first = client.post("/api/folders", json={"name": "免疫治疗"}).json()
+    assert client.post("/api/folders", json={"name": "免疫治疗"}).status_code == 409
+    assert client.patch(
+        "/api/folders/missing", json={"name": "x"}
+    ).status_code == 404
+    assert client.delete("/api/folders/missing").status_code == 404
+    assert client.patch(
+        "/api/papers/missing/folder", json={"folder_id": first["id"]}
+    ).status_code == 404
+    assert client.patch(
+        "/api/papers/p1/folder", json={"folder_id": "f_missing"}
+    ).status_code == 404
+
+
+def test_upload_into_folder(api):
+    client, store = api
+    folder = client.post("/api/folders", json={"name": "免疫治疗"}).json()
+    payload = b"%PDF-1.4\n" + b"x" * 2048
+
+    res = client.post(
+        "/api/papers/upload",
+        files=[("files", ("paper.pdf", payload, "application/pdf"))],
+        data={"folder_id": folder["id"]},
+    )
+    assert res.status_code == 200
+    added = res.json()["added"]
+    assert len(added) == 1
+    assert added[0]["folder_id"] == folder["id"]
+    assert store.get(added[0]["id"])["folder_id"] == folder["id"]
+
+    missing = client.post(
+        "/api/papers/upload",
+        files=[("files", ("paper.pdf", payload, "application/pdf"))],
+        data={"folder_id": "f_missing"},
+    )
+    assert missing.status_code == 404

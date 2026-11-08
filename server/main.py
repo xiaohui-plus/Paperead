@@ -24,7 +24,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -50,7 +58,7 @@ from paperead.translate import (
     translate_block,
     translate_paper,
 )
-from server.store import LibraryStore
+from server.store import FolderExistsError, FolderNameError, LibraryStore
 from server.scholar_api import build_router as build_scholar_router
 from server.runtime import (
     allowed_origins,
@@ -138,6 +146,14 @@ class PingReq(BaseModel):
 
 class ImportReq(BaseModel):
     path: str = Field(..., min_length=1, description="本机 PDF 绝对路径")
+
+
+class FolderIn(BaseModel):
+    name: str = ""
+
+
+class PaperFolderIn(BaseModel):
+    folder_id: str | None = None
 
 
 def _decode(image_base64: str) -> bytes:
@@ -350,13 +366,55 @@ def _public(row: dict) -> dict:
     }
 
 
+@app.get("/api/folders")
+async def list_folders() -> dict:
+    return {"folders": store.list_folders()}
+
+
+@app.post("/api/folders", status_code=201)
+async def create_folder(req: FolderIn) -> dict:
+    try:
+        return store.create_folder(req.name)
+    except FolderExistsError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except FolderNameError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.patch("/api/folders/{folder_id}")
+async def rename_folder(folder_id: str, req: FolderIn) -> dict:
+    try:
+        folder = store.rename_folder(folder_id, req.name)
+    except FolderExistsError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except FolderNameError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if folder is None:
+        raise HTTPException(status_code=404, detail="文件夹不存在")
+    return folder
+
+
+@app.delete("/api/folders/{folder_id}")
+async def delete_folder(folder_id: str) -> dict:
+    result = store.delete_folder(folder_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="文件夹不存在")
+    return result
+
+
 @app.get("/api/papers")
 async def list_papers() -> dict:
     return {"papers": [_public(r) for r in store.list()], "mock": MOCK}
 
 
 @app.post("/api/papers/upload")
-async def upload_papers(files: list[UploadFile] = File(...)) -> dict:
+async def upload_papers(
+    files: list[UploadFile] = File(...),
+    folder_id: str | None = Form(default=None),
+) -> dict:
+    if folder_id and store.get_folder(folder_id) is None:
+        raise HTTPException(status_code=404, detail="文件夹不存在")
+
     added, failed = [], []
     for f in files:
         name = f.filename or "paper.pdf"
@@ -367,7 +425,8 @@ async def upload_papers(files: list[UploadFile] = File(...)) -> dict:
         if len(data) < 1024:
             failed.append({"filename": name, "error": "文件过小，可能不是有效 PDF"})
             continue
-        row = store.add(name, data)
+        meta = {"folder_id": folder_id} if folder_id else None
+        row = store.add(name, data, meta)
         added.append(_public(row))
         # 上传后立刻后台解析（布局 + 图表 + 公式裁图），不阻塞上传响应
         asyncio.create_task(_parse_task(row["id"]))
@@ -405,6 +464,17 @@ async def delete_paper(paper_id: str) -> dict:
         await asyncio.gather(*tasks, return_exceptions=True)
     memory_engine.get_store(store.root).forget(paper_id)
     return {"ok": True}
+
+
+@app.patch("/api/papers/{paper_id}/folder")
+async def move_paper_to_folder(paper_id: str, req: PaperFolderIn) -> dict:
+    try:
+        row = store.move_paper(paper_id, req.folder_id)
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    if row is None:
+        raise HTTPException(status_code=404, detail="论文不存在")
+    return _public(row)
 
 
 @app.get("/api/papers/{paper_id}/file")
