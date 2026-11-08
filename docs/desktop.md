@@ -141,7 +141,8 @@ npx tauri signer generate -w .tauri/updater.key
 
 未签名的 Windows 安装包会触发 SmartScreen。正式分发建议：
 
-- 开源项目申请 SignPath 等免费 OSS 签名；或
+- 开源项目申请 **SignPath Foundation 免费 OSS 签名**，申请与接入步骤见
+  [signpath.md](signpath.md)，签名策略见 [CODE_SIGNING.md](../CODE_SIGNING.md)；或
 - 购买 OV/EV 代码签名证书，在 CI 中接入 `signtool`/Tauri 的签名命令。
 
 ## 已知限制
