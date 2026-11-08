@@ -381,6 +381,8 @@ class MemoryStore:
         self.profile_path = self.root / "profile.json"
         self.concepts_path = self.root / "concepts.json"
         self._lock = threading.RLock()
+        # 已删除的论文：晚到的后台写手不能把 {id}.chat.json 重新写回来
+        self._forgotten: set[str] = set()
 
     # ── 路径 ────────────────────────────────────────────
     def paper_path(self, paper_id: str) -> Path:
@@ -440,6 +442,7 @@ class MemoryStore:
         title = _card_text(title, 200)
         domains = _clean_domains(domains)
         with self._lock:
+            self._forgotten.discard(paper_id)
             chat = self.chat(paper_id)
             card = chat["card"]
             changed = False
@@ -470,6 +473,7 @@ class MemoryStore:
             return msg, None
 
         with self._lock:
+            self._forgotten.discard(paper_id)
             chat = self.chat(paper_id)
             if client_id:
                 for m in chat["messages"]:
@@ -587,6 +591,8 @@ class MemoryStore:
             return
         now = _now()
         with self._lock:
+            if paper_id in self._forgotten:
+                return
             profile = self.profile()
             self._merge_traits(profile, patch.get("traits") or [], now)
 
@@ -1022,6 +1028,7 @@ class MemoryStore:
 
     def forget(self, paper_id: str) -> None:
         with self._lock:
+            self._forgotten.add(paper_id)
             path = self.paper_path(paper_id)
             targets = [path]
             try:

@@ -353,6 +353,33 @@ def test_forget_removes_chat_backups_and_tmp(store):
     assert store.paper_path("p2").exists()
 
 
+def test_forget_tombstone_blocks_apply_patch_until_new_question(store):
+    good = (
+        "用户主要关心公式含义与 ablation 是否充分，已确认 BST 的时间复杂度，"
+        "仍不清楚与 SEAL 的参数量是否一致。"
+    )
+    store.forget("p1")
+    store.apply_patch("p1", {"summary": good})
+    assert not store.paper_path("p1").exists()
+    assert store.profile()["turn_count"] == 0
+
+    store.begin_question("p1", "新问题")
+    store.apply_patch("p1", {"summary": good})
+    assert store.paper_path("p1").exists()
+    assert store.profile()["turn_count"] == 1
+
+
+def test_seed_clears_forget_tombstone(store):
+    store.forget("p1")
+    store.seed("p1", title="Paper A")
+    store.apply_patch(
+        "p1",
+        {"concepts": [{"name": "消息传递", "state": "learning", "evidence": "x"}]},
+    )
+    assert store.paper_path("p1").exists()
+    assert store.concepts()["concepts"][0]["name"] == "消息传递"
+
+
 def test_memory_disabled_writes_no_files(tmp_path, monkeypatch):
     monkeypatch.setenv("PAPER_REFLOW_MEMORY", "0")
     store = memlib.MemoryStore(tmp_path)

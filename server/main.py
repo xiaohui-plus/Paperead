@@ -236,8 +236,10 @@ async def ping(req: PingReq) -> dict:
 _parsing: set[str] = set()
 _translating: set[str] = set()
 _locks: dict[str, asyncio.Lock] = {}
-# 后台记忆写手的强引用：只挂在事件循环上的任务可能被 GC 回收
-_bg_tasks: set[asyncio.Task] = set()
+# 后台记忆写手的强引用：task -> paper_id，删除论文时要能按论文取消
+_bg_tasks: dict[asyncio.Task, str] = {}
+# 同一个 (paper_id, client_id) 的并发请求串行化，后到的直接命中缓存
+_ask_claims: dict[tuple[str, str], asyncio.Lock] = {}
 
 
 def _public(row: dict) -> dict:
@@ -297,6 +299,12 @@ async def import_paper(req: ImportReq) -> dict:
 async def delete_paper(paper_id: str) -> dict:
     if not store.remove(paper_id):
         raise HTTPException(status_code=404, detail="论文不存在")
+    # 先停掉这篇论文的记忆写手，避免它在 forget 之后又把聊天文件写回来
+    tasks = [task for task, pid in _bg_tasks.items() if pid == paper_id]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
     memory_engine.get_store(store.root).forget(paper_id)
     return {"ok": True}
 
@@ -597,6 +605,18 @@ def _cached_answer(user_msg: dict, cached: dict) -> dict:
     }
 
 
+def _claim(paper_id: str, client_id: str | None) -> asyncio.Lock | None:
+    """同一个 (paper_id, client_id) 只跑一次生成；没有 client_id 时不上锁。"""
+    if not client_id:
+        return None
+    key = (paper_id, client_id)
+    lock = _ask_claims.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _ask_claims[key] = lock
+    return lock
+
+
 def _schedule_writer(
     mem: memory_engine.MemoryStore,
     paper_id: str,
@@ -617,8 +637,8 @@ def _schedule_writer(
             mem.touched_concepts(standalone),
         )
     )
-    _bg_tasks.add(task)
-    task.add_done_callback(_bg_tasks.discard)
+    _bg_tasks[task] = paper_id
+    task.add_done_callback(lambda t: _bg_tasks.pop(t, None))
 
 
 async def _prepare_ask(
@@ -681,35 +701,42 @@ async def ask_paper(paper_id: str, req: AskReq) -> dict:
     _require_ask_ready(paper_id, req.question)
     _apply_llm_config(req.config)
 
-    t0 = time.time()
-    mem = memory_engine.get_store(store.root)
-    _seed_memory(mem, paper_id)
+    claim = _claim(paper_id, req.client_id)
+    if claim is not None:
+        await claim.acquire()
+    try:
+        t0 = time.time()
+        mem = memory_engine.get_store(store.root)
+        _seed_memory(mem, paper_id)
 
-    user_msg, cached = mem.begin_question(paper_id, req.question, req.client_id)
-    if cached is not None:
-        return _cached_answer(user_msg, cached)
+        user_msg, cached = mem.begin_question(paper_id, req.question, req.client_id)
+        if cached is not None:
+            return _cached_answer(user_msg, cached)
 
-    recent = mem.recent_before(paper_id, user_msg["id"], 6)
-    standalone, expanded = await qa_engine.rewrite_and_expand(req.question, recent)
-    brief = mem.build_brief(paper_id, standalone, exclude_message_id=user_msg["id"])
+        recent = mem.recent_before(paper_id, user_msg["id"], 6)
+        standalone, expanded = await qa_engine.rewrite_and_expand(req.question, recent)
+        brief = mem.build_brief(paper_id, standalone, exclude_message_id=user_msg["id"])
 
-    prep = await _prepare_ask(paper_id, req, standalone, expanded)
-    text = await qa_engine.answer(standalone, prep.context, brief, recent)
+        prep = await _prepare_ask(paper_id, req, standalone, expanded)
+        text = await qa_engine.answer(standalone, prep.context, brief, recent)
 
-    latency = round(time.time() - t0, 1)
-    ai_msg = mem.finish_answer(
-        paper_id, user_msg["id"], text, prep.sources, prep.used_web, latency
-    )
-    _schedule_writer(mem, paper_id, req.question, text, standalone)
+        latency = round(time.time() - t0, 1)
+        ai_msg = mem.finish_answer(
+            paper_id, user_msg["id"], text, prep.sources, prep.used_web, latency
+        )
+        _schedule_writer(mem, paper_id, req.question, text, standalone)
 
-    return {
-        "answer": ai_msg.get("text", text),
-        "sources": prep.sources,
-        "usedWeb": prep.used_web,
-        "latency": latency,
-        "user_message_id": user_msg["id"],
-        "answer_message_id": ai_msg["id"],
-    }
+        return {
+            "answer": ai_msg.get("text", text),
+            "sources": prep.sources,
+            "usedWeb": prep.used_web,
+            "latency": latency,
+            "user_message_id": user_msg["id"],
+            "answer_message_id": ai_msg["id"],
+        }
+    finally:
+        if claim is not None:
+            claim.release()
 
 
 @app.post("/api/papers/{paper_id}/ask/stream")
@@ -722,23 +749,35 @@ async def ask_stream(paper_id: str, req: AskReq) -> StreamingResponse:
     _require_ask_ready(paper_id, req.question)
     _apply_llm_config(req.config)
 
-    mem = memory_engine.get_store(store.root)
-    _seed_memory(mem, paper_id)
-    user_msg, cached = mem.begin_question(paper_id, req.question, req.client_id)
+    claim = _claim(paper_id, req.client_id)
+    if claim is not None:
+        await claim.acquire()
+    try:
+        mem = memory_engine.get_store(store.root)
+        _seed_memory(mem, paper_id)
+        user_msg, cached = mem.begin_question(paper_id, req.question, req.client_id)
+    except BaseException:
+        if claim is not None:
+            claim.release()
+        raise
 
     if cached is not None:
 
         async def cached_gen():
-            yield _sse({"type": "status", "stage": "retrieving"})
-            yield _sse(
-                {
-                    "type": "sources",
-                    "sources": cached.get("sources") or [],
-                    "usedWeb": bool(cached.get("used_web")),
-                }
-            )
-            yield _sse({"type": "delta", "text": cached.get("text", "")})
-            yield _sse({"type": "done", "latency": cached.get("latency", 0.0)})
+            try:
+                yield _sse({"type": "status", "stage": "retrieving"})
+                yield _sse(
+                    {
+                        "type": "sources",
+                        "sources": cached.get("sources") or [],
+                        "usedWeb": bool(cached.get("used_web")),
+                    }
+                )
+                yield _sse({"type": "delta", "text": cached.get("text", "")})
+                yield _sse({"type": "done", "latency": cached.get("latency", 0.0)})
+            finally:
+                if claim is not None:
+                    claim.release()
 
         return StreamingResponse(
             cached_gen(),
@@ -794,6 +833,9 @@ async def ask_stream(paper_id: str, req: AskReq) -> StreamingResponse:
         except Exception as e:
             log.exception("流式问答失败 %s", paper_id)
             yield _sse({"type": "error", "message": str(e)[:300]})
+        finally:
+            if claim is not None:
+                claim.release()
 
     return StreamingResponse(
         gen(),

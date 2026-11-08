@@ -40,6 +40,7 @@ _EXTERNAL_RE = re.compile(
     r"领域内|发展趋势|和.*比|比.*好吗|202[4-9]|202[0-9]年",
     re.IGNORECASE,
 )
+_DIALOGUE_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 @dataclass
@@ -214,7 +215,8 @@ async def rewrite_and_expand(
         return question, await expand_query(question)
 
     recent = "\n".join(
-        f"{'用户' if m.get('role') == 'user' else '助手'}：{str(m.get('text', ''))[:300]}"
+        f"{'用户' if m.get('role') == 'user' else '助手'}："
+        f"{_sanitize_dialogue(m.get('text', ''))[:300]}"
         for m in history[-6:]
     )
     try:
@@ -314,10 +316,20 @@ def build_context(
     return "\n\n".join(parts)
 
 
+def _sanitize_dialogue(text: object) -> str:
+    """把历史对话压成单行：去控制字符，替换全角方括号，防止伪造块标题。"""
+    value = str(text or "")
+    value = _DIALOGUE_CONTROL_RE.sub("", value)
+    value = value.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    value = re.sub(r"\s+", " ", value)
+    return value.replace("【", "［").replace("】", "］").strip()
+
+
 def _recent_block(recent: list[dict] | None) -> str:
     """最近几轮只留角色和正文，不带 client_id / sources 等内部字段。"""
     lines = [
-        f"{'用户' if m.get('role') == 'user' else '助手'}：{str(m.get('text', ''))[:300]}"
+        f"{'用户' if m.get('role') == 'user' else '助手'}："
+        f"{_sanitize_dialogue(m.get('text', ''))[:300]}"
         for m in (recent or [])[-6:]
     ]
     return "【最近对话】\n" + "\n".join(lines)
