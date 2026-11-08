@@ -30,7 +30,9 @@ export function LibraryPage({ onOpenPaper }: Props) {
   const [view, setView] = useState<'grid' | 'list'>('grid')
   const [dragOver, setDragOver] = useState(false)
   const [toast, setToast] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null)
-  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(
+    () => new URLSearchParams(window.location.search).get('settings') === '1',
+  )
   const [uploading, setUploading] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 

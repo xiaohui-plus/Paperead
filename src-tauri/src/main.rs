@@ -69,6 +69,7 @@ fn main() {
             }
 
             paths::log_line(&handle, "desktop ready");
+            maybe_onboard(&handle, port, &data_dir);
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -190,6 +191,30 @@ fn focus_main(app: &AppHandle) {
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+fn maybe_onboard(app: &AppHandle, port: u16, data_dir: &std::path::Path) {
+    let flag = data_dir.join("onboarded");
+    if flag.exists() {
+        return;
+    }
+    let _ = std::fs::write(&flag, "1");
+
+    let target = format!("http://127.0.0.1:{port}/?settings=1");
+    let window = app.get_webview_window("main");
+    app.dialog()
+        .message(
+            "paper-reflow 已安装。\n\nPDF 和阅读数据只保存在本机；翻译/导读时，论文文本会发送给你配置的模型服务商。\n\n接下来请在设置里填写 API Key。",
+        )
+        .title("欢迎使用 paper-reflow")
+        .kind(MessageDialogKind::Info)
+        .show(move |_| {
+            if let Some(window) = window {
+                if let Ok(url) = Url::parse(&target) {
+                    let _ = window.navigate(url);
+                }
+            }
+        });
 }
 
 fn show_about(app: &AppHandle) {
