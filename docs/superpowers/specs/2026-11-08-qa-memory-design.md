@@ -2,6 +2,7 @@
 
 - 版本：v1（设计稿）
 - 日期：2026-11-08
+- 状态：已实现。核心在 `paper_reflow/tutor/memory.py`，服务端接线在 `server/main.py` 的 `/ask`、`/ask/stream`、`GET /chat`，前端在 `ChatPanel`。
 - 范围：阅读页「问答」tab 的记忆能力（持久化、追问、研究者画像、概念理解、跨论文）
 - 关联：`docs/design-tutor.md` §4.5（三路问答）、`paper_reflow/tutor/qa.py`、`server/main.py` `/ask`、`web/src/components/ChatPanel.tsx`
 
