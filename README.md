@@ -9,7 +9,7 @@
 
 Windows 10/11 x64 安装包发布在 GitHub Releases，构建、签名与自动更新说明见
 [docs/desktop.md](docs/desktop.md)。桌面版自带 Python sidecar，使用者不需要安装
-Python/Node；数据默认在 `%LOCALAPPDATA%\paper-reflow`。
+Python/Node；数据默认在 `%LOCALAPPDATA%\paper-reflow-data`。
 
 ## 能解决什么
 

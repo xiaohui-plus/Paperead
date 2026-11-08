@@ -11,7 +11,7 @@ import secrets
 import sys
 from pathlib import Path
 
-APP_NAME = "paper-reflow"
+DATA_DIR_NAME = "paper-reflow-data"
 
 
 def is_frozen() -> bool:
@@ -37,8 +37,8 @@ def default_data_dir() -> Path:
     if is_frozen():
         base = os.getenv("LOCALAPPDATA") or os.getenv("APPDATA")
         if base:
-            return Path(base) / APP_NAME
-        return Path.home() / f".{APP_NAME}"
+            return Path(base) / DATA_DIR_NAME
+        return Path.home() / f".{DATA_DIR_NAME}"
     return bundle_root() / "data"
 
 

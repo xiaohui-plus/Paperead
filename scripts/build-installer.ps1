@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
@@ -7,6 +7,10 @@ $env:TEMP = Join-Path $root ".tmp"
 $env:TMP = $env:TEMP
 $env:npm_config_cache = Join-Path $root ".npm-cache"
 New-Item -ItemType Directory -Force $env:TEMP | Out-Null
+
+if (-not $env:TAURI_SIGNING_PRIVATE_KEY -and (Test-Path (Join-Path $root ".tauri\updater.key"))) {
+    $env:TAURI_SIGNING_PRIVATE_KEY = (Resolve-Path (Join-Path $root ".tauri\updater.key")).Path
+}
 
 & (Join-Path $PSScriptRoot "build-sidecar.ps1")
 if ($LASTEXITCODE -ne 0) { throw "sidecar 构建失败" }

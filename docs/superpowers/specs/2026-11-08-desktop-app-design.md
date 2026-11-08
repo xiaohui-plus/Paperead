@@ -73,7 +73,7 @@ Tauri 2 壳 (Rust)
   崩溃时整棵进程树被终止，避免孤儿进程。
 - `tauri-plugin-single-instance`：第二次启动聚焦已有窗口；带 PDF 路径启动时把路径
   交给已运行实例。
-- 日志：`%LOCALAPPDATA%\paper-reflow\logs\app.log` 与 `server.log`，滚动 5MB × 3；
+- 日志：`%LOCALAPPDATA%\paper-reflow-data\logs\app.log` 与 `server.log`，滚动 5MB × 3；
   不记录 API Key。
 
 ### 前端与原生能力的边界
@@ -101,9 +101,10 @@ Tauri 2 壳 (Rust)
 
 ## 5. 数据
 
-- 数据根目录：`%LOCALAPPDATA%\paper-reflow`，通过 `PAPER_REFLOW_DATA` 传给 sidecar。
+- 数据根目录：`%LOCALAPPDATA%\paper-reflow-data`，通过 `PAPER_REFLOW_DATA` 传给 sidecar。
 - 结构沿用现有 `data/`：`library.json`、`papers/{id}.pdf|.blocks.json|.thumb.png|...`。
-- 安装目录：`%LOCALAPPDATA%\Programs\paper-reflow`，per-user，不弹 UAC。
+- 安装目录：`%LOCALAPPDATA%\paper-reflow`（Tauri NSIS currentUser 默认），per-user，不弹 UAC。
+  数据目录与安装目录分开，避免卸载/升级删掉文献库。
 - `library.json` 改为原子写：临时文件 + `os.replace`，并在 `backups/` 保留上一版。
 - 增加 `schema_version`，升级时做迁移；MVP 只需写入版本号。
 - 卸载默认保留数据；应用内提供“打开数据目录”。

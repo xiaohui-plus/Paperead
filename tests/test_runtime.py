@@ -25,7 +25,7 @@ def test_default_data_dir_uses_localappdata_when_frozen(monkeypatch, tmp_path):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "bundle"), raising=False)
-    assert default_data_dir() == tmp_path / "paper-reflow"
+    assert default_data_dir() == tmp_path / "paper-reflow-data"
 
 
 def test_ensure_data_dir_creates_layout(tmp_path):

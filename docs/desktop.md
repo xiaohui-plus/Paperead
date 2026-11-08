@@ -10,8 +10,8 @@ Python 或 Node。
 
 - 文件名：`paper-reflow_<version>_x64-setup.exe`
 - 系统：Windows 10/11 x64
-- 安装方式：per-user（`%LOCALAPPDATA%\paper-reflow`），不弹 UAC
-- 数据目录：`%LOCALAPPDATA%\paper-reflow`
+- 安装方式：per-user（安装目录 `%LOCALAPPDATA%\paper-reflow`），不弹 UAC
+- 数据目录：`%LOCALAPPDATA%\paper-reflow-data`（与安装目录分开，卸载/升级不影响文献库）
 - 卸载：默认保留数据；可在应用内打开数据目录手动删除
 
 首次启动会说明本地数据与模型请求范围，然后打开“模型与密钥”设置。

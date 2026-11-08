@@ -7,12 +7,12 @@ pub fn data_dir(app: &AppHandle) -> PathBuf {
         return PathBuf::from(value);
     }
     if let Some(value) = std::env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(value).join("paper-reflow");
+        return PathBuf::from(value).join("paper-reflow-data");
     }
     app.path()
         .app_local_data_dir()
-        .map(|path| path.join("paper-reflow"))
-        .unwrap_or_else(|_| PathBuf::from("paper-reflow"))
+        .map(|path| path.join("paper-reflow-data"))
+        .unwrap_or_else(|_| PathBuf::from("paper-reflow-data"))
 }
 
 pub fn ensure_data_dir(app: &AppHandle) -> PathBuf {
