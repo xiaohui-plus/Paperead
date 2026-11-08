@@ -45,6 +45,7 @@ FACT_LABELS = {
     "open_question": "待解决",
 }
 MAX_FACTS = 12
+FACT_PRIORITY = {"conclusion": 0, "open_question": 1, "user_stance": 2}
 INDEX_WINDOW = 400
 
 
@@ -155,6 +156,14 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _card_text(value: Any, limit: int | None = None) -> str:
+    """卡片标量只接受字符串；手改出来的列表/None 一律退化为空串。"""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    return text if limit is None else text[:limit]
+
+
 def _clean_messages(value: Any) -> list[dict]:
     if not isinstance(value, list):
         return []
@@ -180,7 +189,7 @@ def _clean_domains(value: Any) -> list[str]:
     for item in value:
         if not isinstance(item, str):
             continue
-        text = item.strip()
+        text = item.strip()[:20]
         if not text or text in out:
             continue
         out.append(text)
@@ -208,7 +217,13 @@ def _clean_facts(value: Any) -> list[dict]:
         fact = dict(item)
         fact["text"] = text
         out.append(fact)
-    return out[-MAX_FACTS:]
+    while len(out) > MAX_FACTS:
+        index = min(
+            range(len(out)),
+            key=lambda i: (FACT_PRIORITY.get(out[i].get("kind"), 0), i),
+        )
+        out.pop(index)
+    return out
 
 
 def _concept_key(name: str) -> str:
@@ -358,6 +373,15 @@ class MemoryStore:
             card.setdefault(key, value)
         card["domains"] = _clean_domains(card.get("domains"))
         card["facts"] = _clean_facts(card.get("facts"))
+        card["title"] = _card_text(card.get("title"), 200)
+        card["summary"] = _card_text(card.get("summary"), 400)
+        card["one_liner"] = _card_text(card.get("one_liner"), 60)
+        card["summarized_through"] = _card_text(card.get("summarized_through"))
+        try:
+            updated_at = float(card.get("updated_at", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            updated_at = 0.0
+        card["updated_at"] = updated_at
         data["card"] = card
         return data
 
@@ -389,6 +413,8 @@ class MemoryStore:
     def seed(self, paper_id: str, title: str = "", domains: list[str] | None = None) -> None:
         if not enabled():
             return
+        title = _coerce_text(title).strip()
+        domains = _clean_domains(domains)
         with self._lock:
             chat = self.chat(paper_id)
             card = chat["card"]
@@ -397,7 +423,7 @@ class MemoryStore:
                 card["title"] = _clip(title, 200)
                 changed = True
             if domains:
-                merged = list(dict.fromkeys([*card.get("domains", []), *domains]))[:4]
+                merged = _clean_domains([*card.get("domains", []), *domains])
                 if merged != card.get("domains"):
                     card["domains"] = merged
                     changed = True
@@ -668,11 +694,10 @@ class MemoryStore:
                 continue
             facts.append({"kind": kind, "text": text, "at": now})
 
-        priority = {"conclusion": 0, "open_question": 1, "user_stance": 2}
         while len(facts) > MAX_FACTS:
             index = min(
                 range(len(facts)),
-                key=lambda i: (priority.get(facts[i].get("kind"), 0), i),
+                key=lambda i: (FACT_PRIORITY.get(facts[i].get("kind"), 0), i),
             )
             facts.pop(index)
 
@@ -682,8 +707,32 @@ class MemoryStore:
             card["one_liner"] = one_liner
         domains = _clean_domains(card_patch.get("domains"))
         if domains:
-            merged = list(dict.fromkeys([*card.get("domains", []), *domains]))[:4]
-            card["domains"] = merged
+            card["domains"] = _clean_domains([*card.get("domains", []), *domains])
+
+    def fallback_patch(self, question: str, touched: list[str] | None = None) -> dict:
+        q = question or ""
+        names = [n for n in (touched or []) if n][:1]
+        patch: dict = {"concepts": [], "facts": []}
+
+        if re.search(r"懂了|明白了|清楚了|可以了|理解了", q) and names:
+            patch["concepts"].append(
+                {"name": names[0], "state": "understood", "evidence": "用户表示已懂", "explicit": True}
+            )
+            return patch
+
+        if re.search(r"不懂|没懂|没看懂|再说一遍|换个说法|不理解", q):
+            if names:
+                patch["concepts"].append(
+                    {"name": names[0], "state": "confused", "evidence": "用户表示没懂", "explicit": True}
+                )
+                patch["facts"].append({"kind": "open_question", "text": f"还没搞懂：{names[0]}"})
+            else:
+                patch["facts"].append({"kind": "open_question", "text": "有一个问题还没搞懂"})
+            return patch
+
+        if re.search(r"不对|错了|不是这个|有误|不是这样", q):
+            patch["facts"].append({"kind": "user_stance", "text": f"用户纠正：{_clip(q, 80)}"})
+        return patch
 
     def forget(self, paper_id: str) -> None:
         with self._lock:

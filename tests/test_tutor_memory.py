@@ -676,3 +676,124 @@ def test_merge_card_domains_union_capped_and_str_only(store):
         "图神经网络",
         "知识图谱",
     ]
+
+
+def test_merge_summary_rejects_too_short(store):
+    store.apply_patch("p1", {"summary": "太短"})
+    assert store.chat("p1")["card"]["summary"] == ""
+    good = "用户主要关心公式含义与 ablation 是否充分，已确认 BST 的时间复杂度，仍不清楚与 SEAL 的参数量是否一致。"
+    store.apply_patch("p1", {"summary": good})
+    assert store.chat("p1")["card"]["summary"] == good
+
+
+def test_facts_dedupe_and_cap(store):
+    text = "用户认为本文 ablation 缺少 width 维度"
+    store.apply_patch("p1", {"facts": [{"kind": "user_stance", "text": text}]})
+    store.apply_patch("p1", {"facts": [{"kind": "user_stance", "text": text + "。"}]})
+    assert len(store.chat("p1")["card"]["facts"]) == 1
+
+    for i in range(15):
+        store.apply_patch(
+            "p1",
+            {"facts": [{"kind": "conclusion", "text": f"这是第 {i} 条足够长的结论内容"}]},
+        )
+    assert len(store.chat("p1")["card"]["facts"]) <= 12
+
+
+def test_fallback_rules_mark_concept_confused(store):
+    patch = store.fallback_patch("还是不懂，消息传递到底怎么传", ["消息传递"])
+    store.apply_patch("p1", patch)
+    concept = store.concepts()["concepts"][0]
+    assert concept["state"] == "confused"
+    assert any(f["kind"] == "open_question" for f in store.chat("p1")["card"]["facts"])
+
+
+def test_clean_facts_over_cap_keeps_user_stance(store):
+    facts = [{"kind": "user_stance", "text": "用户认为本文的消融实验缺少 width 维度"}]
+    facts += [
+        {"kind": "open_question", "text": f"用户还没搞懂第 {i} 个概念"}
+        for i in range(12)
+    ]
+    facts.append({"kind": "conclusion", "text": "已确认 BST 的时间复杂度"})
+    store.paper_path("p1").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "paper_id": "p1",
+                "messages": [],
+                "card": {"facts": facts},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    cleaned = store.chat("p1")["card"]["facts"]
+    assert len(cleaned) == memlib.MAX_FACTS
+    assert cleaned[0]["kind"] == "user_stance"
+    assert any(f["kind"] == "user_stance" for f in cleaned)
+
+
+def test_chat_card_normalizes_scalar_fields(store):
+    store.paper_path("p1").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "paper_id": "p1",
+                "messages": [],
+                "card": {
+                    "title": [],
+                    "summary": None,
+                    "one_liner": "  " + "长" * 80 + "  ",
+                    "summarized_through": 42,
+                    "updated_at": "bad",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    card = store.chat("p1")["card"]
+    assert card["title"] == ""
+    assert card["summary"] == ""
+    assert card["one_liner"] == "长" * 60
+    assert card["summarized_through"] == ""
+    assert card["updated_at"] == 0.0
+    assert isinstance(card["updated_at"], float)
+
+    store.paper_path("p2").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "paper_id": "p2",
+                "messages": [],
+                "card": {
+                    "title": "  " + "题" * 250,
+                    "summary": "  " + "结" * 450,
+                    "one_liner": "一句话",
+                    "summarized_through": "m_1",
+                    "updated_at": "3.5",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    card = store.chat("p2")["card"]
+    assert card["title"] == "题" * 200
+    assert card["summary"] == "结" * 400
+    assert card["one_liner"] == "一句话"
+    assert card["summarized_through"] == "m_1"
+    assert card["updated_at"] == 3.5
+
+
+def test_seed_normalizes_non_string_domains(store):
+    store.seed("p1", title=123, domains=[{"x": 1}, "图学习", 7])
+    card = store.chat("p1")["card"]
+    assert card["title"] == "123"
+    assert card["domains"] == ["图学习"]
+
+
+def test_clean_domains_truncates_each_domain(store):
+    store.seed("p1", domains=["领" * 25])
+    assert store.chat("p1")["card"]["domains"] == ["领" * 20]
