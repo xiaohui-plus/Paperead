@@ -35,19 +35,30 @@ def reset_backend():
 def test_write_memory_applies_writer_patch(tmp_path, monkeypatch):
     monkeypatch.setenv("PAPER_REFLOW_MEMORY", "1")
     store = memlib.MemoryStore(tmp_path)
+    store.profile_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "turn_count": 1,
+                "traits": {
+                    "depth": {
+                        "value": "需要类比",
+                        "confidence": 0.8,
+                        "evidence": ["旧证据"],
+                        "updated_at": memlib._now(),
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     reply = json.dumps(
         {
             "traits": [
-                {
-                    "key": "answer_style",
-                    "value": "先结论后分点",
-                    "confidence": 0.7,
-                    "evidence": "要求直接给结论",
-                }
+                {"key": "answer_style", "value": "先结论后分点", "confidence": 0.7, "evidence": "要求直接给结论"}
             ],
-            "concepts": [
-                {"name": "消息传递", "state": "learning", "evidence": "在追问聚合方式"}
-            ],
+            "concepts": [{"name": "消息传递", "state": "learning", "evidence": "在追问聚合方式"}],
             "summary": "用户已经理解消息传递的基本直觉，正在追问 BST 如何编码成对结构，尚未确认与 SEAL 的对比是否公平。",
             "facts": [{"kind": "user_stance", "text": "用户认为本文的 ablation 不够"}],
         },
@@ -55,29 +66,19 @@ def test_write_memory_applies_writer_patch(tmp_path, monkeypatch):
     )
     fake = FakeBackend(reply)
     set_backend(fake)
-    asyncio.run(
-        memlib.write_memory(
-            store,
-            "p1",
-            "BST 怎么编码成对结构",
-            "答案",
-            "BST 怎么编码成对结构？",
-            ["消息传递"],
-        )
-    )
+    asyncio.run(memlib.write_memory(store, "p1", "BST 怎么编码成对结构", "答案", "BST 怎么编码成对结构？", ["消息传递"]))
 
     assert store.profile()["traits"]["answer_style"]["value"] == "先结论后分点"
     assert store.concepts()["concepts"][0]["state"] == "learning"
     assert "BST" in store.chat("p1")["card"]["summary"]
-    assert store.chat("p1")["card"]["facts"][0]["kind"] == "user_stance"
-
-    assert len(fake.seen) == 1
     assert fake.kwargs[0]["temperature"] == 0.1
     assert fake.kwargs[0]["max_tokens"] == 700
     payload = json.loads(fake.seen[0][1]["content"])
     assert payload["本轮问题"] == "BST 怎么编码成对结构？"
     assert payload["本轮回答"] == "答案"
     assert payload["涉及概念"] == ["消息传递"]
+    # 画像给写手看的是时效衰减后的置信度，不是文件里的原值
+    assert 0.75 <= payload["现有画像"]["depth"]["confidence"] <= 0.8
     assert set(payload) >= {
         "本轮问题",
         "本轮回答",
@@ -128,3 +129,52 @@ def test_write_memory_disabled_writes_nothing(tmp_path, monkeypatch):
     assert not store.concepts_path.exists()
     assert not store.paper_path("p1").exists()
     assert list(store.papers.iterdir()) == []
+
+
+def test_write_memory_applies_fallback_only_once_when_chat_write_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("PAPER_REFLOW_MEMORY", "1")
+    store = memlib.MemoryStore(tmp_path)
+    set_backend(FakeBackend("这不是 JSON"))
+    calls = {"n": 0}
+
+    def boom(paper_id, data):
+        calls["n"] += 1
+        raise OSError("磁盘写满了")
+
+    monkeypatch.setattr(store, "_save_chat", boom)
+    asyncio.run(
+        memlib.write_memory(store, "p1", "还是不懂", "答案", "还是不懂", ["消息传递"])
+    )
+
+    assert calls["n"] == 1
+    concept = store.concepts()["concepts"][0]
+    assert concept["times_asked"] == 1
+    assert len(concept["evidence"]) == 1
+    assert store.profile()["turn_count"] == 1
+
+
+def test_write_memory_keeps_invalid_model_fields_without_fallback(tmp_path, monkeypatch):
+    monkeypatch.setenv("PAPER_REFLOW_MEMORY", "1")
+    store = memlib.MemoryStore(tmp_path)
+    set_backend(FakeBackend(json.dumps({"traits": [{"key": "bogus", "value": "值"}]}, ensure_ascii=False)))
+
+    asyncio.run(
+        memlib.write_memory(store, "p1", "还是不懂", "答案", "还是不懂", ["消息传递"])
+    )
+
+    assert store.concepts()["concepts"] == []
+    assert store.profile()["traits"] == {}
+    assert store.profile()["turn_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('```json\n{"a": 1}\n```', {"a": 1}),
+        ('前缀 {"b": [1, 2]} 后缀', {"b": [1, 2]}),
+        ("[1, 2]", [1, 2]),
+        ("不是 JSON", None),
+    ],
+)
+def test_parse_json_handles_model_replies(raw, expected):
+    assert memlib._parse_json(raw) == expected

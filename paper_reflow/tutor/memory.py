@@ -1120,18 +1120,33 @@ async def write_memory(
 ) -> None:
     """回答返回后异步跑一次小调用，把本轮问答整理成记忆 patch。
 
-    写手失败不影响回答：解析失败走规则兜底，任何异常只记日志。
+    写手失败不影响回答：解析/调用失败走规则兜底；落盘失败只记日志。
+    apply_patch 只调用一次，避免半写后重复兜底把同一轮记两遍。
     """
     if not enabled():
         return
+    patch: dict
     try:
         chat_data = store.chat(paper_id)
         card = chat_data.get("card") or {}
         profile = store.profile()
-        traits = {
-            key: {"value": value.get("value", ""), "confidence": value.get("confidence", 0)}
-            for key, value in (profile.get("traits") or {}).items()
-        }
+        now = _now()
+        traits = {}
+        for key, value in (profile.get("traits") or {}).items():
+            try:
+                confidence = float(value.get("confidence", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                confidence = 0.0
+            try:
+                updated_at = float(value.get("updated_at", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                updated_at = 0.0
+            days = max(0.0, (now - updated_at) / 86400)
+            # 给写手看的是时效衰减后的置信度，避免把半年前的画像当现状
+            traits[key] = {
+                "value": value.get("value", ""),
+                "confidence": round(confidence * (0.5 ** (days / 180)), 3),
+            }
         payload = {
             "本轮问题": _clip(standalone or question, 1200),
             "本轮回答": _clip(answer, 1200),
@@ -1148,15 +1163,16 @@ async def write_memory(
             temperature=0.1,
             max_tokens=700,
         )
-        patch = _parse_json(raw)
-        if not isinstance(patch, dict):
+        parsed = _parse_json(raw)
+        patch = parsed if isinstance(parsed, dict) else store.fallback_patch(question, touched)
+        if not isinstance(parsed, dict):
             log.info("记忆整理返回非法 JSON，走规则兜底")
-            patch = store.fallback_patch(question, touched)
-        store.apply_patch(paper_id, patch, touched=touched)
     except Exception as e:
-        log.info("记忆写入失败（不影响回答）：%s", e)
-        try:
-            store.apply_patch(paper_id, store.fallback_patch(question, touched), touched=touched)
-        except Exception:
-            log.exception("记忆兜底也失败")
+        log.info("记忆整理调用失败，走规则兜底：%s", e)
+        patch = store.fallback_patch(question, touched)
+
+    try:
+        store.apply_patch(paper_id, patch, touched=touched)
+    except Exception:
+        log.exception("记忆落盘失败，保留已有记忆")
 
