@@ -33,6 +33,7 @@ data/
 .uv-cache/
 .npm-cache/
 .tmp/
+.tauri/
 tmp-*
 .venv-build/
 build-sidecar/

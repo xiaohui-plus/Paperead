@@ -8,7 +8,8 @@ use std::sync::Mutex;
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_updater::UpdaterExt;
 use url::Url;
 
 use sidecar::Sidecar;
@@ -33,6 +34,7 @@ fn main() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let handle = app.handle().clone();
             let sidecar = match Sidecar::start(&handle) {
@@ -70,6 +72,12 @@ fn main() {
 
             paths::log_line(&handle, "desktop ready");
             maybe_onboard(&handle, port, &data_dir);
+
+            let updater_app = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+                check_updates(updater_app, false).await;
+            });
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -130,7 +138,11 @@ fn setup_menu(app: &mut tauri::App) -> tauri::Result<()> {
         .build()?;
 
     let about = MenuItemBuilder::with_id("about", "关于 paper-reflow").build(app)?;
-    let help = SubmenuBuilder::new(app, "帮助").item(&about).build()?;
+    let check_update = MenuItemBuilder::with_id("check_update", "检查更新").build(app)?;
+    let help = SubmenuBuilder::new(app, "帮助")
+        .item(&check_update)
+        .item(&about)
+        .build()?;
     let menu = MenuBuilder::new(app).items(&[&file, &help]).build()?;
 
     app.set_menu(menu)?;
@@ -140,6 +152,9 @@ fn setup_menu(app: &mut tauri::App) -> tauri::Result<()> {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.eval("window.print()");
             }
+        }
+        "check_update" => {
+            tauri::async_runtime::spawn(check_updates(app.clone(), true));
         }
         "quit" => app.exit(0),
         "about" => show_about(app),
@@ -215,6 +230,72 @@ fn maybe_onboard(app: &AppHandle, port: u16, data_dir: &std::path::Path) {
                 }
             }
         });
+}
+
+async fn check_updates(app: AppHandle, interactive: bool) {
+    let updater = match app.updater() {
+        Ok(updater) => updater,
+        Err(error) => {
+            paths::log_line(&app, &format!("updater init failed: {error}"));
+            if interactive {
+                app.dialog()
+                    .message(format!("更新检查不可用：{error}"))
+                    .title("检查更新")
+                    .kind(MessageDialogKind::Error)
+                    .show(|_| {});
+            }
+            return;
+        }
+    };
+
+    match updater.check().await {
+        Ok(Some(update)) => {
+            let version = update.version.clone();
+            let app_for_dialog = app.clone();
+            app.dialog()
+                .message(format!("发现新版本 {version}，是否下载并安装？"))
+                .title("发现更新")
+                .buttons(MessageDialogButtons::OkCancel)
+                .show(move |confirmed| {
+                    if !confirmed {
+                        return;
+                    }
+                    let app_for_update = app_for_dialog.clone();
+                    tauri::async_runtime::spawn(async move {
+                        match update.download_and_install(|_, _| {}, || {}).await {
+                            Ok(_) => app_for_update.restart(),
+                            Err(error) => {
+                                app_for_update
+                                    .dialog()
+                                    .message(format!("更新失败：{error}"))
+                                    .title("更新失败")
+                                    .kind(MessageDialogKind::Error)
+                                    .show(|_| {});
+                            }
+                        }
+                    });
+                });
+        }
+        Ok(None) => {
+            if interactive {
+                app.dialog()
+                    .message("当前已是最新版本。")
+                    .title("检查更新")
+                    .kind(MessageDialogKind::Info)
+                    .show(|_| {});
+            }
+        }
+        Err(error) => {
+            paths::log_line(&app, &format!("update check failed: {error}"));
+            if interactive {
+                app.dialog()
+                    .message(format!("检查更新失败：{error}"))
+                    .title("检查更新")
+                    .kind(MessageDialogKind::Error)
+                    .show(|_| {});
+            }
+        }
+    }
 }
 
 fn show_about(app: &AppHandle) {

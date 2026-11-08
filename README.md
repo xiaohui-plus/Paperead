@@ -5,6 +5,12 @@
 把双栏排版的论文 PDF 拆成按阅读顺序排列的结构化块（标题 / 段落 / 公式 / 图 / 表 / 参考文献），
 再逐段调用大模型翻译成中文。输出是干净的 JSON，方便接入阅读器、导出 Markdown，或做双语对照。
 
+## 桌面版（Windows）
+
+Windows 10/11 x64 安装包发布在 GitHub Releases，构建、签名与自动更新说明见
+[docs/desktop.md](docs/desktop.md)。桌面版自带 Python sidecar，使用者不需要安装
+Python/Node；数据默认在 `%LOCALAPPDATA%\paper-reflow`。
+
 ## 能解决什么
 
 - **双栏阅读顺序**：检测栏间空白，跨栏元素（通栏图、标题）作为锚点，按「左栏→右栏」重排。

@@ -1,0 +1,84 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: latest
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install JS dependencies
+        run: |
+          npm ci
+          npm ci --prefix web
+
+      - name: Install Python build environment
+        run: |
+          uv venv .venv-build --python 3.12
+          uv pip install --python .venv-build\Scripts\python.exe -e ".[server]" pytest "pyinstaller>=6.10"
+
+      - name: Run backend tests
+        run: .venv-build\Scripts\python.exe -m pytest -q
+
+      - name: Build frontend
+        run: npm --prefix web run build
+
+      - name: Build Python sidecar
+        shell: pwsh
+        run: .\scripts\build-sidecar.ps1
+
+      - name: Sync version from tag
+        shell: pwsh
+        run: .venv-build\Scripts\python.exe scripts\set_version.py "${{ github.ref_name }}"
+
+      - name: Build installer and publish draft release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "paper-reflow ${{ github.ref_name }}"
+          releaseBody: |
+            Windows 10/11 x64 安装包。
+
+            - 安装包：`paper-reflow_*_x64-setup.exe`
+            - 自动更新清单：`latest.json`（随 Release 发布）
+            - 源码：对应 tag 的 GitHub 源码包
+
+            首次启动会引导填写模型 API Key；PDF 与阅读数据默认保存在
+            `%LOCALAPPDATA%\\paper-reflow`。
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
+          args: --bundles nsis
