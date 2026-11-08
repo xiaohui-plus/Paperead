@@ -178,10 +178,10 @@ def _clean_domains(value: Any) -> list[str]:
         return []
     out: list[str] = []
     for item in value:
-        if isinstance(item, (dict, list)):
+        if not isinstance(item, str):
             continue
-        text = _coerce_text(item)
-        if not text:
+        text = item.strip()
+        if not text or text in out:
             continue
         out.append(text)
         if len(out) >= 4:
@@ -199,10 +199,16 @@ def _clean_facts(value: Any) -> list[dict]:
         kind = item.get("kind")
         if not isinstance(kind, str) or kind not in FACT_KINDS:
             continue
+        text = item.get("text")
+        if not isinstance(text, str):
+            continue
+        text = text.strip()
+        if not 2 <= len(text) <= 120 or any(f["text"] == text for f in out):
+            continue
         fact = dict(item)
-        fact["text"] = _coerce_text(fact.get("text"))
+        fact["text"] = text
         out.append(fact)
-    return out
+    return out[-MAX_FACTS:]
 
 
 def _concept_key(name: str) -> str:
@@ -358,6 +364,16 @@ class MemoryStore:
     def profile(self) -> dict:
         data = _load(self.profile_path, _empty_profile())
         data["traits"] = _clean_traits(data.get("traits"))
+        try:
+            turn_count = int(data.get("turn_count", 0))
+        except (TypeError, ValueError, OverflowError):
+            turn_count = 0
+        data["turn_count"] = max(0, turn_count)
+        try:
+            updated_at = float(data.get("updated_at", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            updated_at = 0.0
+        data["updated_at"] = updated_at
         return data
 
     def concepts(self) -> dict:
@@ -519,14 +535,14 @@ class MemoryStore:
         for item in (items or [])[:3]:
             if not isinstance(item, dict):
                 continue
-            key = str(item.get("key", "")).strip()
-            value = str(item.get("value", "")).strip()
-            evidence = str(item.get("evidence", "")).strip()
+            key = _patch_text(item.get("key"))
+            value = _patch_text(item.get("value"))
+            evidence = _patch_text(item.get("evidence"))
             if key not in TRAIT_KEYS or not (2 <= len(value) <= 40) or not evidence:
                 continue
             try:
                 confidence = float(item.get("confidence", 0.5))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 confidence = 0.5
             confidence = min(0.9, max(0.3, confidence))
 
@@ -560,18 +576,21 @@ class MemoryStore:
         for item in (items or [])[:4]:
             if not isinstance(item, dict):
                 continue
-            name = str(item.get("name", "")).strip()[:40]
-            state = str(item.get("state", "")).strip()
+            name = _patch_text(item.get("name"))[:40]
+            state = _patch_text(item.get("state"))
             if not name or state not in STATE_RANK:
                 continue
-            explicit = bool(item.get("explicit"))
-            evidence = str(item.get("evidence", "")).strip()[:80]
+            explicit = item.get("explicit") is True
+            evidence = _patch_text(item.get("evidence"))[:80]
+            raw_aliases = item.get("aliases")
             aliases = [
-                str(a).strip()[:40]
-                for a in (item.get("aliases") or [])
+                a.strip()[:40]
+                for a in (raw_aliases if isinstance(raw_aliases, list) else [])
                 if isinstance(a, str) and a.strip()
             ]
             key = _concept_key(name)
+            if not key:
+                continue
             concept = _find_concept(concepts, key, name)
 
             if concept is None:
@@ -592,10 +611,6 @@ class MemoryStore:
                 )
                 continue
 
-            concept["aliases"] = list(
-                dict.fromkeys([*(concept.get("aliases") or []), name, *aliases])
-            )[:5]
-
             old_state = concept.get("state", "learning")
             confidence = float(concept.get("confidence", 0.4))
             if STATE_RANK[state] < STATE_RANK[old_state]:
@@ -609,6 +624,9 @@ class MemoryStore:
             else:
                 concept["confidence"] = round(min(0.9, confidence + 0.05), 3)
 
+            concept["aliases"] = list(
+                dict.fromkeys([*(concept.get("aliases") or []), name, *aliases])
+            )[:5]
             evidence_list = list(concept.get("evidence") or [])[-4:]
             if evidence:
                 evidence_list.append({"paper_id": paper_id, "quote": evidence, "at": now})
@@ -622,10 +640,19 @@ class MemoryStore:
 
     def _merge_card(self, chat: dict, patch: dict, now: float) -> None:
         card = chat.setdefault("card", _empty_card())
-        summary = str(patch.get("summary") or "").strip()
+        summary = _patch_text(patch.get("summary"))
         if 40 <= len(summary) <= 400 and summary != card.get("summary"):
             card["summary"] = summary
-            card["summarized_through"] = chat["messages"][-1]["id"] if chat.get("messages") else ""
+            card["summarized_through"] = _patch_text(
+                next(
+                    (
+                        m.get("id")
+                        for m in reversed(chat.get("messages") or [])
+                        if m.get("role") == "ai"
+                    ),
+                    "",
+                )
+            )
             card["updated_at"] = now
 
         facts = card.setdefault("facts", [])
@@ -633,26 +660,30 @@ class MemoryStore:
         for item in (fact_items if isinstance(fact_items, list) else [])[:2]:
             if not isinstance(item, dict):
                 continue
-            kind = str(item.get("kind", ""))
-            text = str(item.get("text", "")).strip()
+            kind = _patch_text(item.get("kind"))
+            text = _patch_text(item.get("text"))
             if kind not in FACT_KINDS or not (2 <= len(text) <= 120):
                 continue
             if any(_jaccard(text, f.get("text", "")) >= 0.7 for f in facts):
                 continue
             facts.append({"kind": kind, "text": text, "at": now})
 
+        priority = {"conclusion": 0, "open_question": 1, "user_stance": 2}
         while len(facts) > MAX_FACTS:
-            index = next((i for i, f in enumerate(facts) if f["kind"] == "conclusion"), 0)
+            index = min(
+                range(len(facts)),
+                key=lambda i: (priority.get(facts[i].get("kind"), 0), i),
+            )
             facts.pop(index)
 
         card_patch = patch.get("card") if isinstance(patch.get("card"), dict) else {}
-        one_liner = str(card_patch.get("one_liner") or "").strip()
+        one_liner = _patch_text(card_patch.get("one_liner"))
         if one_liner and not card.get("one_liner") and len(one_liner) <= 60:
             card["one_liner"] = one_liner
-        domains = card_patch.get("domains") or []
-        if isinstance(domains, list):
-            merged = list(dict.fromkeys([*card.get("domains", []), *[str(d)[:20] for d in domains]]))
-            card["domains"] = merged[:4]
+        domains = _clean_domains(card_patch.get("domains"))
+        if domains:
+            merged = list(dict.fromkeys([*card.get("domains", []), *domains]))[:4]
+            card["domains"] = merged
 
     def forget(self, paper_id: str) -> None:
         with self._lock:
@@ -675,11 +706,17 @@ class MemoryStore:
                     pass
 
 
+def _patch_text(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _norm_alias(text: str) -> str:
     return _concept_key(text)
 
 
 def _find_concept(concepts: list, key: str, name: str) -> dict | None:
+    if not key:
+        return None
     wanted = {key, _norm_alias(name)}
     for concept in concepts:
         if not isinstance(concept, dict):

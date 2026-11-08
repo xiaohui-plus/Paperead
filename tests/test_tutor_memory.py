@@ -186,6 +186,26 @@ def test_profile_normalizes_and_drops_invalid_traits(store):
     }
 
 
+@pytest.mark.parametrize("turn_count", ["x", 1e400])
+def test_profile_normalizes_turn_count_and_updated_at(store, turn_count):
+    store.profile_path.write_text(
+        json.dumps(
+            {
+                "version": memlib.VERSION,
+                "turn_count": turn_count,
+                "updated_at": "bad",
+                "traits": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    profile = store.profile()
+    assert profile["turn_count"] == 0
+    assert isinstance(profile["turn_count"], int)
+    assert profile["updated_at"] == 0.0
+    assert isinstance(profile["updated_at"], float)
+
+
 def test_version_too_new_is_backed_up(store):
     store.concepts_path.write_text(
         json.dumps({"version": memlib.VERSION + 1, "concepts": [{"name": "x"}]}),
@@ -273,9 +293,10 @@ def test_chat_card_normalizes_domains_and_facts(store):
                 "paper_id": "p1",
                 "messages": [],
                 "card": {
-                    "domains": ["a", 7, "", None, "b", "c", "d"],
+                    "domains": ["a", 7, "", None, "b", "a", "c", "d"],
                     "facts": [
                         {"kind": "conclusion", "text": "已确认"},
+                        {"kind": "conclusion", "text": "  已确认  "},
                         {"kind": "bogus", "text": "x"},
                         "not a fact",
                         {"kind": "open_question"},
@@ -287,11 +308,8 @@ def test_chat_card_normalizes_domains_and_facts(store):
         encoding="utf-8",
     )
     card = store.chat("p1")["card"]
-    assert card["domains"] == ["a", "7", "b", "c"]
-    assert card["facts"] == [
-        {"kind": "conclusion", "text": "已确认"},
-        {"kind": "open_question", "text": ""},
-    ]
+    assert card["domains"] == ["a", "b", "c", "d"]
+    assert card["facts"] == [{"kind": "conclusion", "text": "已确认"}]
 
 
 def test_backup_collision_uses_unique_name(store):
@@ -502,3 +520,159 @@ def test_concept_alias_merges_same_entry(store):
     items = store.concepts()["concepts"]
     assert len(items) == 1
     assert items[0]["state"] == "understood"
+
+
+def test_concept_explicit_requires_literal_true(store):
+    store.apply_patch("p1", {"concepts": [{"name": "消息传递", "state": "understood", "evidence": "懂了"}]})
+    for flag in ("true", 1, "false"):
+        store.apply_patch(
+            "p1",
+            {
+                "concepts": [
+                    {
+                        "name": "消息传递",
+                        "state": "confused",
+                        "evidence": "又糊涂了",
+                        "explicit": flag,
+                    }
+                ]
+            },
+        )
+        assert store.concepts()["concepts"][0]["state"] == "understood"
+
+
+def test_concept_rejected_downgrade_does_not_add_alias(store):
+    store.apply_patch("p1", {"concepts": [{"name": "消息传递", "state": "understood", "evidence": "懂了"}]})
+    store.apply_patch(
+        "p1",
+        {"concepts": [{"name": "消息传递算法", "state": "confused", "evidence": "又糊涂了"}]},
+    )
+    concept = store.concepts()["concepts"][0]
+    assert concept["state"] == "understood"
+    assert "消息传递算法" not in concept["aliases"]
+
+
+def test_merge_rejects_non_string_patch_fields(store):
+    store.apply_patch(
+        "p1",
+        {
+            "traits": [
+                {"key": "depth", "value": None, "confidence": 0.6, "evidence": "x"},
+                {"key": 123, "value": "需要类比", "confidence": 0.6, "evidence": "x"},
+                {
+                    "key": "goal",
+                    "value": "用于单细胞数据",
+                    "confidence": 0.6,
+                    "evidence": {"quote": "x"},
+                },
+            ],
+            "concepts": [
+                {"name": None, "state": "learning", "evidence": "x"},
+                {"name": "消息传递", "state": True, "evidence": "x"},
+                {"name": "！！", "state": "learning", "evidence": "x"},
+            ],
+            "facts": [
+                {"kind": None, "text": "足够长的文本内容"},
+                {"kind": "conclusion", "text": {"quote": "x"}},
+            ],
+            "summary": {"text": "用户已经理解了消息传递"},
+            "card": {"one_liner": 123, "domains": [{"bad": 1}, None, 7]},
+        },
+    )
+    assert store.profile()["traits"] == {}
+    assert store.concepts()["concepts"] == []
+    assert store.chat("p1")["card"]["facts"] == []
+    assert store.chat("p1")["card"]["summary"] == ""
+    assert store.chat("p1")["card"]["one_liner"] == ""
+    assert store.chat("p1")["card"]["domains"] == []
+
+
+def test_merge_card_summary_and_summarized_through(store):
+    user, _ = store.begin_question("p1", "q")
+    ai = store.finish_answer("p1", user["id"], "a", [], False, 0.1)
+
+    store.apply_patch("p1", {"summary": "太短"})
+    assert store.chat("p1")["card"]["summary"] == ""
+
+    good = "用户主要关心公式含义与 ablation 是否充分，已确认 BST 的时间复杂度，仍不清楚与 SEAL 的参数量是否一致。"
+    store.apply_patch("p1", {"summary": good})
+    card = store.chat("p1")["card"]
+    assert card["summary"] == good
+    assert card["summarized_through"] == ai["id"]
+
+    store.begin_question("p1", "后续问题")
+    store.apply_patch("p1", {"summary": good + "补充"})
+    card = store.chat("p1")["card"]
+    assert card["summary"] == good + "补充"
+    assert card["summarized_through"] == ai["id"]
+
+
+def test_merge_card_dedupes_facts_by_text(store):
+    text = "用户认为本文 ablation 缺少 width 维度"
+    store.apply_patch("p1", {"facts": [{"kind": "user_stance", "text": text}]})
+    store.apply_patch("p1", {"facts": [{"kind": "user_stance", "text": text + "。"}]})
+    facts = store.chat("p1")["card"]["facts"]
+    assert len(facts) == 1
+    assert facts[0]["text"] == text
+
+
+def test_facts_eviction_protects_user_stance(store):
+    stance = "用户认为本文的消融实验缺少 width 维度"
+    questions = [
+        "用户还没搞懂拓扑采样",
+        "用户还没搞懂消息传递",
+        "用户还没搞懂节点嵌入",
+        "用户还没搞懂注意力机制",
+        "用户还没搞懂损失函数",
+        "用户还没搞懂梯度下降",
+        "用户还没搞懂卷积核",
+        "用户还没搞懂池化层",
+        "用户还没搞懂残差连接",
+        "用户还没搞懂归一化",
+        "用户还没搞懂对抗训练",
+    ]
+    store.apply_patch("p1", {"facts": [{"kind": "user_stance", "text": stance}]})
+    for text in questions:
+        store.apply_patch("p1", {"facts": [{"kind": "open_question", "text": text}]})
+
+    facts = store.chat("p1")["card"]["facts"]
+    assert len(facts) == 12
+    assert facts[0]["kind"] == "user_stance"
+
+    store.apply_patch("p1", {"facts": [{"kind": "open_question", "text": "用户还没搞懂对比学习"}]})
+    facts = store.chat("p1")["card"]["facts"]
+    assert len(facts) == 12
+    assert facts[0]["kind"] == "user_stance"
+
+
+def test_merge_card_one_liner_first_only(store):
+    store.apply_patch("p1", {"card": {"one_liner": "  用子图采样做链接预测  "}})
+    assert store.chat("p1")["card"]["one_liner"] == "用子图采样做链接预测"
+    store.apply_patch("p1", {"card": {"one_liner": "第二版一句话"}})
+    assert store.chat("p1")["card"]["one_liner"] == "用子图采样做链接预测"
+
+    store.apply_patch("p2", {"card": {"one_liner": "长" * 61}})
+    assert store.chat("p2")["card"]["one_liner"] == ""
+
+
+def test_merge_card_domains_union_capped_and_str_only(store):
+    store.apply_patch("p1", {"card": {"domains": ["图学习", None, 7, "图学习", " 链接预测 "]}})
+    assert store.chat("p1")["card"]["domains"] == ["图学习", "链接预测"]
+
+    store.apply_patch(
+        "p1", {"card": {"domains": ["图神经网络", {"bad": 1}, ["x"], "知识图谱"]}}
+    )
+    assert store.chat("p1")["card"]["domains"] == [
+        "图学习",
+        "链接预测",
+        "图神经网络",
+        "知识图谱",
+    ]
+
+    store.apply_patch("p1", {"card": {"domains": ["第五个领域"]}})
+    assert store.chat("p1")["card"]["domains"] == [
+        "图学习",
+        "链接预测",
+        "图神经网络",
+        "知识图谱",
+    ]
