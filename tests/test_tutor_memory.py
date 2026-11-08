@@ -715,6 +715,9 @@ def test_fallback_rules_mark_concept_confused(store):
         ("不懂了", "confused", True, False),
         ("不明白", "confused", True, False),
         ("还是不明白", "confused", True, False),
+        ("没听懂", "confused", True, False),
+        ("没理解", "confused", True, False),
+        ("没听懂了", "confused", True, False),
         ("懂了", "understood", False, False),
         ("不对", None, False, True),
         ("我懂了，不对", "understood", False, True),
@@ -827,3 +830,71 @@ def test_seed_normalizes_non_string_domains(store):
 def test_clean_domains_truncates_each_domain(store):
     store.seed("p1", domains=["领" * 25])
     assert store.chat("p1")["card"]["domains"] == ["领" * 20]
+
+
+def test_brief_includes_profile_concepts_and_card(store):
+    store.apply_patch(
+        "p1",
+        {
+            "traits": [{"key": "depth", "value": "需要类比", "confidence": 0.8, "evidence": "要求类比"}],
+            "concepts": [{"name": "消息传递", "state": "understood", "evidence": "懂了", "explicit": True}],
+            "summary": "用户已经理解了消息传递，正在关心 BST 的时间复杂度，还没有搞懂与 SEAL 的对比是否公平。",
+        },
+    )
+    brief = store.build_brief("p1", "消息传递在 BST 里怎么用？")
+    assert "理解深度：需要类比" in brief
+    assert "消息传递：已懂" in brief
+    assert "BST 的时间复杂度" in brief
+
+
+def test_brief_omits_stale_low_confidence_trait(store):
+    old = memlib._now() - 400 * 86400
+    profile = store.profile()
+    profile["traits"]["goal"] = {
+        "value": "判断能否用于自己的数据",
+        "confidence": 0.8,
+        "evidence": ["x"],
+        "updated_at": old,
+    }
+    profile["updated_at"] = old
+    memlib._atomic_write(store.profile_path, profile)
+    brief = store.build_brief("p1", "这篇能用在单细胞数据上吗")
+    assert "判断能否用于自己的数据" not in brief
+
+
+def test_brief_retrieves_old_turn(store):
+    for text in [
+        "这篇的 baseline 是 SEAL",
+        "BST 用二元结构编码成对关系",
+        "时间复杂度是线性的",
+        "数据集用了 DREAM5",
+        "消融实验缺少 width 维度",
+    ]:
+        msg, _ = store.begin_question("p1", text)
+        store.finish_answer("p1", msg["id"], f"关于{text}的回答", [], False, 0.1)
+    msg, _ = store.begin_question("p1", "当前问题")
+    for i in range(3):
+        extra, _ = store.begin_question("p1", f"填充{i}")
+        store.finish_answer("p1", extra["id"], f"填充答案{i}", [], False, 0.1)
+
+    brief = store.build_brief("p1", "SEAL 的 baseline 公平吗", exclude_message_id=msg["id"])
+    assert "SEAL" in brief
+
+
+def test_brief_flags_repeated_question(store):
+    msg, _ = store.begin_question("p1", "这篇论文的核心创新点是什么")
+    store.finish_answer("p1", msg["id"], "核心创新是 BST", [], False, 0.1)
+    current, _ = store.begin_question("p1", "这篇论文的核心创新点是什么？")
+    brief = store.build_brief("p1", "这篇论文的核心创新点是什么", exclude_message_id=current["id"])
+    assert "此前问过" in brief
+
+
+def test_brief_cross_paper_card(store):
+    store.seed("p2", title="SEAL 论文", domains=["链接预测"])
+    store.apply_patch(
+        "p2",
+        {"card": {"one_liner": "用子图采样做链接预测"}, "facts": [{"kind": "user_stance", "text": "用户认为 SEAL 的训练开销太大"}]},
+    )
+    brief = store.build_brief("p1", "SEAL 的训练开销和这篇比呢")
+    assert "SEAL 论文" in brief
+    assert "训练开销太大" in brief

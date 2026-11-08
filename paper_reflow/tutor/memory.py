@@ -16,6 +16,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .qa import BM25, tokenize
+
 log = logging.getLogger(__name__)
 
 VERSION = 1
@@ -720,7 +722,8 @@ class MemoryStore:
             patch["facts"].append({"kind": "user_stance", "text": f"用户纠正：{_clip(q, 80)}"})
 
         if re.search(
-            r"不懂|没懂|没看懂|看不懂|不明白|没明白|不清楚|没清楚|不理解|不太懂|没搞懂|再说一遍|换个说法",
+            r"不懂|没懂|没听懂|没听明白|没看懂|看不懂|不明白|没明白|不清楚|没清楚|"
+            r"不理解|没理解|不太懂|听不太懂|没学会|没搞懂|再说一遍|换个说法",
             q,
         ):
             if names:
@@ -737,6 +740,180 @@ class MemoryStore:
                 {"name": names[0], "state": "understood", "evidence": "用户表示已懂", "explicit": True}
             )
         return patch
+
+    # ── 注入块 ──────────────────────────────────────────
+    def build_brief(
+        self, paper_id: str, question: str, exclude_message_id: str | None = None
+    ) -> str:
+        if not enabled():
+            return ""
+        now = _now()
+        chat = self.chat(paper_id)
+        parts: list[str] = []
+
+        profile_lines = self._profile_lines(now)
+        if profile_lines:
+            parts.append("【关于读者】\n" + "\n".join(profile_lines))
+
+        concept_lines = self._concept_lines(question)
+        if concept_lines:
+            parts.append("【概念理解】\n" + "\n".join(concept_lines))
+
+        card_block = self._card_block(chat)
+        if card_block:
+            parts.append(card_block)
+
+        old_lines = self._old_turns(chat, question, exclude_message_id)
+        if old_lines:
+            parts.append("【此前问答】\n" + "\n".join(old_lines))
+
+        cross_lines = self._cross_paper(paper_id, question)
+        if cross_lines:
+            parts.append("【读过的相关论文】\n" + "\n".join(cross_lines))
+
+        repeat = self._repeat_block(chat, question, exclude_message_id)
+        if repeat:
+            parts.append(repeat)
+        return "\n\n".join(parts)
+
+    def _profile_lines(self, now: float) -> list[str]:
+        profile = self.profile()
+        lines = []
+        for key in TRAIT_KEYS:
+            trait = (profile.get("traits") or {}).get(key)
+            if not trait:
+                continue
+            days = max(0.0, (now - float(trait.get("updated_at", 0))) / 86400)
+            effective = float(trait.get("confidence", 0)) * (0.5 ** (days / 180))
+            if effective >= 0.55:
+                lines.append(f"- {TRAIT_LABELS[key]}：{trait.get('value', '')}")
+        return lines
+
+    def _concept_lines(self, question: str) -> list[str]:
+        items = self.match_concepts(question)[:4]
+        return [f"- {c['name']}：{STATE_LABELS.get(c.get('state', 'learning'), '在学')}" for c in items]
+
+    def _card_block(self, chat: dict) -> str:
+        card = chat.get("card") or {}
+        lines = []
+        if card.get("summary"):
+            lines.append(card["summary"])
+        for fact in (card.get("facts") or [])[-2:]:
+            lines.append(f"- {FACT_LABELS.get(fact.get('kind'), '记录')}：{fact.get('text', '')}")
+        return "【这篇聊到哪】\n" + "\n".join(lines) if lines else ""
+
+    def _old_turns(self, chat: dict, question: str, exclude_id: str | None) -> list[str]:
+        messages = chat.get("messages") or []
+        recent_ids = {m["id"] for m in messages[-6:]}
+        if exclude_id:
+            recent_ids.add(exclude_id)
+        candidates = []
+        answers = {m.get("answer_to"): m for m in messages if m.get("role") == "ai"}
+        anchor = next(
+            (i for i, m in enumerate(messages) if m["id"] == exclude_id), len(messages)
+        )
+        window = messages[max(0, anchor - INDEX_WINDOW):anchor]
+        for msg in window[:-6]:
+            if msg.get("role") != "user" or msg["id"] in recent_ids:
+                continue
+            answer = answers.get(msg["id"])
+            text = msg.get("text", "")
+            if answer:
+                text = f"{text}\n{answer.get('text', '')}"
+            candidates.append((msg, text))
+        if not candidates:
+            return []
+        bm = BM25([tokenize(text) for _, text in candidates])
+        scores = bm.score(tokenize(question))
+        ranked = sorted(zip(candidates, scores), key=lambda item: item[1], reverse=True)
+        lines = []
+        for (msg, text), score in ranked[:3]:
+            if score <= 0:
+                continue
+            answer = answers.get(msg["id"])
+            lines.append(
+                f"问：{_clip(msg.get('text', ''), 120)}\n"
+                f"答：{_clip(answer.get('text', '') if answer else '', 180)}"
+            )
+        return lines
+
+    def _cross_paper(self, paper_id: str, question: str) -> list[str]:
+        docs = []
+        for path in self.papers.glob("*.chat.json"):
+            other_id = path.name[: -len(".chat.json")]
+            if not other_id or other_id == paper_id:
+                continue
+            # 走 chat() 归一化：手改过的标量/域名不能让 " ".join 崩溃
+            card = self.chat(other_id)["card"]
+            if not card.get("summary") and not card.get("one_liner"):
+                continue
+            facts = "；".join(f.get("text", "") for f in (card.get("facts") or [])[-2:])
+            text = " ".join(
+                [
+                    card.get("title", ""),
+                    " ".join(card.get("domains") or []),
+                    card.get("one_liner", ""),
+                    card.get("summary", ""),
+                    facts,
+                ]
+            )
+            docs.append((card, text))
+        if not docs:
+            return []
+        bm = BM25([tokenize(text) for _, text in docs])
+        scores = bm.score(tokenize(question))
+        ranked = sorted(zip(docs, scores), key=lambda item: item[1], reverse=True)
+        lines = []
+        for (card, _), score in ranked[:2]:
+            if score < 0.3:
+                continue
+            stance = next(
+                (f.get("text", "") for f in reversed(card.get("facts") or []) if f.get("kind") == "user_stance"),
+                "",
+            )
+            line = f"《{_clip(card.get('title', '未命名'), 60)}》：{_clip(card.get('one_liner') or card.get('summary', ''), 90)}"
+            if stance:
+                line += f"；你当时的判断：{_clip(stance, 60)}"
+            lines.append(line)
+        return lines
+
+    def _repeat_block(self, chat: dict, question: str, exclude_id: str | None) -> str:
+        messages = chat.get("messages") or []
+        answers = {m.get("answer_to"): m for m in messages if m.get("role") == "ai"}
+        for msg in reversed(messages[:-1]):
+            if msg.get("role") != "user" or msg.get("id") == exclude_id:
+                continue
+            if _jaccard(question, msg.get("text", "")) >= 0.6:
+                answer = answers.get(msg["id"])
+                return (
+                    "【此前问过】\n"
+                    f"问：{_clip(msg.get('text', ''), 120)}\n"
+                    f"答：{_clip(answer.get('text', '') if answer else '', 200)}\n"
+                    "（若本轮没有新增信息，简要复述结论并说明是否有变化，不要装作第一次被问）"
+                )
+        return ""
+
+    def match_concepts(self, question: str) -> list[dict]:
+        q = (question or "").lower()
+        q_tokens = set(tokenize(question))
+        scored = []
+        for concept in self.concepts().get("concepts") or []:
+            names = [concept.get("name", "")] + list(concept.get("aliases") or [])
+            hits = 0
+            for name in names:
+                if name and name.lower() in q:
+                    hits += 2
+                elif set(tokenize(name)) & q_tokens:
+                    hits += 1
+            if hits:
+                scored.append((hits, concept))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [c for _, c in scored]
+
+    def touched_concepts(self, question: str) -> list[str]:
+        if not enabled():
+            return []
+        return [c.get("name", "") for c in self.match_concepts(question)[:2]]
 
     def forget(self, paper_id: str) -> None:
         with self._lock:
