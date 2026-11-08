@@ -31,6 +31,7 @@ uv venv .venv-build --python 3.12
 uv pip install --python .venv-build\Scripts\python.exe -e ".[server]" "pyinstaller>=6.10"
 npm run build:installer
 npm run build:portable
+npm run verify:release
 ```
 
 产物：
