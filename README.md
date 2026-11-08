@@ -7,7 +7,9 @@
 
 ## 桌面版（Windows）
 
-Windows 10/11 x64 安装包与便携 ZIP：[下载最新版](https://github.com/xiaohui-plus/Paperead/releases/latest)。
+Windows 10/11 x64 安装包与便携 ZIP：[GitHub Releases](https://github.com/xiaohui-plus/Paperead/releases/latest)。
+国内网络访问 GitHub 资源慢时，可用镜像：
+`https://ghproxy.net/https://github.com/xiaohui-plus/Paperead/releases/latest`。
 构建、签名与自动更新说明见 [docs/desktop.md](docs/desktop.md)。桌面版自带 Python
 sidecar，使用者不需要安装 Python/Node；安装版数据默认在
 `%LOCALAPPDATA%\paper-reflow-data`，便携版数据在同级 `data\` 目录。

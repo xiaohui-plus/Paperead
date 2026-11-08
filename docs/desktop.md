@@ -11,6 +11,7 @@ Python 或 Node。
 - 安装版：`paper-reflow_<version>_x64-setup.exe`
 - 便携版：`paper-reflow_<version>_portable_x64.zip`
 - 系统：Windows 10/11 x64
+- 国内镜像：`https://ghproxy.net/https://github.com/xiaohui-plus/Paperead/releases/latest`
 - 安装方式：per-user（安装目录 `%LOCALAPPDATA%\paper-reflow`），不弹 UAC
 - 安装版数据目录：`%LOCALAPPDATA%\paper-reflow-data`（与安装目录分开，卸载/升级不影响文献库）
 - 便携版：解压后双击 `启动.cmd`，数据在同级 `data\`；更新时下载新 ZIP，保留 `data\`
