@@ -140,8 +140,11 @@ npx tauri signer generate -w .tauri/updater.key
 
 ## 已知限制
 
-- 打印：前端调用 `window.print()`，WebView2 下需要手工验证；若不可用，
-  后续改为后端生成 PDF 或 Tauri 原生打印。
+- 打印：前端调用 `window.print()`，WebView2 下已验证会打开打印预览；若某些
+  机器上不可用，后续改为后端生成 PDF。
+- 安装被拦截：部分安全软件（如联想/火绒）会阻止未签名安装器把 exe 写入
+  `%LOCALAPPDATA%`，报“无法打开要写入的文件”。将安装包/安装目录加入白名单，
+  或使用便携 ZIP；正式版应做代码签名。
 - 首发仅 Windows 10/11 x64；macOS 需要 Developer ID + 公证。
 - 表格使用 PyMuPDF 内置识别（未打包可选的 ONNX layout 模型），复杂表格
   可能退化为裁图。
