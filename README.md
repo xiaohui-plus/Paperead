@@ -9,13 +9,14 @@
 
 Windows 10/11 x64 安装包与便携 ZIP：[GitHub Releases](https://github.com/xiaohui-plus/Paperead/releases/latest)。
 国内推荐从 Gitee 下载（直链）：
-[paper-reflow_0.1.0_x64-setup.exe](https://gitee.com/deng_xiaohui/paperead/releases/download/v0.1.0/paper-reflow_0.1.0_x64-setup.exe)
-· [Gitee Release 页面](https://gitee.com/deng_xiaohui/paperead/releases/tag/v0.1.0)。
+[Paperead_0.1.1_x64-setup.exe](https://gitee.com/deng_xiaohui/paperead/releases/download/v0.1.1/Paperead_0.1.1_x64-setup.exe)
+· [Gitee Release 页面](https://gitee.com/deng_xiaohui/paperead/releases/tag/v0.1.1)。
 GitHub 资源慢时可用镜像：
 `https://ghproxy.net/https://github.com/xiaohui-plus/Paperead/releases/latest`。
 如果 `.exe` 被网络或安全软件拦截，下载
-[paper-reflow_0.1.0_x64-setup.zip](https://gitee.com/deng_xiaohui/paperead/releases/download/v0.1.0/paper-reflow_0.1.0_x64-setup.zip)
-解压后运行，或直接用便携版 ZIP。
+[Paperead_0.1.1_x64-setup.zip](https://gitee.com/deng_xiaohui/paperead/releases/download/v0.1.1/Paperead_0.1.1_x64-setup.zip)
+解压后运行，或直接用便携版
+[Paperead_0.1.1_portable_x64.zip](https://gitee.com/deng_xiaohui/paperead/releases/download/v0.1.1/Paperead_0.1.1_portable_x64.zip)。
 构建、签名与自动更新说明见 [docs/desktop.md](docs/desktop.md)。桌面版自带 Python
 sidecar，使用者不需要安装 Python/Node；安装版数据默认在
 `%LOCALAPPDATA%\paperead-data`，便携版数据在同级 `data\` 目录。
@@ -59,8 +60,9 @@ pip install pymupdf openai
   回答模型与识图模型分开设置，互不干扰
 - **状态**：`解析中 → 已就绪`，失败可重试
 - **检索与整理**：搜索（标题 / 作者 / 文件名）、筛选（全部 / 已就绪 / 未翻译 / 解析失败）、排序（最近 / 标题 / 页数）、网格与列表切换
-- **从 Zotero 导入**：读本机 Zotero 7 的本地 API，只导入带 PDF 附件的条目。
-  需要在 Zotero「设置 → 高级」里允许其他应用访问，否则会提示连不上（不影响拖拽上传）
+- **从 Zotero 导入**：读本机 Zotero 7+ 的本地 API，只导入带 PDF 附件的条目。
+  需要在 Zotero「设置 → 高级 → 杂项」里勾选“允许此计算机上的其他应用程序与
+  Zotero 通讯”，否则会提示连不上（不影响拖拽上传）
 - 点卡片进入阅读页，左上角返回
 
 数据落在 `data/`：`papers/{id}.pdf`、`{id}.thumb.png`（首页缩略图）、`{id}.blocks.json`，索引在 `library.json`。

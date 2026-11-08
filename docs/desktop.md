@@ -8,12 +8,11 @@ Python 或 Node。
 
 安装包发布在 GitHub Releases；国内推荐 Gitee：
 
-- 安装版：`paper-reflow_0.1.0_x64-setup.exe`
-- 国内 Gitee 直链：`https://gitee.com/deng_xiaohui/paperead/releases/download/v0.1.0/paper-reflow_0.1.0_x64-setup.exe`
-- 国内 Gitee Release 页面：`https://gitee.com/deng_xiaohui/paperead/releases/tag/v0.1.0`
-- 安装包 ZIP（.exe 被拦截时用）：`paper-reflow_0.1.0_x64-setup.zip`
-- 便携版：`paper-reflow_0.1.0_portable_x64.zip`
-- 注：0.1.0 的构建产物仍使用 `paper-reflow` 前缀；后续版本会切换到 `Paperead`
+- 安装版：`Paperead_0.1.1_x64-setup.exe`
+- 国内 Gitee 直链：`https://gitee.com/deng_xiaohui/paperead/releases/download/v0.1.1/Paperead_0.1.1_x64-setup.exe`
+- 国内 Gitee Release 页面：`https://gitee.com/deng_xiaohui/paperead/releases/tag/v0.1.1`
+- 安装包 ZIP（.exe 被拦截时用）：`Paperead_0.1.1_x64-setup.zip`
+- 便携版：`Paperead_0.1.1_portable_x64.zip`
 - 系统：Windows 10/11 x64
 - 国内镜像：`https://ghproxy.net/https://github.com/xiaohui-plus/Paperead/releases/latest`
 - 安装方式：per-user（安装目录 `%LOCALAPPDATA%\Paperead`），不弹 UAC

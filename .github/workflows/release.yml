@@ -85,7 +85,7 @@ jobs:
             - 源码：对应 tag 的 GitHub 源码包
 
             首次启动会引导填写模型 API Key；PDF 与阅读数据默认保存在
-            `%LOCALAPPDATA%\\Paperead`。
+            `%LOCALAPPDATA%\\paperead-data`。
           releaseDraft: true
           prerelease: false
           includeUpdaterJson: true
