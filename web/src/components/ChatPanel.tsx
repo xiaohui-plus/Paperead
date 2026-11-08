@@ -26,6 +26,8 @@ interface Turn {
   error?: string
   /** 本地演示答案：不是模型生成，按纯文本渲染，保留换行 */
   demo?: boolean
+  /** 后端历史里的轮次 id（恢复来的轮次才有；往前翻页时作为 before） */
+  memoryId?: string
 }
 
 const QUICK: { key: AskKind; label: string }[] = [
@@ -106,25 +108,29 @@ export function ChatPanel({
     setHistoryReady(false)
     getChat(paperId)
       .then(({ turns: history }) => {
-        if (!alive || history.length === 0) return
-        const restored: Turn[] = history.map((t): Turn => {
+        // 旧后端/关闭记忆时可能只有 {messages} 没有 turns，按空历史处理
+        const rows = history ?? []
+        if (!alive || rows.length === 0) return
+        const restored: Turn[] = rows.map((t): Turn => {
           seq.current += 1
           return {
             id: seq.current,
+            memoryId: t.id,
             question: t.question,
-            answer: t.answer,
+            answer: t.answer ?? '',
             sources: t.sources ?? [],
             usedWeb: !!t.usedWeb,
             latency: t.latency,
-            // 上一轮没答完（例如中途停止）就没有 answer，按 stopped 展示
+            // 上一轮没答完（例如中途停止）时 answer 是空串，按 stopped 展示
             status: t.answer ? 'done' : 'stopped',
           }
         })
         // 恢复只填补空白面板：已经有（或刚发出的）对话就不要再插历史
         setTurns((prev) => (prev.length === 0 ? restored : prev))
       })
-      .catch(() => {
+      .catch((e) => {
         // 历史读不出来不影响问答
+        console.warn('恢复历史对话失败', e)
       })
       .finally(() => {
         if (alive) setHistoryReady(true)
@@ -186,7 +192,8 @@ export function ChatPanel({
     const controller = new AbortController()
     abortRef.current = controller
 
-    // 同一个 client id 重试时服务端直接回放已存答案，避免重复落盘
+    // 每次提问生成新的 client id 交给服务端做幂等标记：同一 id 的手动重试会回放已存
+    // 答案，避免重复落盘；这里不复用旧 id（每次发送都是新问题）。
     const clientId =
       typeof crypto !== 'undefined' && 'randomUUID' in crypto
         ? crypto.randomUUID()
@@ -297,6 +304,11 @@ export function ChatPanel({
     if (!q) return
     asked.current = true
     void ask(q)
+    // 触发后立刻把 ?ask= 从地址栏去掉：切标签时组件会重挂载，不清掉就会再问一遍，
+    // 新 client id 让服务端也无法去重，等于多落一轮问答。
+    const url = new URL(window.location.href)
+    url.searchParams.delete('ask')
+    window.history.replaceState({}, '', url)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyReady])
 
@@ -404,7 +416,7 @@ export function ChatPanel({
 
               {t.status === 'stopped' && <div className="turn-note">已停止生成</div>}
 
-              {t.status === 'done' && t.latency !== undefined && (
+              {t.status === 'done' && t.latency !== undefined && t.latency > 0 && (
                 <div className="turn-meta">
                   用时 {t.latency.toFixed(1)}s
                   {t.usedWeb ? ' · 已联网检索' : ''}
