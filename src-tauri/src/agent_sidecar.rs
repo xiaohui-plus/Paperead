@@ -177,7 +177,7 @@ fn agent_dir(app: &AppHandle) -> Result<PathBuf, String> {
     if let Some(value) = paths::var("PAPEREAD_AGENT_DIR") {
         let path = PathBuf::from(value);
         if path.join("node_modules").is_dir() {
-            return Ok(path);
+            return Ok(plain_path(path));
         }
     }
 
@@ -185,7 +185,7 @@ fn agent_dir(app: &AppHandle) -> Result<PathBuf, String> {
         for base in [resource.clone(), resource.join("resources")] {
             let candidate = base.join("agent");
             if candidate.join("node_modules").is_dir() {
-                return Ok(candidate);
+                return Ok(plain_path(candidate));
             }
         }
     }
@@ -199,6 +199,19 @@ fn agent_dir(app: &AppHandle) -> Result<PathBuf, String> {
     }
 
     Err("找不到 agent/（先运行 npm install --prefix agent）".into())
+}
+
+/// Tauri 的 `resource_dir()` 在 Windows 上返回 `\\?\C:\...` 形式的长路径；
+/// Node 解析这个前缀时会把 `C:` 当成目录并抛 EISDIR，导致 agent 起不来。
+fn plain_path(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest.to_string());
+    }
+    path
 }
 
 fn node_path(agent_dir: &Path) -> PathBuf {

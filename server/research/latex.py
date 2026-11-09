@@ -12,9 +12,11 @@ Pandoc 只负责 Markdown → LaTeX 片段；中文/英文模板、参考文献�
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 MAX_TEXT = 2_000_000
@@ -69,7 +71,39 @@ def escape_latex(value: str) -> str:
     return "".join(mapping.get(char, char) for char in value or "")
 
 
+def bundled_tools_dir() -> Path | None:
+    """安装包随附的 tools/ 目录（目前放 pandoc）。
+
+    sidecar 的布局是 ``<安装目录>/resources/paperead-server/paperead-server.exe``，
+    tools 在 ``<安装目录>/resources/tools``；源码运行时回退到
+    ``src-tauri/resources/tools``，方便本地不装 pandoc 也能测导出。
+    """
+    override = os.environ.get("PAPEREAD_TOOLS_DIR")
+    if override:
+        path = Path(override)
+        if path.is_dir():
+            return path
+    exe_dir = Path(sys.executable).resolve().parent
+    candidates = [
+        exe_dir.parent / "tools",
+        Path(__file__).resolve().parents[2] / "src-tauri" / "resources" / "tools",
+    ]
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
 def find_pandoc() -> str | None:
+    """优先用安装包内置的 pandoc，其次才是系统 PATH。"""
+    override = os.environ.get("PAPEREAD_PANDOC")
+    if override and Path(override).is_file():
+        return override
+    tools = bundled_tools_dir()
+    if tools:
+        bundled = tools / "pandoc" / "pandoc.exe"
+        if bundled.is_file():
+            return str(bundled)
     return shutil.which("pandoc") or shutil.which("pandoc.exe")
 
 

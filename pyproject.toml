@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "paperead"
-version = "0.1.4"
+version = "0.1.5"
 description = "学术论文 PDF 版面重排 + 英中逐段翻译（双栏、图表、公式）"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -35,7 +35,14 @@ from paperead.scholar.http import FriendlyError
 from paperead.scholar.models import paper_from_dict
 from paperead.scholar.search import SOURCE_KEYS, SearchInput
 from server.research.files import files_root, safe_name, save_bytes
-from server.research.latex import bib_stem, build_tex, compile_tex, has_cjk, read_text
+from server.research.latex import (
+    bib_stem,
+    build_tex,
+    compile_tex,
+    find_pandoc,
+    has_cjk,
+    read_text,
+)
 from server.research.store import ResearchStore
 from server.scholar_api import import_paper
 
@@ -798,12 +805,12 @@ def build_router(
                 "files": [],
                 "error": "没有找到要导出的正文：请传 content，或 source 指向项目里的 markdown 文件。",
             }
-        exe = shutil.which("pandoc") or shutil.which("pandoc.exe")
+        exe = find_pandoc()
         if not exe:
             return {
                 "format": "docx",
                 "files": [],
-                "error": "服务器未找到 pandoc，无法生成 docx；可改用 bib 或 markdown。",
+                "error": "没有找到可用的 pandoc，无法生成 docx；可改用 bib 或 markdown。",
             }
         filename = safe_name(body.filename or f"{body.title or title or 'review'}.docx")
         if not filename.lower().endswith(".docx"):

@@ -28,7 +28,7 @@ from .translate import (
     translate_paper,
 )
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 
 __all__ = [
     # 解析

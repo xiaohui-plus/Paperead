@@ -66,6 +66,10 @@ jobs:
         shell: pwsh
         run: .\scripts\stage-agent.ps1
 
+      - name: Stage bundled tools (pandoc)
+        shell: pwsh
+        run: .\scripts\stage-tools.ps1
+
       - name: Sync version from tag
         shell: pwsh
         run: .venv-build\Scripts\python.exe scripts\set_version.py "${{ github.ref_name }}"
