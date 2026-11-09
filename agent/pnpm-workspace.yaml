@@ -1,5 +1,8 @@
 packages:
   - "."
+# NSIS 安装包会因 pnpm 默认的 .pnpm 深层路径（>260 字符）打包失败，
+# 平铺的 node_modules 能把最长路径压到 220 字符左右。
+nodeLinker: hoisted
 allowBuilds:
   '@deepseek-ai/dsh-subprocess-local': true
   '@google/genai': true
