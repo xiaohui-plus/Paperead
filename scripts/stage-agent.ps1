@@ -42,6 +42,31 @@ if ($node) {
     Write-Warning "没有找到 node，安装版将依赖用户机器上的 Node"
 }
 
+# 安装包里不需要调试符号、sourcemap、类型声明和非 x64 预编译产物，
+# 这些能省掉约 90 MB，安装包才能压到 Gitee 100 MB 附件限制以内。
+$prune = Get-ChildItem $dst -Recurse -File -Include *.pdb, *.map, *.d.ts -ErrorAction SilentlyContinue
+foreach ($file in $prune) {
+    Remove-Item $file.FullName -Force -ErrorAction SilentlyContinue
+}
+# 只在 node_modules 里删文档，skills/*/SKILL.md 是运行时要用到的
+Get-ChildItem (Join-Path $dst "node_modules") -Recurse -File -Filter "*.md" -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+foreach ($name in "test", "tests", "__tests__", "spec", "__mocks__", ".yarn", "third_party") {
+    Get-ChildItem $dst -Recurse -Directory -Filter $name -ErrorAction SilentlyContinue |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+}
+# 依赖包里的 TypeScript 源码只是给人看的，运行时用的是 dist/lib 里的编译产物
+Get-ChildItem $dst -Recurse -Directory -Filter "src" -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($_.FullName -match "node_modules") {
+        Get-ChildItem $_.FullName -Recurse -File -Include *.ts, *.tsx -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+}
+Get-ChildItem $dst -Recurse -Directory -Filter "prebuilds" -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-ChildItem $_.FullName -Directory | Where-Object { $_.Name -ne "win32-x64" } |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 $size = [math]::Round(((Get-ChildItem $dst -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 1)
 Write-Host "STAGED agent: $dst ($size MB)"
 

@@ -1,8 +1,10 @@
 # 把研究/综述写作需要的外部工具放进安装包资源目录。
 # 目前只带 pandoc：DOCX 导出、Markdown→LaTeX 都靠它，用户机器不必再单独安装。
 # 下载产物落在 .tmp\tools 做缓存，可重复执行。
+# 3.x 的 pandoc.exe 有 220MB+，装进安装包会顶破 Gitee 100MB 附件上限；
+# 2.19 已经支持导出用到的 --natbib / task_lists / pipe_tables，体积只有一半。
 param(
-    [string]$PandocVersion = "3.13"
+    [string]$PandocVersion = "2.19.2"
 )
 
 $ErrorActionPreference = "Stop"
