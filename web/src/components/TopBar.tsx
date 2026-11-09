@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Paper, ViewMode } from '../types'
 import { downloadMarkdown } from '../lib/markdown'
+import { tourBus } from '../tour/tourBus'
 import { IconBack, IconCollapse, IconDownload, IconExpand, IconMinus, IconPdf, IconPlus, IconPrint, IconSettings } from './icons'
 
 interface Props {
@@ -147,7 +148,7 @@ export function TopBar({
 
       <div className="tools">
         {!pdfMode && (
-          <div className="segmented" role="tablist" aria-label="阅读模式">
+          <div className="segmented" data-tour="reader-mode" role="tablist" aria-label="阅读模式">
             {MODES.map((m) => (
               <button
                 key={m.key}
@@ -156,7 +157,10 @@ export function TopBar({
                 data-active={mode === m.key}
                 disabled={!hasTranslation && m.key !== 'en'}
                 title={!hasTranslation && m.key !== 'en' ? '这篇还没有译文' : undefined}
-                onClick={() => onMode(m.key)}
+                onClick={() => {
+                  onMode(m.key)
+                  tourBus.emit('reader:mode-changed', { mode: m.key })
+                }}
               >
                 {m.label}
               </button>
@@ -258,7 +262,7 @@ export function TopBar({
           </div>
         </details>
         <button
-          className="icon-btn"
+          className="icon-btn print-btn"
           title={canShowPdf ? '打印原版 PDF' : '打印 / 存为 PDF'}
           disabled={busy !== null}
           onClick={handlePrint}

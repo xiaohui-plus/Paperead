@@ -25,6 +25,16 @@ import pymupdf
 
 log = logging.getLogger("paperead.store")
 
+ATTACHMENT_LIMIT = 20 * 1024 * 1024
+_ATTACHMENT_BAD = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+
+def _attachment_name(name: str) -> str:
+    base = Path(name or "attachment").name
+    base = _ATTACHMENT_BAD.sub("_", base).strip(" .") or "attachment"
+    stem, suffix = Path(base).stem[:80], Path(base).suffix[:16]
+    return f"{stem or 'attachment'}{suffix}"
+
 
 class FolderNameError(ValueError):
     """文件夹名称非法。"""
@@ -295,6 +305,134 @@ class LibraryStore:
             log.warning("生成缩略图失败：%s", e)
         return row
 
+    # ── 问答附件 ────────────────────────────────────────
+
+    def attachments_dir(self, paper_id: str) -> Path:
+        return self.root / "attachments" / paper_id
+
+    def _attachment_manifest_path(self, paper_id: str) -> Path:
+        return self.attachments_dir(paper_id) / "paper.json"
+
+    def _read_attachment_manifest(self, paper_id: str) -> dict[str, Any]:
+        path = self._attachment_manifest_path(paper_id)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _write_attachment_manifest(
+        self, paper_id: str, manifest: dict[str, Any]
+    ) -> None:
+        folder = self.attachments_dir(paper_id)
+        folder.mkdir(parents=True, exist_ok=True)
+        self._attachment_manifest_path(paper_id).write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+
+    def save_attachment(
+        self,
+        paper_id: str,
+        filename: str,
+        data: bytes,
+        title: str = "",
+    ) -> dict[str, Any]:
+        folder = self.attachments_dir(paper_id)
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / _attachment_name(filename)
+        stem, suffix = target.stem, target.suffix
+        index = 1
+        while target.exists():
+            target = folder / f"{stem}-{index}{suffix}"
+            index += 1
+        target.write_bytes(data)
+        now = time.time()
+        manifest = self._read_attachment_manifest(paper_id)
+        manifest["paperId"] = paper_id
+        manifest["title"] = title or manifest.get("title") or ""
+        manifest["updatedAt"] = now
+        files = manifest.get("files")
+        if not isinstance(files, dict):
+            files = {}
+        files[target.name] = {
+            "size": len(data),
+            "suffix": suffix.lower(),
+            "createdAt": now,
+        }
+        manifest["files"] = files
+        self._write_attachment_manifest(paper_id, manifest)
+        return {
+            "name": target.name,
+            "size": len(data),
+            "suffix": suffix.lower(),
+            "createdAt": now,
+            "url": f"/api/papers/{paper_id}/attachments/{target.name}",
+        }
+
+    def annotate_attachment(
+        self, paper_id: str, name: str, **patch: Any
+    ) -> None:
+        manifest = self._read_attachment_manifest(paper_id)
+        files = manifest.get("files")
+        if not isinstance(files, dict):
+            return
+        item = files.get(name)
+        if not isinstance(item, dict):
+            return
+        item.update(patch)
+        manifest["updatedAt"] = time.time()
+        self._write_attachment_manifest(paper_id, manifest)
+
+    def list_attachments(self, paper_id: str) -> list[dict[str, Any]]:
+        folder = self.attachments_dir(paper_id)
+        if not folder.is_dir():
+            return []
+        manifest = self._read_attachment_manifest(paper_id)
+        files = manifest.get("files")
+        files = files if isinstance(files, dict) else {}
+        items: list[dict[str, Any]] = []
+        for path in folder.iterdir():
+            if not path.is_file() or path.name == "paper.json":
+                continue
+            meta = files.get(path.name)
+            meta = meta if isinstance(meta, dict) else {}
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            items.append(
+                {
+                    "name": path.name,
+                    "size": int(meta.get("size") or stat.st_size),
+                    "suffix": path.suffix.lower(),
+                    "createdAt": meta.get("createdAt") or stat.st_mtime,
+                    "textChars": int(meta.get("textChars") or 0),
+                    "url": f"/api/papers/{paper_id}/attachments/{path.name}",
+                }
+            )
+        items.sort(key=lambda item: item["createdAt"], reverse=True)
+        return items
+
+    def delete_attachment(self, paper_id: str, name: str) -> bool:
+        path = self.attachment_path(paper_id, name)
+        if path is None:
+            return False
+        path.unlink(missing_ok=True)
+        manifest = self._read_attachment_manifest(paper_id)
+        files = manifest.get("files")
+        if isinstance(files, dict):
+            files.pop(path.name, None)
+            manifest["updatedAt"] = time.time()
+            self._write_attachment_manifest(paper_id, manifest)
+        return True
+
+    def attachment_path(self, paper_id: str, name: str) -> Path | None:
+        folder = self.attachments_dir(paper_id).resolve()
+        candidate = (folder / _attachment_name(name)).resolve()
+        if folder not in candidate.parents:
+            return None
+        return candidate if candidate.is_file() else None
+
     def remove(self, paper_id: str) -> bool:
         with self._lock:
             rows = self._read()
@@ -302,14 +440,164 @@ class LibraryStore:
             if len(kept) == len(rows):
                 return False
             self._write(kept)
-        for suffix in (".pdf", ".thumb.png", ".blocks.json"):
+        for suffix in (
+            ".pdf",
+            ".thumb.png",
+            ".blocks.json",
+            ".annotations.json",
+            ".highlights.json",
+        ):
             path = self.papers_dir / f"{paper_id}{suffix}"
             if path.exists():
                 path.unlink(missing_ok=True)
         pages = self.page_dir(paper_id)
         if pages.exists():
             shutil.rmtree(pages, ignore_errors=True)
+        attachments = self.attachments_dir(paper_id)
+        if attachments.exists():
+            shutil.rmtree(attachments, ignore_errors=True)
         return True
+
+    # ── 标注 / 笔记 ─────────────────────────────────────
+
+    def annotations_path(self, paper_id: str) -> Path:
+        return self.papers_dir / f"{paper_id}.annotations.json"
+
+    def list_annotations(self, paper_id: str) -> list[dict[str, Any]]:
+        path = self.annotations_path(paper_id)
+        if not path.exists():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            log.warning("标注文件损坏，忽略：%s", path)
+            return []
+        return data if isinstance(data, list) else []
+
+    def _write_annotations(
+        self, paper_id: str, rows: list[dict[str, Any]]
+    ) -> None:
+        self.annotations_path(paper_id).write_text(
+            json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+
+    def add_annotation(
+        self, paper_id: str, data: dict[str, Any]
+    ) -> dict[str, Any]:
+        now = time.time()
+        row = {
+            "id": f"a_{uuid.uuid4().hex[:12]}",
+            "block_id": data["block_id"],
+            "source": data.get("source") or "en",
+            "start": int(data.get("start") or 0),
+            "end": int(data.get("end") or 0),
+            "quote": data.get("quote") or "",
+            "color": data.get("color") or "yellow",
+            "note": data.get("note") or "",
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self._lock:
+            rows = self.list_annotations(paper_id)
+            rows.append(row)
+            self._write_annotations(paper_id, rows)
+        return row
+
+    def update_annotation(
+        self, paper_id: str, annotation_id: str, patch: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        allowed = {"color", "note", "quote", "start", "end"}
+        with self._lock:
+            rows = self.list_annotations(paper_id)
+            for row in rows:
+                if row.get("id") != annotation_id:
+                    continue
+                for key, value in patch.items():
+                    if key in allowed and value is not None:
+                        row[key] = value
+                row["updated_at"] = time.time()
+                self._write_annotations(paper_id, rows)
+                return row
+        return None
+
+    def delete_annotation(self, paper_id: str, annotation_id: str) -> bool:
+        with self._lock:
+            rows = self.list_annotations(paper_id)
+            kept = [row for row in rows if row.get("id") != annotation_id]
+            if len(kept) == len(rows):
+                return False
+            self._write_annotations(paper_id, kept)
+        return True
+
+    # ── 自动阅读重点（系统高亮） ────────────────────────
+
+    def highlights_path(self, paper_id: str) -> Path:
+        return self.papers_dir / f"{paper_id}.highlights.json"
+
+    def read_highlights(self, paper_id: str) -> dict[str, Any]:
+        """返回 {"version":1,"pages":{...},"highlights":[...]}，损坏时返回空结构。"""
+        path = self.highlights_path(paper_id)
+        empty = {"version": 1, "pages": {}, "highlights": []}
+        if not path.exists():
+            return empty
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            log.warning("阅读重点文件损坏，忽略：%s", path)
+            return empty
+        if not isinstance(data, dict):
+            return empty
+        data.setdefault("version", 1)
+        data.setdefault("pages", {})
+        data.setdefault("highlights", [])
+        return data
+
+    def _write_highlights(self, paper_id: str, data: dict[str, Any]) -> None:
+        self.highlights_path(paper_id).write_text(
+            json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+
+    def list_highlights(self, paper_id: str) -> list[dict[str, Any]]:
+        rows = self.read_highlights(paper_id).get("highlights") or []
+        return rows if isinstance(rows, list) else []
+
+    def highlight_pages(self, paper_id: str) -> dict[str, Any]:
+        pages = self.read_highlights(paper_id).get("pages") or {}
+        return pages if isinstance(pages, dict) else {}
+
+    def replace_page_highlights(
+        self, paper_id: str, page: int, rows: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """用新结果替换某一页的自动重点；没有结果也记一笔，避免重复请求。"""
+        now = time.time()
+        with self._lock:
+            data = self.read_highlights(paper_id)
+            kept = [
+                row
+                for row in data.get("highlights", [])
+                if int(row.get("page") or 0) != int(page)
+            ]
+            added = []
+            for row in rows:
+                item = {
+                    **row,
+                    "id": f"h_{uuid.uuid4().hex[:12]}",
+                    "page": int(page),
+                    "created_at": now,
+                }
+                added.append(item)
+            data["highlights"] = kept + added
+            data.setdefault("pages", {})[str(page)] = {
+                "at": now,
+                "count": len(added),
+            }
+            self._write_highlights(paper_id, data)
+        return added
+
+    def clear_highlights(self, paper_id: str) -> None:
+        path = self.highlights_path(paper_id)
+        if path.exists():
+            path.unlink(missing_ok=True)
 
     # ── 文件 ────────────────────────────────────────────
 

@@ -1,22 +1,30 @@
 [package]
 name = "paperead-desktop"
-version = "0.1.5"
+version = "0.1.6"
 description = "Paperead desktop shell"
 edition = "2021"
 rust-version = "1.77.2"
+
+[lib]
+name = "paperead_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-tauri-plugin-single-instance = "2"
+# generate_context! 生成的代码在移动端也会引用 serde_json
+serde_json = "1"
+
+# 桌面端专用：sidecar / 研究 agent / 更新器；安卓壳不编译这些
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
 tauri-plugin-updater = { version = "2", default-features = false, features = ["native-tls", "zip", "system-proxy"] }
 tokio = { version = "1", features = ["time"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 ureq = { version = "2", default-features = false, features = ["json"] }
 rand = "0.8"
 url = "2"

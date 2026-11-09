@@ -389,6 +389,12 @@
   position: relative;
 }
 
+/* 手机上才有：打开文件/会话抽屉 */
+.project-rail-toggle,
+.project-rail-scrim {
+  display: none;
+}
+
 .project-menu,
 .project-plus-menu {
   position: absolute;
@@ -738,10 +744,42 @@
 }
 
 .project-tree-name {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 剪切中的条目变淡；鼠标悬停或无悬停设备（手机）时显示“更多操作” */
+.project-tree-row[data-cut='true'] {
+  opacity: 0.5;
+}
+
+.project-tree-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0.55;
+  cursor: pointer;
+}
+
+.project-tree-more:hover,
+.project-tree-row:hover .project-tree-more,
+.project-tree-row:focus-within .project-tree-more {
+  opacity: 1;
+  background: var(--bg);
+  color: var(--ink);
 }
 
 .project-tree-input {
@@ -866,6 +904,124 @@
   gap: 10px;
   font-size: 11.5px;
   color: var(--faint);
+}
+
+.project-composer.is-dragging {
+  border-color: var(--accent, #2563eb);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.composer-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.composer-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.composer-add:hover:not(:disabled) {
+  border-color: var(--line);
+  background: var(--bg-2, #f6f7f9);
+}
+
+.composer-add:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.composer-add svg {
+  width: 14px;
+  height: 14px;
+}
+
+.composer-hint {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-bottom: 8px;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 3px 6px 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-2, #f6f7f9);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-size {
+  color: var(--faint);
+}
+
+.attachment-remove {
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+}
+
+.attachment-remove:hover {
+  color: var(--ink);
+}
+
+.attachment-remove svg {
+  width: 12px;
+  height: 12px;
+}
+
+.composer-upload-note {
+  padding-bottom: 6px;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.composer-upload-note.is-error {
+  color: #c0392b;
+}
+
+@media (max-width: 640px) {
+  .composer-hint {
+    display: none;
+  }
+
+  .composer-tools {
+    flex: 1;
+  }
 }
 
 .project-session-view {
@@ -1042,6 +1198,8 @@
 /* PDF：占满预览区，工具栏 + 画布滚动 */
 
 .project-preview-body[data-kind='pdf'],
+.project-preview-body[data-kind='pptx'],
+.project-preview-body[data-kind='docx'],
 .project-preview-body[data-kind='csv'],
 .project-preview-body[data-kind='sheet'],
 .project-preview-body[data-kind='code'] {
@@ -1140,6 +1298,10 @@
   align-items: center;
 }
 
+.pdf-preview-sheet {
+  margin-bottom: 16px;
+}
+
 .pdf-preview-scroll .react-pdf__Page {
   background: #fff;
   box-shadow: 0 1px 10px rgba(15, 30, 60, 0.14);
@@ -1149,6 +1311,73 @@
   margin: 10px 0 0;
   font-size: 11px;
   color: var(--faint);
+}
+
+/* PPT：所有幻灯片纵向排列，外层滚动 */
+
+.ppt-preview {
+  position: relative;
+  height: 100%;
+  min-height: 0;
+}
+
+.ppt-preview-host {
+  height: 100%;
+  overflow: auto;
+  padding: 18px;
+  background: var(--bg-soft);
+}
+
+.ppt-preview-host .pptx-preview-wrapper {
+  background: transparent !important;
+}
+
+.ppt-preview-host .pptx-preview-slide-wrapper {
+  border-radius: 3px;
+  box-shadow: 0 2px 12px rgba(15, 30, 60, 0.14);
+}
+
+.ppt-preview .project-preview-note {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0 24px;
+  background: var(--bg-soft);
+}
+
+/* Word：按分页渲染成纸张，外层滚动 */
+
+.docx-preview {
+  position: relative;
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  padding: 18px;
+  background: var(--bg-soft);
+}
+
+.docx-preview .docx-wrapper {
+  background: transparent;
+  padding: 0;
+}
+
+.docx-preview .docx-wrapper > section.docx {
+  margin: 0 auto 16px;
+  box-shadow: 0 2px 12px rgba(15, 30, 60, 0.14);
+}
+
+.docx-preview .project-preview-note {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0 24px;
+  background: var(--bg-soft);
 }
 
 /* 表格：CSV / Excel */
@@ -1398,74 +1627,115 @@
 .turn-block {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
-.turn-head {
+.turn-foot {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px;
+  margin-top: 2px;
   color: var(--faint);
+  font-size: 12px;
 }
 
-.turn-head strong {
-  color: var(--ink-2);
-  font-weight: 600;
-}
-
-.turn-head em {
+.turn-foot em {
   font-style: normal;
 }
 
-.turn-avatar {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border: 1px solid var(--line);
-  border-radius: 50%;
-  background: var(--bg-soft);
-  color: var(--blue-ink);
-  flex: none;
-}
-
-.turn-avatar svg {
-  width: 12px;
-  height: 12px;
-}
-
+/* 思考行：对齐 DeepSeek Harness 的 ReasoningRow。 */
 .reasoning-panel {
-  padding-left: 10px;
-  border-left: 2px solid var(--line-2);
+  display: flex;
+  flex-direction: column;
 }
 
-.reasoning-toggle {
-  display: inline-flex;
+.reasoning-row {
+  position: relative;
+  display: flex;
   align-items: center;
   gap: 6px;
-  padding: 2px 0;
+  width: 100%;
+  padding: 2px 6px;
+  overflow: hidden;
   border: 0;
+  border-radius: 6px;
   background: transparent;
-  color: var(--faint);
+  color: var(--ink-2);
   font: inherit;
-  font-size: 12px;
+  font-size: 14px;
+  line-height: 24px;
+  text-align: left;
   cursor: pointer;
 }
 
-.reasoning-toggle:hover {
+.reasoning-row:hover {
+  background: var(--bg-soft);
+}
+
+.reasoning-leading {
+  display: inline-flex;
+  flex: none;
+  color: var(--faint);
+}
+
+.reasoning-leading svg {
+  width: 14px;
+  height: 14px;
+}
+
+.reasoning-title {
+  flex: none;
+  font-weight: 400;
   color: var(--ink-2);
 }
 
-.reasoning-toggle svg {
-  width: 13px;
-  height: 13px;
+.reasoning-sep {
+  width: 2px;
+  height: 2px;
+  margin: 0 8px;
+  border-radius: 1px;
+  background: var(--faint);
+  flex: none;
+}
+
+.reasoning-summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 14px;
+  line-height: 24px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reasoning-summary[data-follow-end='true'] {
+  text-overflow: clip;
+}
+
+.reasoning-suffix {
+  flex: none;
+  margin-left: 8px;
+  color: var(--faint);
+  font-style: normal;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .reasoning-chevron {
   display: inline-flex;
-  transition: transform 0.15s ease;
+  flex: none;
+  margin-left: 4px;
+  color: var(--faint);
+  opacity: 0.35;
+  transition: transform 0.15s ease, opacity 0.1s ease;
+}
+
+.reasoning-row:hover .reasoning-chevron,
+.reasoning-row:focus-visible .reasoning-chevron,
+.reasoning-chevron[data-open='true'] {
+  opacity: 1;
 }
 
 .reasoning-chevron[data-open='true'] {
@@ -1473,32 +1743,26 @@
 }
 
 .reasoning-body {
-  margin: 6px 0 0;
-  padding: 10px 12px;
-  max-height: 320px;
-  overflow: auto;
-  border-radius: var(--radius-sm);
-  background: var(--bg-soft);
-  color: var(--muted);
+  margin: 0;
+  padding: 4px 0 4px 22px;
+  color: var(--faint);
   font-family: inherit;
-  font-size: 12.5px;
-  line-height: 1.75;
+  font-size: 14px;
+  line-height: 24px;
   white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .plan-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   margin: 0;
-  padding: 10px 12px;
+  padding: 4px 6px 4px 22px;
   list-style: none;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--bg-soft);
-  color: var(--ink-2);
-  font-size: 12.5px;
+  border-left: 2px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .plan-list li {
@@ -1542,113 +1806,197 @@
 .turn-tools {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 2px;
 }
 
-.tool-card,
-.tool-group {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-  overflow: hidden;
-}
-
-.tool-card > summary,
+/* 工具行：无边框 disclosure 行，运行中带横向流光。 */
+.tool-row > summary,
 .tool-group > summary {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  list-style: none;
-  font-size: 12.5px;
+  gap: 6px;
+  width: 100%;
+  padding: 2px 6px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: transparent;
   color: var(--ink-2);
+  font-size: 14px;
+  line-height: 24px;
+  list-style: none;
   cursor: pointer;
 }
 
-.tool-card > summary::-webkit-details-marker,
+.tool-row > summary::-webkit-details-marker,
 .tool-group > summary::-webkit-details-marker {
   display: none;
 }
 
-.tool-card > summary:hover,
+.tool-row > summary:hover,
 .tool-group > summary:hover {
   background: var(--bg-soft);
 }
 
-.tool-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
+.reasoning-panel[data-state='running'] .reasoning-row::after,
+.tool-row[data-status='running'] > summary::after,
+.tool-row[data-status='draft'] > summary::after,
+.tool-group[data-running='true'] > summary::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 300px;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--bg) 60%, transparent) 55%,
+    transparent 100%
+  );
+  animation: thinking-sweep 2.6s ease-out infinite;
+}
+
+@keyframes thinking-sweep {
+  0% {
+    left: -300px;
+  }
+
+  90%,
+  100% {
+    left: 100%;
+  }
+}
+
+.tool-leading {
+  display: inline-flex;
+  flex: none;
+  color: var(--faint);
+}
+
+.tool-leading svg {
+  width: 14px;
+  height: 14px;
+}
+
+.tool-title {
+  flex: none;
+  font-weight: 400;
+}
+
+.tool-sep {
+  width: 2px;
+  height: 2px;
+  margin: 0 8px;
+  border-radius: 1px;
   background: var(--faint);
   flex: none;
 }
 
-.tool-card[data-status='done'] .tool-dot {
-  background: var(--green);
-}
-
-.tool-card[data-status='error'] .tool-dot {
-  background: #dc2626;
-}
-
-.tool-card[data-status='running'] .tool-dot,
-.tool-card[data-status='draft'] .tool-dot,
-.tool-group[data-running='true'] .tool-dot {
-  background: var(--blue);
-  animation: tool-pulse 1.2s ease-in-out infinite;
-}
-
-@keyframes tool-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.3;
-  }
-}
-
-.tool-card strong,
-.tool-group strong {
-  font-weight: 600;
-  flex: none;
-}
-
-.tool-subtitle {
+.tool-summary {
   flex: 1;
   min-width: 0;
   overflow: hidden;
-  color: var(--muted);
+  color: var(--faint);
+  font-size: 14px;
+  line-height: 24px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.tool-status {
-  margin-left: auto;
+.tool-summary[data-error='true'] {
+  color: #b91c1c;
+}
+
+.tool-pill {
   flex: none;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.tool-pill[data-ok='true'] {
+  border-color: rgba(21, 128, 61, 0.28);
+  color: #15803d;
+}
+
+.tool-pill[data-fail='true'] {
+  border-color: rgba(185, 28, 28, 0.28);
+  color: #b91c1c;
+}
+
+.tool-suffix {
+  flex: none;
+  margin-left: 8px;
   color: var(--faint);
   font-style: normal;
-  font-size: 11.5px;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .tool-chevron {
   display: inline-flex;
+  flex: none;
+  margin-left: 4px;
   color: var(--faint);
-  transition: transform 0.15s ease;
+  opacity: 0.35;
+  transition: transform 0.15s ease, opacity 0.1s ease;
 }
 
+.tool-row > summary:hover .tool-chevron,
+.tool-row[open] .tool-chevron,
+.tool-group > summary:hover .tool-chevron,
+.tool-group[open] .tool-chevron {
+  opacity: 1;
+}
+
+.tool-row[open] .tool-chevron,
 .tool-group[open] .tool-chevron {
   transform: rotate(180deg);
 }
 
-.tool-detail {
-  padding: 8px 10px 10px;
-  border-top: 1px solid var(--line);
+.tool-row[data-status='error'] .tool-leading {
+  color: #dc2626;
+}
+
+.tool-row[data-status='error'] .tool-title {
+  color: #b91c1c;
+}
+
+.tool-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 0 6px 22px;
+}
+
+.tool-io {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
   background: var(--bg-soft);
 }
 
-.tool-detail pre {
+.tool-io-label {
+  align-self: start;
+  color: var(--faint);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.tool-io-text {
   margin: 0;
+  min-width: 0;
   max-height: 260px;
   overflow: auto;
   color: var(--ink-2);
@@ -1659,23 +2007,30 @@
   word-break: break-word;
 }
 
-.tool-error {
-  margin: 0 0 6px;
+.tool-io[data-error='true'] .tool-io-text {
   color: #b91c1c;
-  font-size: 12px;
 }
 
 .tool-group-body {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px 10px 10px;
-  border-top: 1px solid var(--line);
-  background: var(--bg-soft);
+  gap: 2px;
+  margin: 2px 0 2px 22px;
+  padding-left: 8px;
+  border-left: 1px solid var(--line);
 }
 
-.tool-card[data-dense='true'] > summary {
-  padding: 6px 8px;
+.tool-row[data-dense='true'] > summary {
+  padding: 1px 6px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reasoning-panel[data-state='running'] .reasoning-row::after,
+  .tool-row[data-status='running'] > summary::after,
+  .tool-row[data-status='draft'] > summary::after,
+  .tool-group[data-running='true'] > summary::after {
+    animation: none;
+  }
 }
 
 .turn-text {
@@ -1879,13 +2234,57 @@
 
   .project-body {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
   }
 
+  /* 文件/会话栏改成左侧抽屉：会话正文占满整屏，抽屉按需滑出 */
   .project-rail {
-    max-height: 40vh;
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
+    position: fixed;
+    top: var(--topbar-h);
+    bottom: 0;
+    left: 0;
+    z-index: 46;
+    width: min(320px, 86vw);
+    max-height: none;
+    border-right: 1px solid var(--line);
+    border-bottom: 0;
+    box-shadow: 10px 0 28px rgba(17, 24, 39, 0.16);
+    transform: translateX(-102%);
+    transition: transform 0.22s ease;
+  }
+
+  .project-rail[data-open='true'] {
+    transform: none;
+  }
+
+  .project-rail-scrim {
+    display: block;
+    position: fixed;
+    inset: var(--topbar-h) 0 0;
+    z-index: 45;
+    border: 0;
+    background: rgba(17, 24, 39, 0.28);
+  }
+
+  .project-rail-toggle {
+    display: inline-grid;
+  }
+
+  /* 抽屉里的列表要自己滚动，否则长列表会把整栏撑出屏幕 */
+  .project-session-list,
+  .project-file-panel {
+    flex: 1;
+    min-height: 0;
+  }
+
+  .project-rail-tabs button {
+    padding: 6px 16px;
+  }
+
+  /* 手指点击：文件树行加高一点 */
+  .project-tree-row {
+    min-height: 36px;
+    padding: 7px 8px;
   }
 
   .project-rail-head {
@@ -1913,6 +2312,13 @@
   .project-session-head {
     flex-wrap: wrap;
     gap: 6px;
+  }
+
+  .project-session-head h2 {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 }
 
@@ -1943,10 +2349,6 @@
     width: 100%;
   }
 
-  .project-rail {
-    max-height: 38vh;
-  }
-
   .project-transcript-scroll {
     padding-top: 12px;
   }
@@ -1955,7 +2357,7 @@
     max-width: 92%;
   }
 
-  .tool-status {
+  .tool-suffix {
     display: none;
   }
 
@@ -1973,10 +2375,15 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tool-card[data-status='running'] .tool-dot,
-  .tool-card[data-status='draft'] .tool-dot,
-  .tool-group[data-running='true'] .tool-dot,
   .project-skeleton span {
     animation: none;
   }
+}
+
+.project-menu button.is-danger {
+  color: #dc2626;
+}
+
+.project-menu button.is-danger:hover {
+  background: #fef2f2;
 }

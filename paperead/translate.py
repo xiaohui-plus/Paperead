@@ -12,7 +12,8 @@
 **占位符保护**：公式、引用编号、图表编号、URL、基因名/物种名先替换成 `⟦P0⟧`
 一类 token，翻译完再还原。不做这一步，`$…$` 和 `[12]` 会被模型改写或吞掉。
 
-当前定位是 **英译中**；术语表提示词与译文质检阈值都按中英字符比设计。
+当前定位是 **英译多语**：术语表、上下文衔接和占位符保护与语种无关；
+质检的字符长度区间按目标语言调整。
 """
 
 from __future__ import annotations
@@ -61,7 +62,7 @@ _PROTECT_PATTERNS: list[re.Pattern] = [
         r",?\s*\d{4}[a-z]?)\)"
     ),
     re.compile(r"\b(?:Fig(?:ure|s)?\.?|Tab(?:le|s)?\.?|Eq(?:uation|s)?\.?|Sec(?:tion|s)?\.?)"
-               r"\s*\(?\d+[A-Za-z]?\)?"),
+               r"\s*\(?(?:\d+(?:\.\d+)*|[IVXLCDM]+|[A-Z]\d+)[A-Za-z]?\)?", re.I),
     re.compile(r"https?://\S+|doi:\s*\S+", re.I),
     re.compile(r"\b[A-Z]{2,3}\d{3,}\b"),                       # AT1G01010 类基因号
     re.compile(r"\b[A-Z][a-z]{1,3}[A-Z][A-Za-z0-9]{2,}\b"),    # OsDREB1A / GraphSAGE
@@ -99,19 +100,22 @@ def restore(text: str, pieces: list[str]) -> str:
 
 # ── 术语表 ─────────────────────────────────────────────────────────────
 
-_GLOSSARY_SYS = (
-    "你是学术论文翻译专家。请从给定的论文片段中提取领域术语，给出规范中文译名。"
-    "只输出 JSON，形如 {\"terms\": [{\"en\": \"GWAS\", \"zh\": \"全基因组关联分析\"}]}。"
-    "只提取真正需要统一的专业术语（10-40 个），不要包含普通词汇、作者名、机构名。"
-)
+def _glossary_sys(target_name: str) -> str:
+    return (
+        "你是学术论文翻译专家。请从给定的论文片段中提取领域术语，"
+        f"给出规范的{target_name}译名。"
+        '只输出 JSON，形如 {"terms": [{"en": "GWAS", "target": "全基因组关联分析"}]}。'
+        "只提取真正需要统一的专业术语（10-40 个），不要包含普通词汇、作者名、机构名。"
+    )
 
 
 async def build_glossary(
     blocks: Iterable[Block],
     model: str | None = None,
     max_chars: int = 6000,
+    target_name: str = "中文",
 ) -> dict[str, str]:
-    """扫描标题/摘要/章节标题，生成 EN→ZH 术语表。失败时返回空表，不影响主流程。"""
+    """扫描标题/摘要/章节标题，生成 英文→目标语言 术语表。失败时返回空表，不影响主流程。"""
     sample: list[str] = []
     total = 0
     for b in blocks:
@@ -139,7 +143,7 @@ async def build_glossary(
         try:
             content = await _translate_chat(
                 messages=[
-                    {"role": "system", "content": _GLOSSARY_SYS},
+                    {"role": "system", "content": _glossary_sys(target_name)},
                     {"role": "user", "content": payload},
                 ],
                 model=model,
@@ -153,9 +157,11 @@ async def build_glossary(
             out: dict[str, str] = {}
             for t in terms:
                 if isinstance(t, dict):
-                    en, zh = (t.get("en") or "").strip(), (t.get("zh") or "").strip()
-                    if en and zh:
-                        out[en] = zh
+                    en = (t.get("en") or "").strip()
+                    # 兼容旧缓存里的 zh 字段
+                    target = (t.get("target") or t.get("zh") or "").strip()
+                    if en and target:
+                        out[en] = target
             logger.info("术语表构建完成：%d 条", len(out))
             return out
         except Exception as e:
@@ -181,14 +187,15 @@ def _parse_json(text: str) -> dict:
 
 # ── 段翻译 ─────────────────────────────────────────────────────────────
 
-_SYS = (
-    "你是学术论文翻译专家，负责把英文学术论文翻译成中文。要求：\n"
-    "1. 只输出译文正文，不要任何解释、前言、引号或 Markdown 代码块；\n"
-    "2. 学术书面语，忠实、准确、通顺，不增删内容，不概括；\n"
-    "3. 保持原文的段落、编号、列表结构；\n"
-    "4. 占位符 ⟦P0⟧ ⟦P1⟧ 必须原样保留，不要翻译、不要改动；\n"
-    "5. 严格遵循给定术语表；术语表未覆盖的专有名词保留英文。"
-)
+def _system_prompt(target_name: str) -> str:
+    return (
+        f"你是学术论文翻译专家，负责把英文学术论文翻译成{target_name}。要求：\n"
+        "1. 只输出译文正文，不要任何解释、前言、引号或 Markdown 代码块；\n"
+        "2. 学术书面语，忠实、准确、通顺，不增删内容，不概括；\n"
+        "3. 保持原文的段落、编号、列表结构；\n"
+        "4. 占位符 ⟦P0⟧ ⟦P1⟧ 必须原样保留，不要翻译、不要改动；\n"
+        "5. 严格遵循给定术语表；术语表未覆盖的专有名词保留英文原名。"
+    )
 
 
 def _build_prompt(
@@ -197,10 +204,11 @@ def _build_prompt(
     section: str,
     prev_tail: str,
     next_head: str,
+    target_name: str,
 ) -> str:
     parts: list[str] = []
     if glossary:
-        items = "；".join(f"{en} → {zh}" for en, zh in list(glossary.items())[:60])
+        items = "；".join(f"{en} → {tgt}" for en, tgt in list(glossary.items())[:60])
         parts.append(f"【术语表】{items}")
     if section:
         parts.append(f"【当前章节】{section}")
@@ -209,7 +217,7 @@ def _build_prompt(
     if next_head:
         parts.append(f"【下一段原文开头（供语境参考）】{next_head}")
     parts.append(f"【待翻译段落】\n{text}")
-    parts.append("请只输出这一段的中文译文。")
+    parts.append(f"请只输出这一段的{target_name}译文。")
     return "\n\n".join(parts)
 
 
@@ -220,15 +228,18 @@ async def translate_block(
     next_head: str = "",
     model: str | None = None,
     temperature: float = 0.25,
+    target_name: str = "中文",
 ) -> str:
     """翻译单个块。返回译文（失败抛异常，由上层重试或降级）。"""
     masked, pieces = protect(block.text)
-    prompt = _build_prompt(masked, glossary or {}, block.section, prev_tail, next_head)
+    prompt = _build_prompt(
+        masked, glossary or {}, block.section, prev_tail, next_head, target_name
+    )
     # 推理模型的 reasoning token 计入 max_tokens，给小了会被截断成半句
     budget = min(8000, max(2048, int(len(masked) * 1.2) + 1500))
     out = await _translate_chat(
         messages=[
-            {"role": "system", "content": _SYS},
+            {"role": "system", "content": _system_prompt(target_name)},
             {"role": "user", "content": prompt},
         ],
         model=model,
@@ -241,16 +252,28 @@ async def translate_block(
     return restore(out, pieces)
 
 
-def quality_ok(source: str, target: str, pieces: int = 0) -> bool:
+def quality_ok(
+    source: str,
+    target: str,
+    pieces: int = 0,
+    lang: str = "zh-Hans",
+) -> bool:
     """粗粒度质检：译文长度合理、占位符数量正确。
 
-    英译中的字符数比通常在 0.15~0.6（中文更紧凑），超出区间多半是漏译或复读。
+    不同目标语言的字符长度比例差异很大：中文最紧凑，日韩居中，
+    英法德西俄接近原文长度。区间放宽只为拦住明显的漏译和复读。
     """
     if not target.strip():
         return False
     src_len = max(len(source), 1)
     ratio = len(target) / src_len
-    if not 0.15 <= ratio <= 1.5:
+    if lang in ("zh-Hans", "zh-Hant"):
+        low, high = 0.1, 0.9
+    elif lang in ("ja", "ko"):
+        low, high = 0.18, 1.6
+    else:
+        low, high = 0.3, 2.4
+    if not low <= ratio <= high:
         return False
     expected = len(_PH_RE.findall(protect(source)[0]))
     got = len(_PH_RE.findall(target))
@@ -276,6 +299,8 @@ async def translate_paper(
     concurrency: int = 4,
     on_block: Callable[[Block], Awaitable[None] | None] | None = None,
     limit: int | None = None,
+    target_name: str = "中文",
+    target_lang: str = "zh-Hans",
 ) -> dict:
     """逐段翻译整篇论文，原地写入 block.translated。
 
@@ -305,8 +330,9 @@ async def translate_paper(
                     out = await translate_block(
                         b, glossary, prev_tail, next_head, model=model,
                         temperature=0.25 if attempt == 0 else 0.15,
+                        target_name=target_name,
                     )
-                    ok = quality_ok(b.text, out)
+                    ok = quality_ok(b.text, out, lang=target_lang)
                     if ok or attempt == 1:
                         b.translated = out
                         stats["translated"] += 1

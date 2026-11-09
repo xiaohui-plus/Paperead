@@ -12,10 +12,20 @@ import { SpreadsheetPreview } from './SpreadsheetPreview'
 const PdfViewer = lazy(() =>
   import('./PdfViewer').then((module) => ({ default: module.PdfViewer })),
 )
+// PPT 预览依赖解析库 + echarts，同样按需加载。
+const PptxPreview = lazy(() =>
+  import('./PptxPreview').then((module) => ({ default: module.PptxPreview })),
+)
+// Word 预览用 docx-preview，只在打开 .docx 时加载。
+const DocxPreview = lazy(() =>
+  import('./DocxPreview').then((module) => ({ default: module.DocxPreview })),
+)
 
 type PreviewKind =
   | 'image'
   | 'pdf'
+  | 'pptx'
+  | 'docx'
   | 'markdown'
   | 'csv'
   | 'sheet'
@@ -28,6 +38,12 @@ const IMAGE_RE = /\.(png|jpe?g|gif|webp|svg|bmp|avif|ico)$/i
 const MARKDOWN_RE = /\.(md|mdx|markdown)$/i
 const CSV_RE = /\.(csv|tsv)$/i
 const SHEET_RE = /\.(xlsx|xls|xlsm|ods)$/i
+const PPTX_RE = /\.pptx$/i
+const PPTX_MIME =
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+const DOCX_RE = /\.docx$/i
+const DOCX_MIME =
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 const AUDIO_RE = /\.(mp3|wav|ogg|m4a|flac|aac)$/i
 const VIDEO_RE = /\.(mp4|webm|mov|mkv|m4v)$/i
 const CODE_RE =
@@ -36,6 +52,8 @@ const CODE_RE =
 const KIND_LABEL: Record<PreviewKind, string> = {
   image: '图片',
   pdf: 'PDF',
+  pptx: 'PPT',
+  docx: 'Word',
   markdown: 'Markdown',
   csv: '表格',
   sheet: 'Excel',
@@ -51,6 +69,8 @@ function detectKind(file: ProjectFile): PreviewKind {
   const mime = (file.mime || '').toLowerCase()
   if (mime.startsWith('image/') || IMAGE_RE.test(name)) return 'image'
   if (mime === 'application/pdf' || /\.pdf$/i.test(name)) return 'pdf'
+  if (mime === PPTX_MIME || PPTX_RE.test(name)) return 'pptx'
+  if (mime === DOCX_MIME || DOCX_RE.test(name)) return 'docx'
   if (mime === 'text/markdown' || MARKDOWN_RE.test(name)) return 'markdown'
   if (CSV_RE.test(name)) return 'csv'
   if (SHEET_RE.test(name)) return 'sheet'
@@ -165,6 +185,18 @@ export function FilePreview({ projectId, file, onClose }: Props) {
             fallback={<p className="project-preview-note">正在加载 PDF 组件…</p>}
           >
             <PdfViewer url={url} title={file.name} />
+          </Suspense>
+        ) : kind === 'pptx' ? (
+          <Suspense
+            fallback={<p className="project-preview-note">正在加载 PPT 组件…</p>}
+          >
+            <PptxPreview url={url} name={file.name} />
+          </Suspense>
+        ) : kind === 'docx' ? (
+          <Suspense
+            fallback={<p className="project-preview-note">正在加载 Word 组件…</p>}
+          >
+            <DocxPreview url={url} name={file.name} />
           </Suspense>
         ) : kind === 'csv' || kind === 'sheet' ? (
           <SpreadsheetPreview url={url} name={file.name} kind={kind} />

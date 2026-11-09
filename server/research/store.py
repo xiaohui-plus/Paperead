@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import time
 import uuid
@@ -14,7 +15,12 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from server.research.db import connect, init_db
-from server.research.files import remove_file, resolve_in_files, safe_name
+from server.research.files import (
+    files_root,
+    remove_file,
+    resolve_in_files,
+    safe_name,
+)
 
 # 区分“未传 parent_id”与“移动到根目录（None）”。
 _UNSET = object()
@@ -175,6 +181,32 @@ class ResearchStore:
                 "UPDATE projects SET updated_at = ? WHERE id = ?",
                 (_now(), project_id),
             )
+
+    def delete_project(self, project_id: str) -> bool:
+        """永久删除项目：数据库记录、会话事件、产物和整个工作目录。
+
+        项目里的论文如果仍被文献库其他条目引用，不在这里删；
+        只删除 ``project_id`` 属于本项目的那些文献库条目（由调用方处理）。
+        """
+        project = self.get_project(project_id)
+        if project is None:
+            return False
+        workspace = Path(project["workspace"])
+        with self._db() as conn:
+            conn.execute(
+                """
+                DELETE FROM session_sources
+                WHERE session_id IN (
+                  SELECT id FROM sessions WHERE project_id = ?
+                )
+                """,
+                (project_id,),
+            )
+            conn.execute("DELETE FROM artifacts WHERE project_id = ?", (project_id,))
+            # project_items / sessions / session_events 由外键级联删除
+            conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        shutil.rmtree(workspace, ignore_errors=True)
+        return True
 
     def workspace(self, project_id: str) -> Path:
         project = self.get_project(project_id)
@@ -389,7 +421,10 @@ class ResearchStore:
         if not old_path.exists():
             # paper/note 等只在库里有记录时无需动盘。
             return
-        if new_path.exists():
+        # Windows 大小写不敏感：仅改大小写时路径存在指向同一个文件，应放行。
+        if new_path.exists() and os.path.normcase(str(old_path)) != os.path.normcase(
+            str(new_path)
+        ):
             raise ValueError("目标位置已存在同名文件或文件夹")
         new_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(old_path), str(new_path))
@@ -424,6 +459,14 @@ class ResearchStore:
         else:
             title = str(item["title"])
 
+        # 文件项的标题可能不含扩展名（如笔记记录），改名/移动时沿用原后缀，
+        # 避免磁盘上出现没有扩展名的文件导致预览识别不出类型。
+        file_name = title
+        if item["kind"] != "folder" and not Path(title).suffix:
+            suffix = Path(old_path).suffix
+            if suffix:
+                file_name = f"{title}{suffix}"
+
         if parent_changed:
             if target_parent:
                 parent = self.get_item(str(target_parent))
@@ -437,7 +480,7 @@ class ResearchStore:
         else:
             parent_path = old_path.rsplit("/", 1)[0] if "/" in old_path else ""
 
-        new_path = f"{parent_path}/{title}" if parent_path else title
+        new_path = f"{parent_path}/{file_name}" if parent_path else file_name
 
         self._move_on_disk(project_id, old_path, new_path)
 
@@ -466,12 +509,25 @@ class ResearchStore:
             )
         return self.list_items(project_id)
 
+    def set_item_size(self, project_id: str, item_id: str, size: int) -> None:
+        """文件被就地改写后，同步列表里显示的大小。"""
+        with self._db() as conn:
+            conn.execute(
+                """
+                UPDATE project_items SET size = ?
+                WHERE id = ? AND project_id = ?
+                """,
+                (int(size), item_id, project_id),
+            )
+
     def _unique_title(
         self,
         conn: Any,
         project_id: str,
         parent_id: str | None,
         title: str,
+        workspace: Path | None = None,
+        parent_path: str = "",
     ) -> str:
         rows = conn.execute(
             """
@@ -481,13 +537,25 @@ class ResearchStore:
             (project_id, parent_id),
         ).fetchall()
         existing = {str(row["title"]) for row in rows}
-        if title not in existing:
+        base = (
+            resolve_in_files(workspace, parent_path)
+            if workspace is not None and parent_path
+            else files_root(workspace) if workspace is not None else None
+        )
+
+        def available(candidate: str) -> bool:
+            # 数据库与磁盘都要没占用，避免复制时覆盖残留文件。
+            if candidate in existing:
+                return False
+            return not (base is not None and (base / candidate).exists())
+
+        if available(title):
             return title
         path = Path(title)
         stem, suffix = path.stem, path.suffix
         for index in range(1, 1000):
             candidate = f"{stem}-{index}{suffix}"
-            if candidate not in existing:
+            if available(candidate):
                 return candidate
         return f"{stem}-{uuid.uuid4().hex[:6]}{suffix}"
 
@@ -505,6 +573,7 @@ class ResearchStore:
             parent_id == item_id or self._is_inside(parent_id, item_id)
         ):
             raise ValueError("不能把文件夹复制到自己的子目录")
+        parent_path = ""
         if parent_id:
             parent = self.get_item(parent_id)
             if parent is None or parent["project_id"] != project_id:
@@ -513,8 +582,23 @@ class ResearchStore:
                 raise ValueError("parent is not a folder")
             parent_path = str(parent["path"] or "")
 
+        workspace = self.workspace(project_id)
+        # 标题可能不含扩展名（如笔记记录），复制时补上原文件后缀，
+        # 否则新文件的路径会丢掉扩展名，预览时无法识别类型。
+        copy_title = str(item["title"])
+        if item["kind"] != "folder" and not Path(copy_title).suffix:
+            suffix = Path(str(item.get("path") or "")).suffix
+            if suffix:
+                copy_title = f"{copy_title}{suffix}"
         with self._db() as conn:
-            title = self._unique_title(conn, project_id, parent_id, str(item["title"]))
+            title = self._unique_title(
+                conn,
+                project_id,
+                parent_id,
+                copy_title,
+                workspace=workspace,
+                parent_path=parent_path,
+            )
             children = [
                 dict(row)
                 for row in conn.execute(
@@ -522,7 +606,6 @@ class ResearchStore:
                 ).fetchall()
             ]
 
-        workspace = self.workspace(project_id)
         new_item = self.add_item(
             project_id,
             str(item["kind"]),
@@ -682,6 +765,32 @@ class ResearchStore:
         assert row is not None
         return row
 
+    def revise_artifact(
+        self,
+        artifact_id: str,
+        *,
+        path: str,
+        session_id: str | None,
+        kind: str | None = None,
+    ) -> dict[str, Any] | None:
+        """同名产物再次保存时复用同一条记录，版本号 +1，而不是新增一条。"""
+        with self._db() as conn:
+            conn.execute(
+                """
+                UPDATE artifacts
+                SET path = ?, session_id = ?, kind = COALESCE(?, kind),
+                    version = version + 1, created_at = ?
+                WHERE id = ?
+                """,
+                (path, session_id, kind, _now(), artifact_id),
+            )
+            conn.execute(
+                "UPDATE projects SET updated_at = ? WHERE id = "
+                "(SELECT project_id FROM artifacts WHERE id = ?)",
+                (_now(), artifact_id),
+            )
+        return self.get_artifact(artifact_id)
+
     def list_artifacts(
         self, project_id: str, session_id: str | None = None
     ) -> list[dict[str, Any]]:
@@ -733,6 +842,20 @@ class ResearchStore:
                 "SELECT agent_seq FROM sessions WHERE id = ?", (session_id,)
             ).fetchone()
         return int(row["agent_seq"] or 0) if row else 0
+
+    def latest_seq(self, session_id: str) -> int:
+        """当前已落库的最大 seq；用于判断 agent 事件是不是这一轮的新事件。"""
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) AS seq FROM session_events WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return int(row["seq"] or 0) if row else 0
+
+    def list_all_sessions(self) -> list[dict[str, Any]]:
+        with self._db() as conn:
+            rows = conn.execute("SELECT * FROM sessions").fetchall()
+        return [dict(row) for row in rows]
 
     def append_event(
         self, session_id: str, event: dict[str, Any]

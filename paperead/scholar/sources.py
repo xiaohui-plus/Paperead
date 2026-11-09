@@ -248,6 +248,20 @@ def parse_openalex_works(payload: dict[str, Any] | None) -> list[Paper]:
 
 # ── Semantic Scholar ────────────────────────────────────────
 
+ARXIV_DOI_RE = re.compile(r"^10\.48550/arxiv\.(.+)$", re.I)
+
+
+def _arxiv_pdf_from_ids(external: dict[str, Any], doi: str | None) -> str | None:
+    """S2 经常不给 arXiv 预印本的 openAccessPdf，但题录里有 arXiv 号可推 PDF。"""
+    arxiv_id = str(external.get("ArXiv") or "").strip()
+    if not arxiv_id and doi:
+        match = ARXIV_DOI_RE.match(doi)
+        if match:
+            arxiv_id = match.group(1).strip()
+    if not arxiv_id:
+        return None
+    return f"https://arxiv.org/pdf/{arxiv_id}"
+
 
 def parse_semantic_scholar(payload: dict[str, Any] | None) -> list[Paper]:
     results = (payload or {}).get("data") or []
@@ -261,6 +275,7 @@ def parse_semantic_scholar(payload: dict[str, Any] | None) -> list[Paper]:
         external = item.get("externalIds") or {}
         fields = [f for f in (item.get("fieldsOfStudy") or []) if f]
         open_access = item.get("openAccessPdf") or {}
+        doi = strip_doi(external.get("DOI"))
         papers.append(
             Paper(
                 id=f"semanticscholar:{paper_id}",
@@ -278,10 +293,10 @@ def parse_semantic_scholar(payload: dict[str, Any] | None) -> list[Paper]:
                 abstract=strip_latex_pointers((item.get("abstract") or "").strip()),
                 url=item.get("url")
                 or f"https://www.semanticscholar.org/paper/{paper_id}",
-                pdf_url=open_access.get("url") or None,
+                pdf_url=open_access.get("url") or _arxiv_pdf_from_ids(external, doi),
                 html_url=None,
                 published_at=item.get("publicationDate"),
-                doi=strip_doi(external.get("DOI")),
+                doi=doi,
                 citations=item.get("citationCount"),
             )
         )

@@ -25,9 +25,24 @@ export interface Block {
   table_html: string
   /** 公式的 LaTeX（识别成功后由后端写入；为空时前端回落到 image_path） */
   latex?: string
+  /** 公式编号（PDF 里印出来的 (3) / (2.1)） */
+  eq_number?: string
   caption: string
   translatable: boolean
   bbox: number[]
+}
+
+/** 点击图表/公式旁的小圆圈后，加入左侧问答「附录」的条目。 */
+export interface ReaderContextItem {
+  /** 与 blockId 相同，用于去重 */
+  id: string
+  blockId: string
+  kind: 'equation' | 'figure' | 'table'
+  label: string
+  page: number
+  caption?: string
+  latex?: string
+  imageUrl?: string
 }
 
 export interface Paper {
@@ -42,6 +57,10 @@ export interface Paper {
   page_sizes?: [number, number][]
   columns: number
   glossary: Record<string, string>
+  /** 译文目标语言代码（zh-Hans / ja / fr…）；空表示中文 */
+  translation_lang?: string
+  /** 上次阅读位置，用于打开时回到原处 */
+  progress?: { pct: number; block_id: string; page: number }
   blocks: Block[]
 }
 

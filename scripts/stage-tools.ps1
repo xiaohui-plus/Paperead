@@ -1,40 +1,45 @@
-# 把研究/综述写作需要的外部工具放进安装包资源目录。
-# 目前只带 pandoc：DOCX 导出、Markdown→LaTeX 都靠它，用户机器不必再单独安装。
-# 下载产物落在 .tmp\tools 做缓存，可重复执行。
-# 3.x 的 pandoc.exe 有 220MB+，装进安装包会顶破 Gitee 100MB 附件上限；
-# 2.19 已经支持导出用到的 --natbib / task_lists / pipe_tables，体积只有一半。
+# 准备研究/综述写作需要的外部工具（目前只有 pandoc），供两处使用：
+# - 便携版：build-portable.ps1 会把 .tmp\tools\pandoc.exe 放进 resources\tools，
+#   便携包因此完全离线；
+# - 安装包：不再内置 pandoc（116MB 会顶破 Gitee 100MB 附件上限），
+#   改为首次启动自动下载，所以安装包只带走这里产出的 release\pandoc-*.zip 作为下载源。
+# 3.x 的 pandoc.exe 有 220MB+；2.19 已经支持导出用到的 --natbib / task_lists / pipe_tables。
 param(
     [string]$PandocVersion = "2.19.2"
 )
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
-$tools = Join-Path $root "src-tauri\resources\tools"
-$pandocDir = Join-Path $tools "pandoc"
 $cache = Join-Path $root ".tmp\tools"
-New-Item -ItemType Directory -Force $pandocDir | Out-Null
+$release = Join-Path $root "release"
 New-Item -ItemType Directory -Force $cache | Out-Null
+New-Item -ItemType Directory -Force $release | Out-Null
 
-$target = Join-Path $pandocDir "pandoc.exe"
-if (-not (Test-Path $target)) {
+$asset = "pandoc-$PandocVersion-windows-x86_64.zip"
+$zip = Join-Path $cache $asset
+$target = Join-Path $cache "pandoc.exe"
+
+if (-not (Test-Path $zip)) {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $zip = Join-Path $cache "pandoc-$PandocVersion-windows-x86_64.zip"
-    if (-not (Test-Path $zip)) {
-        $url = "https://github.com/jgm/pandoc/releases/download/$PandocVersion/pandoc-$PandocVersion-windows-x86_64.zip"
-        Write-Host "DOWNLOAD $url"
-        Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
-    }
+    $url = "https://github.com/jgm/pandoc/releases/download/$PandocVersion/$asset"
+    Write-Host "DOWNLOAD $url"
+    Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+}
+
+if (-not (Test-Path $target)) {
     $extract = Join-Path $cache "pandoc-$PandocVersion"
     Remove-Item -Recurse -Force $extract -ErrorAction SilentlyContinue
     Expand-Archive -Path $zip -DestinationPath $extract -Force
     $exe = Get-ChildItem $extract -Recurse -Filter "pandoc.exe" | Select-Object -First 1
     if (-not $exe) { throw "压缩包里没有 pandoc.exe" }
     Copy-Item $exe.FullName $target -Force
-    Get-ChildItem $exe.Directory -Filter "*.dll" -ErrorAction SilentlyContinue |
-        Copy-Item -Destination $pandocDir -Force
 }
 
+# 安装包首次启动时按这个文件名下载，文件名和 sha256 都写死在 server/research/pandoc_setup.py。
+$publish = Join-Path $release $asset
+if (-not (Test-Path $publish)) { Copy-Item $zip $publish -Force }
+
 $version = & $target --version | Select-Object -First 1
-$size = [math]::Round((Get-ChildItem $pandocDir -Recurse -File | Measure-Object Length -Sum).Sum / 1MB, 1)
-Write-Host "STAGED tools: $pandocDir ($size MB, $version)"
+$mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
+Write-Host "STAGED pandoc: $target ($version, 下载源 $publish, $mb MB)"
 exit 0

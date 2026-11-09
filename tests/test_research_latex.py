@@ -94,6 +94,26 @@ def test_chinese_markdown_uses_ctexart():
 
 
 @pytest.mark.skipif(not HAS_PANDOC, reason="需要 pandoc")
+def test_chinese_quotes_and_layout_are_cleaned():
+    """中文引号要输出成“”，正文不留内部 paperId 与章节自动编号。"""
+    tex, style, error = build_tex(
+        '# 综述\n\n所谓"证据不足"并非"无效"（Li 2026, p_5c0ab2865c69, p1）。\n',
+        bib_name="references",
+    )
+
+    assert error == ""
+    assert style == "ctexart"
+    # pandoc 会把引号写成 ``x''，中文语境要还原成“”。
+    assert "“证据不足”" in tex
+    assert "``证据不足''" not in tex
+    assert "p_" not in tex
+    assert "\\setcounter{secnumdepth}{0}" in tex
+    assert "\\pagestyle{plain}" in tex
+    # 参考文献单独起页。
+    assert "\\clearpage" in tex
+
+
+@pytest.mark.skipif(not HAS_PANDOC, reason="需要 pandoc")
 def test_export_latex_writes_tex_file(workspace):
     client, store, project, session = workspace
 

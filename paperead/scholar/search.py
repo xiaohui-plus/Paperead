@@ -88,7 +88,7 @@ def unavailable_sources() -> dict[str, str]:
     """当前配置下不可用的数据源及原因，供前端置灰。"""
     disabled: dict[str, str] = {}
     if not core_api_key():
-        disabled["core"] = "CORE 检索需要配置 PAPEREAD_CORE_API_KEY。"
+        disabled["core"] = "CORE 需要 API Key：设置 → 文献检索里填写后即可使用。"
     return disabled
 
 
@@ -220,7 +220,7 @@ async def _search_semantic_scholar(data: SearchInput) -> SearchResult:
 
 async def _search_core(data: SearchInput) -> SearchResult:
     if not core_api_key():
-        raise FriendlyError("CORE 检索需要先配置 PAPEREAD_CORE_API_KEY。", False)
+        raise FriendlyError("CORE 检索需要先配置 API Key：设置 → 文献检索。", False)
     url = core_url(
         data.q,
         field=data.field,

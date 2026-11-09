@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { relativeTime, researchApi, type SessionSummary } from '../lib/researchApi'
+import { ErrorBoundary } from '../components/ErrorBoundary'
+import { relativeTime, researchApi, type ProjectFile, type SessionSummary } from '../lib/researchApi'
 import { EMPTY_CHAT, type AgentEvent, type ChatState } from '../lib/researchTypes'
 import { addLocalMessage, applyEvents } from '../lib/researchReducer'
 import { streamSessionEvents, type StreamState } from '../lib/researchStream'
@@ -12,6 +13,8 @@ interface Props {
   onInitialTextConsumed: () => void
   /** 把标题/运行状态同步回左侧会话列表。 */
   onMeta: (patch: { title?: string; running?: boolean }) => void
+  /** 输入框上传的附件，交给项目页刷新文件树。 */
+  onFilesUploaded?: (files: ProjectFile[]) => void
 }
 
 const FLUSH_MS = 40
@@ -21,6 +24,7 @@ export function SessionView({
   initialText,
   onInitialTextConsumed,
   onMeta,
+  onFilesUploaded,
 }: Props) {
   const [chat, setChat] = useState<ChatState>(EMPTY_CHAT)
   const [streamState, setStreamState] = useState<StreamState>('connecting')
@@ -164,10 +168,18 @@ export function SessionView({
         </p>
       )}
 
-      <Transcript chat={chat} now={now} />
+      <ErrorBoundary
+        key={session.id}
+        title="这段会话渲染失败"
+        hint="历史消息仍保存在本地。可以重试，或切换到其他会话后再回来。"
+      >
+        <Transcript chat={chat} now={now} />
+      </ErrorBoundary>
 
       <Composer
         running={chat.running}
+        projectId={session.projectId}
+        onUploaded={(file) => onFilesUploaded?.([file])}
         hint={
           reconnecting && chat.messages.length === 0
             ? '正在连接研究 agent…'

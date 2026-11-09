@@ -30,7 +30,6 @@ export function ScholarSearchBar({
   translatedQuery,
   disabledSources,
 }: Props) {
-  const disabledHints = Object.values(disabledSources).filter(Boolean)
   const placeholder =
     params.source === 'pubmed' || params.source === 'europepmc'
       ? '例如：CRISPR cancer therapy'
@@ -41,9 +40,6 @@ export function ScholarSearchBar({
       <header className="library-head scholar-head">
         <div>
           <h1>文献检索</h1>
-          <p className="scholar-sub">
-            arXiv · PubMed · OpenAlex · Europe PMC · Semantic Scholar · CORE 实时检索；中文会自动译成英文再检索
-          </p>
         </div>
         <button
           type="button"
@@ -58,14 +54,14 @@ export function ScholarSearchBar({
       <div className="scholar-sources" role="tablist" aria-label="数据源">
         {SOURCE_META.map((s) => {
           const disabledReason = disabledSources[s.k]
-          return (
+          const tab = (
             <button
-              key={s.k}
               role="tab"
               aria-selected={params.source === s.k}
               data-active={params.source === s.k}
               disabled={!!disabledReason}
-              title={disabledReason || s.d}
+              aria-label={disabledReason || s.l}
+              title={disabledReason ? undefined : s.d}
               onClick={() =>
                 onChange({
                   source: s.k,
@@ -80,12 +76,23 @@ export function ScholarSearchBar({
               {s.l}
             </button>
           )
+          // 禁用按钮在部分浏览器里不触发 hover，用外层 span 承载气泡提示
+          return disabledReason ? (
+            <span
+              key={s.k}
+              className="scholar-source-off"
+              data-tip={disabledReason}
+              title={disabledReason}
+            >
+              {tab}
+            </span>
+          ) : (
+            <span key={s.k} className="scholar-source">
+              {tab}
+            </span>
+          )
         })}
       </div>
-
-      {disabledHints.length > 0 && (
-        <p className="scholar-hint">{disabledHints.join(' ')}</p>
-      )}
 
       <form
         className="scholar-search"
@@ -97,6 +104,7 @@ export function ScholarSearchBar({
         <IconSearch />
         <input
           value={input}
+          data-tour="search-input"
           onChange={(e) => onInput(e.target.value)}
           placeholder={placeholder}
           aria-label="检索词"

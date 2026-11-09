@@ -1,5 +1,7 @@
 /** 文献库 API 客户端。后端没启动时自动回落到内置示例。 */
 
+import { mediaUrl } from './mobile'
+
 export type PaperStatus = 'uploaded' | 'parsing' | 'ready' | 'failed'
 
 export interface PaperRow {
@@ -17,6 +19,12 @@ export interface PaperRow {
   thumb_url: string | null
   file_url: string
   folder_id?: string | null
+  /** 读到哪里：百分比 0–100、块 id、页码；没读过时为空 */
+  read_pct?: number
+  read_block?: string
+  read_page?: number
+  read_at?: number
+  annotation_count?: number
 }
 
 export interface Folder {
@@ -41,7 +49,11 @@ async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
 
 export async function listPapers(): Promise<PaperRow[]> {
   const data = await jsonFetch<{ papers: PaperRow[] }>('/api/papers')
-  return data.papers
+  return data.papers.map((paper) => ({
+    ...paper,
+    thumb_url: paper.thumb_url ? mediaUrl(paper.thumb_url) : null,
+    file_url: mediaUrl(paper.file_url),
+  }))
 }
 
 export async function listFolders(): Promise<Folder[]> {
@@ -141,13 +153,17 @@ async function readSSE<T>(res: Response, onEvent: (event: T) => void): Promise<v
  * 首段通常 2–3 秒出现，不用等整页翻完。
  */
 export interface TranslateEvent {
-  type: 'start' | 'block' | 'done' | 'error'
+  type: 'start' | 'block' | 'done' | 'error' | 'reset' | 'highlights'
   block?: Record<string, unknown>
   page?: number
   total?: number
   translated?: number
   pages?: number[] | null
   message?: string
+  /** reset 事件带上新的目标语言 */
+  target_lang?: string
+  /** highlights 事件带上这一页自动提取的研究重点 */
+  highlights?: ReadingHighlight[]
 }
 
 export async function translateStream(
@@ -156,11 +172,18 @@ export async function translateStream(
   pages: number[],
   onEvent: (e: TranslateEvent) => void,
   signal?: AbortSignal,
+  targetLang = 'zh-Hans',
+  autoHighlights = true,
 ): Promise<void> {
   const res = await fetch(`/api/papers/${id}/translate/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ config, pages }),
+    body: JSON.stringify({
+      config,
+      pages,
+      target_lang: targetLang,
+      auto_highlights: autoHighlights,
+    }),
     signal,
   })
   if (!res.ok) {
@@ -240,6 +263,23 @@ export async function importZotero(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ keys }),
+  })
+}
+
+export interface ZoteroSyncResult {
+  imported: number
+  skipped: number
+  scanned: number
+  errors: string[]
+  papers: PaperRow[]
+}
+
+/** 一键增量同步：把分类（或全部）里所有带 PDF 的条目导入，已在库中的自动跳过。 */
+export async function syncZotero(collection = ''): Promise<ZoteroSyncResult> {
+  return jsonFetch('/api/zotero/sync', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ collection }),
   })
 }
 
@@ -372,6 +412,54 @@ export interface AskStreamEvent {
   message?: string
 }
 
+/** 问答附件：上传到当前论文的附件目录，随问题一起发送。 */
+export interface PaperAttachment {
+  name: string
+  size: number
+  suffix: string
+  url: string
+  createdAt?: number
+  /** 已抽取的文本字符数；0 表示只能按文件名参考（图片/扫描件等） */
+  textChars?: number
+}
+
+export async function listPaperAttachments(
+  id: string,
+): Promise<PaperAttachment[]> {
+  const res = await fetch(`/api/papers/${id}/attachments`)
+  if (!res.ok) throw new Error(`读取附件失败（HTTP ${res.status}）`)
+  const data = (await res.json()) as { items?: PaperAttachment[] }
+  return (data.items ?? []).map((item) => ({ ...item, url: mediaUrl(item.url) }))
+}
+
+export async function deletePaperAttachment(
+  id: string,
+  name: string,
+): Promise<void> {
+  const res = await fetch(
+    `/api/papers/${id}/attachments/${encodeURIComponent(name)}`,
+    { method: 'DELETE' },
+  )
+  if (!res.ok) throw new Error(`删除附件失败（HTTP ${res.status}）`)
+}
+
+export async function uploadPaperAttachment(
+  id: string,
+  file: File,
+): Promise<PaperAttachment> {
+  const body = new FormData()
+  body.append('file', file)
+  const res = await fetch(`/api/papers/${id}/attachments`, {
+    method: 'POST',
+    body,
+  })
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}))
+    throw new Error((data as any).detail || `上传失败（HTTP ${res.status}）`)
+  }
+  return res.json()
+}
+
 /**
  * 流式问答：`status`（检索中）→ `sources`（出处）→ `delta`×N → `done` / `error`。
  * 出错时已经收到的增量仍然有效，调用方保留即可。
@@ -384,11 +472,20 @@ export async function askPaperStream(
   onEvent: (event: AskStreamEvent) => void,
   clientId?: string,
   signal?: AbortSignal,
+  attachments: string[] = [],
+  blockIds: string[] = [],
 ): Promise<void> {
   const res = await fetch(`/api/papers/${id}/ask/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ config, question, web, ...(clientId ? { client_id: clientId } : {}) }),
+    body: JSON.stringify({
+      config,
+      question,
+      web,
+      attachments,
+      block_ids: blockIds,
+      ...(clientId ? { client_id: clientId } : {}),
+    }),
     signal,
   })
   if (res.status === 404) {
@@ -482,6 +579,30 @@ export async function makeLineage(
   })
 }
 
+/**
+ * 后端同一篇论文只允许一个生成任务，重复请求会返回“正在生成中”。
+ * 这时不要报错，轮询缓存接口等它落盘；超时返回 null。
+ */
+export async function waitForGenerated<T>(
+  load: () => Promise<T | null>,
+  alive: () => boolean = () => true,
+  timeoutMs = 180000,
+  intervalMs = 3000,
+): Promise<T | null> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, intervalMs))
+    if (!alive()) return null
+    try {
+      const value = await load()
+      if (value) return value
+    } catch {
+      // 还没写盘，继续等
+    }
+  }
+  return null
+}
+
 // ── 追本溯源 ────────────────────────────────────────────
 
 export interface ProvenanceCitation {
@@ -500,6 +621,137 @@ export async function getProvenance(
     `/api/papers/${paperId}/block/${blockId}/provenance`,
   )
   return data.citations ?? []
+}
+
+// ── 高亮 / 笔记 ──────────────────────────────────────────
+
+export type AnnotationColor = 'yellow' | 'green' | 'blue' | 'pink'
+
+export interface Annotation {
+  id: string
+  block_id: string
+  source: 'en' | 'zh'
+  start: number
+  end: number
+  quote: string
+  color: AnnotationColor
+  note: string
+  created_at: number
+  updated_at: number
+}
+
+export async function listAnnotations(paperId: string): Promise<Annotation[]> {
+  const data = await jsonFetch<{ annotations: Annotation[] }>(
+    `/api/papers/${paperId}/annotations`,
+  )
+  return data.annotations ?? []
+}
+
+export async function addAnnotation(
+  paperId: string,
+  input: {
+    block_id: string
+    source: 'en' | 'zh'
+    start: number
+    end: number
+    quote: string
+    color: AnnotationColor
+    note?: string
+  },
+): Promise<Annotation> {
+  return jsonFetch(`/api/papers/${paperId}/annotations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+}
+
+export async function updateAnnotation(
+  paperId: string,
+  annotationId: string,
+  patch: { color?: AnnotationColor; note?: string; start?: number; end?: number },
+): Promise<Annotation> {
+  return jsonFetch(`/api/papers/${paperId}/annotations/${annotationId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+}
+
+export async function deleteAnnotation(
+  paperId: string,
+  annotationId: string,
+): Promise<void> {
+  await jsonFetch(`/api/papers/${paperId}/annotations/${annotationId}`, {
+    method: 'DELETE',
+  })
+}
+
+export interface ReadingProgress {
+  pct: number
+  block_id: string
+  page: number
+}
+
+/** 滚动停稳后低频上报阅读位置。 */
+export async function saveProgress(
+  paperId: string,
+  progress: ReadingProgress,
+): Promise<void> {
+  await jsonFetch(`/api/papers/${paperId}/progress`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(progress),
+  })
+}
+
+// ── 自动阅读重点 ────────────────────────────────────────
+
+export type HighlightCategory = 'objective' | 'method' | 'conclusion'
+
+export interface ReadingHighlight {
+  id: string
+  block_id: string
+  page: number
+  category: HighlightCategory
+  quote_en: string
+  quote_zh: string
+  start: number
+  end: number
+  zh_start: number
+  zh_end: number
+  created_at: number
+}
+
+export interface ReadingHighlightsData {
+  highlights: ReadingHighlight[]
+  pages: Record<string, { at: number; count: number }>
+}
+
+export async function listHighlights(
+  paperId: string,
+): Promise<ReadingHighlightsData> {
+  return jsonFetch(`/api/papers/${paperId}/highlights`)
+}
+
+/**
+ * 为已经翻译好的页补生成重点。服务端会跳过已处理过的页，
+ * 所以前端可以放心在滚动停稳后调用。
+ */
+export async function extractHighlights(
+  paperId: string,
+  config: LLMConfigPayload,
+  pages: number[],
+): Promise<{
+  highlights: ReadingHighlight[]
+  processed: number[]
+  pages?: Record<string, { at: number; count: number }>
+}> {
+  return jsonFetch(`/api/papers/${paperId}/highlights`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ config, pages }),
+  })
 }
 
 /** 后端不可用时的示例条目。 */

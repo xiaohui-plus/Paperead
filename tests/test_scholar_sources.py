@@ -264,6 +264,28 @@ def test_parse_semantic_scholar_skips_items_without_id():
     assert parse_semantic_scholar(None) == []
 
 
+def test_parse_semantic_scholar_derives_arxiv_pdf():
+    """S2 没给 openAccessPdf 时，用 externalIds.ArXiv 或 arXiv DOI 补 PDF 直链。"""
+    payload = {
+        "data": [
+            {
+                "paperId": "with-arxiv-id",
+                "title": "By arXiv id",
+                "externalIds": {"ArXiv": "2405.20139"},
+                "openAccessPdf": None,
+            },
+            {
+                "paperId": "with-arxiv-doi",
+                "title": "By arXiv DOI",
+                "externalIds": {"DOI": "10.48550/arXiv.2502.01113"},
+            },
+        ]
+    }
+    papers = parse_semantic_scholar(payload)
+    assert papers[0].pdf_url == "https://arxiv.org/pdf/2405.20139"
+    assert papers[1].pdf_url == "https://arxiv.org/pdf/2502.01113"
+
+
 CORE_PAYLOAD = {
     "totalHits": 42,
     "results": [

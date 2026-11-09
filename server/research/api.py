@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import json
 import mimetypes
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -18,11 +19,13 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from server.research import agent_client
+from server.research import agent_client, templates as review_templates
 from server.research.files import safe_name, save_bytes
 from server.research.store import ResearchStore
 
 MAX_UPLOAD = 200 * 1024 * 1024
+FOLDER_MAX_FILES = 1000
+FOLDER_MAX_BYTES = 500 * 1024 * 1024
 OFFLINE_NOTICE = {
     "type": "notice",
     "level": "warn",
@@ -41,6 +44,10 @@ class ProjectPatchIn(BaseModel):
     name: str | None = None
     description: str | None = None
     archived: bool | None = None
+
+
+class ReviewTemplateSelectIn(BaseModel):
+    id: str
 
 
 class FolderCreateIn(BaseModel):
@@ -74,6 +81,94 @@ class MessageIn(BaseModel):
 def _sse(event: dict[str, Any]) -> str:
     body = json.dumps(event, ensure_ascii=False)
     return f"id: {event['seq']}\ndata: {body}\n\n"
+
+
+# 一次轮次里可能长时间没有事件（例如跑 120s 的终端命令），空闲上限要留足。
+PUMP_IDLE_SECONDS = 900.0
+# turn.end 之后再收几秒，避免漏掉收尾的标题等事件。
+PUMP_TAIL_SECONDS = 3.0
+
+
+class _AgentEventPump:
+    """把 agent 事件持续落库，不依赖任何 SSE 连接是否还在。
+
+    之前只有 ``/events`` 的 SSE 在订阅时才写库：页面关掉、切走、白屏或断网，
+    agent 的回复就只留在内存里，刷新后只剩下用户自己的消息。改成独立后台
+    任务后，页面在不在线都能保存。
+    """
+
+    def __init__(self, store: ResearchStore) -> None:
+        self._store = store
+        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._errors: dict[str, str] = {}
+
+    def running(self, session_id: str) -> bool:
+        task = self._tasks.get(session_id)
+        return task is not None and not task.done()
+
+    def error(self, session_id: str) -> str | None:
+        return self._errors.get(session_id)
+
+    async def start(self, session_id: str, workspace: str) -> None:
+        if self.running(session_id):
+            return
+        self._errors.pop(session_id, None)
+        self._tasks[session_id] = asyncio.create_task(
+            self._run(session_id, workspace)
+        )
+
+    async def restart(self, session_id: str, workspace: str) -> None:
+        """新一轮消息：取消旧任务，从 agent 历史重新订阅，避免漏掉开头的事件。"""
+        task = self._tasks.pop(session_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        await self.start(session_id, workspace)
+
+    async def _run(self, session_id: str, workspace: str) -> None:
+        base = self._store.latest_seq(session_id)
+        stream = agent_client.stream_events(session_id, 0)
+        iterator = stream.__aiter__()
+        deadline: float | None = None
+        try:
+            await agent_client.ensure_session(session_id, workspace)
+            while True:
+                timeout = PUMP_IDLE_SECONDS
+                if deadline is not None:
+                    timeout = deadline - asyncio.get_running_loop().time()
+                    if timeout <= 0:
+                        break
+                try:
+                    raw = await asyncio.wait_for(iterator.__anext__(), timeout=timeout)
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    # 这里必须退出：wait_for 取消的是异步生成器，继续读会立刻结束。
+                    break
+                agent_seq = int(raw.get("seq") or 0)
+                event = (
+                    self._store.append_agent_event(session_id, agent_seq, raw)
+                    if agent_seq
+                    else self._store.append_event(session_id, raw)
+                )
+                if event["seq"] <= base:
+                    continue
+                if event.get("type") == "turn.end":
+                    deadline = (
+                        asyncio.get_running_loop().time() + PUMP_TAIL_SECONDS
+                    )
+        except asyncio.CancelledError:
+            raise
+        except agent_client.AgentUnavailable as error:
+            self._errors[session_id] = str(error)
+        except Exception as error:  # noqa: BLE001 - 后台任务不能把异常抛给事件循环
+            self._errors[session_id] = str(error)
+        finally:
+            if self._tasks.get(session_id) is asyncio.current_task():
+                self._tasks.pop(session_id, None)
+            with contextlib.suppress(Exception):
+                await stream.aclose()
 
 
 def _project(row: dict[str, Any]) -> dict[str, Any]:
@@ -166,13 +261,146 @@ def build_router(
     store: ResearchStore,
     library: Any | None = None,
     parse_paper: Any | None = None,
+    data_dir: Path | None = None,
 ) -> APIRouter:
     """研究项目 API。
 
     ``library`` 用于两件事：项目论文的 PDF 从文献库读取；右键“加入文献库”。
     ``parse_paper`` 是“入库后后台解析”的回调（由 main 注入）。
+    ``data_dir`` 用来定位应用级设置（综述模板），缺省时从 ``research`` 目录回退。
     """
     router = APIRouter(prefix="/api/research", tags=["research"])
+    pump = _AgentEventPump(store)
+
+    def reconcile_sessions() -> None:
+        """进程重启后把卡在 running 的会话标回 idle，避免一直显示在运行。"""
+        for session in store.list_all_sessions():
+            if session.get("status") == "running":
+                store.update_session(str(session["id"]), status="idle")
+
+    router.add_event_handler("startup", reconcile_sessions)
+
+    # ── 综述模板（应用级设置）────────────────────────────
+
+    review_hint = re.compile(r"survey|review|综述|overview|tutorial", re.IGNORECASE)
+
+    def review_root() -> Path:
+        if data_dir is not None:
+            return review_templates.templates_root(data_dir)
+        return review_templates.root_for(Path(store.root))
+
+    def library_candidates() -> list[dict[str, Any]]:
+        if library is None:
+            return []
+        try:
+            rows = library.list()
+        except Exception:
+            return []
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            title = str(row.get("title") or "").strip()
+            if not title:
+                continue
+            items.append(
+                {
+                    "id": row["id"],
+                    "title": title,
+                    "authors": str(row.get("authors") or ""),
+                    "year": row.get("year") or "",
+                    "pages": int(row.get("pages") or 0),
+                    "status": str(row.get("status") or ""),
+                    "isReview": bool(review_hint.search(title)),
+                }
+            )
+        return items
+
+    def templates_payload() -> dict[str, Any]:
+        root = review_root()
+        selected = review_templates.read_choice(root) or "default"
+        items = review_templates.list_options(root)
+        detail = review_templates.describe(selected, root, library)
+        if selected.startswith("paper:") and detail.get("name"):
+            items.append(
+                {
+                    "id": selected,
+                    "name": detail["name"],
+                    "source": "paper",
+                    "description": "来自文献库的综述结构",
+                    "sections": detail.get("sections") or [],
+                }
+            )
+        return {
+            "selected": selected,
+            "templates": items,
+            "selectedDetail": detail,
+            "library": library_candidates(),
+        }
+
+    def ensure_choice(root: Path, value: str) -> str:
+        value = (value or "").strip() or "default"
+        if value in {"default", "auto"} or value in review_templates.BUILTIN_TEMPLATES:
+            return value
+        if value.startswith("upload:"):
+            path = root / review_templates.UPLOADS_DIR / safe_name(value[7:])
+            if path.is_file():
+                return value
+            raise HTTPException(status_code=404, detail="模板文件不存在")
+        if value.startswith("paper:"):
+            paper_id = value[6:]
+            if library is not None and library.get(paper_id) is not None:
+                return value
+            raise HTTPException(status_code=404, detail="文献库里没有这篇论文")
+        raise HTTPException(status_code=400, detail="不认识的模板 id")
+
+    @router.get("/review-templates")
+    def get_review_templates() -> dict[str, Any]:
+        """设置页：系统默认 / 内置 / 已上传 / 文献库候选与当前选择。"""
+        return templates_payload()
+
+    @router.post("/review-templates/select")
+    def select_review_template(body: ReviewTemplateSelectIn) -> dict[str, Any]:
+        root = review_root()
+        value = ensure_choice(root, body.id)
+        review_templates.write_choice(root, value)
+        return templates_payload()
+
+    @router.post("/review-templates/upload")
+    async def upload_review_template(file: UploadFile = File(...)) -> dict[str, Any]:
+        root = review_root()
+        data = await file.read()
+        try:
+            item = review_templates.save_upload(root, file.filename or "", data)
+        except review_templates.TemplateError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        review_templates.write_choice(root, str(item["id"]))
+        payload = templates_payload()
+        payload["uploaded"] = item
+        return payload
+
+    @router.delete("/review-templates/uploads/{name}")
+    def delete_review_template(name: str) -> dict[str, Any]:
+        if not review_templates.delete_upload(review_root(), name):
+            raise HTTPException(status_code=404, detail="模板文件不存在")
+        return templates_payload()
+
+    @router.get("/review-templates/paper/{paper_id}")
+    def preview_review_template(paper_id: str, refresh: bool = Query(default=False)) -> dict[str, Any]:
+        """预览文献库论文的章节骨架（首次会解析 PDF，之后读缓存）。"""
+        root = review_root()
+        sections, name, error = review_templates.paper_template(
+            root, library, paper_id, refresh=refresh
+        )
+        return {
+            "id": f"paper:{paper_id}",
+            "name": name,
+            "source": "paper",
+            "sections": sections,
+            "guide": review_templates.paper_guide(
+                root, library, paper_id, refresh=refresh
+            ),
+            "error": error,
+        }
+
 
     @router.get("/health")
     def health() -> dict[str, Any]:
@@ -218,6 +446,24 @@ def build_router(
         if row is None:
             raise HTTPException(status_code=404, detail="project not found")
         return _project(row)
+
+    @router.delete("/projects/{project_id}/purge")
+    async def purge_project(project_id: str) -> dict[str, Any]:
+        """永久删除项目及其全部文件、会话和产物，无法恢复。"""
+        project = store.get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        # 先让 agent 停掉这个项目的轮次，避免删除后还在往已删目录里写
+        for session in store.list_sessions(project_id):
+            with contextlib.suppress(Exception):
+                await agent_client.cancel(str(session["id"]))
+        # 项目范围内入库的论文也要一起删；全局文献库条目不受影响。
+        if library is not None:
+            with contextlib.suppress(Exception):
+                for paper in library.list_project(project_id):
+                    library.remove(paper["id"])
+        store.delete_project(project_id)
+        return {"ok": True}
 
     @router.get("/projects/{project_id}/files")
     def list_files(project_id: str) -> dict[str, Any]:
@@ -282,6 +528,121 @@ def build_router(
         )
         return _item(row)
 
+    @router.post("/projects/{project_id}/folder", status_code=201)
+    async def upload_folder(
+        project_id: str,
+        files: list[UploadFile] = File(...),
+        paths: str = Form(...),
+        parent_id: str | None = Form(default=None, alias="parentId"),
+    ) -> dict[str, Any]:
+        """导入用户自己的文件夹：保留子目录结构，逐个落盘。"""
+        project = store.get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        if project.get("archived"):
+            raise HTTPException(status_code=409, detail="project archived")
+        try:
+            raw_paths = json.loads(paths)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail="invalid paths") from error
+        if not isinstance(raw_paths, list) or len(raw_paths) != len(files):
+            raise HTTPException(status_code=400, detail="paths 与文件数量不一致")
+        if len(files) > FOLDER_MAX_FILES:
+            raise HTTPException(status_code=413, detail="文件夹里的文件太多")
+
+        base_id = None
+        base_path = ""
+        if parent_id:
+            parent = store.get_item(parent_id)
+            if parent is None or parent["project_id"] != project_id:
+                raise HTTPException(status_code=404, detail="parent folder not found")
+            if parent["kind"] != "folder":
+                raise HTTPException(status_code=400, detail="parent is not a folder")
+            base_id = parent_id
+            base_path = str(parent["path"] or "")
+
+        items = store.list_items(project_id)
+        folders = {
+            (row.get("parent_id"), row["title"]): row
+            for row in items
+            if row["kind"] == "folder"
+        }
+
+        def ensure_folder(
+            parent: str | None, parent_path: str, name: str
+        ) -> dict[str, Any]:
+            key = (parent, name)
+            existing = folders.get(key)
+            if existing:
+                return existing
+            relative = f"{parent_path}/{name}".strip("/")
+            row = store.add_item(
+                project_id, "folder", name, parent_id=parent, path=relative
+            )
+            items.append(row)
+            folders[key] = row
+            return row
+
+        workspace = store.workspace(project_id)
+        added: list[dict[str, Any]] = []
+        errors: list[str] = []
+        total = 0
+        for upload, raw_path in zip(files, raw_paths):
+            parts: list[str] = []
+            for segment in str(raw_path or "").replace("\\", "/").split("/"):
+                segment = segment.strip()
+                if segment in ("", ".", "..", "__MACOSX"):
+                    continue
+                if segment in (".DS_Store", "Thumbs.db", "desktop.ini"):
+                    continue
+                cleaned = safe_name(segment, "")
+                if cleaned:
+                    parts.append(cleaned)
+            if not parts:
+                continue
+            data = await upload.read()
+            if not data:
+                continue
+            if len(data) > MAX_UPLOAD:
+                errors.append(f"{parts[-1]}: 文件过大")
+                continue
+            total += len(data)
+            if total > FOLDER_MAX_BYTES or len(added) >= FOLDER_MAX_FILES:
+                errors.append("文件夹过大，已停止导入")
+                break
+            parent = base_id
+            parent_path = base_path
+            for name in parts[:-1]:
+                folder = ensure_folder(parent, parent_path, name)
+                parent = folder["id"]
+                parent_path = str(folder["path"] or "")
+            name = parts[-1]
+            try:
+                relative, size = save_bytes(workspace, name, data, parent_path)
+                actual = Path(relative).name
+                mime = mimetypes.guess_type(actual)[0] or (
+                    upload.content_type or ""
+                )
+                kind = "paper" if actual.lower().endswith(".pdf") else "file"
+                row = store.add_file(
+                    project_id,
+                    actual,
+                    relative,
+                    parent_id=parent,
+                    mime=mime,
+                    size=size,
+                    kind=kind,
+                )
+                added.append(row)
+            except Exception as error:  # noqa: BLE001 - 单个文件失败不影响整批
+                errors.append(f"{name}: {error}"[:160])
+
+        return {
+            "items": [_item(row) for row in store.list_items(project_id)],
+            "added": len(added),
+            "errors": errors[:10],
+        }
+
     @router.get("/projects/{project_id}/files/{item_id}/content")
     def file_content(project_id: str, item_id: str):
         item = store.get_item(item_id)
@@ -339,13 +700,22 @@ def build_router(
             raise HTTPException(status_code=404, detail="item not found")
         paper_ids = _subtree_paper_ids(store, project_id, item_id)
         store.remove_item(item_id)
+        remaining = store.list_items(project_id)
+        # 复制的论文条目共用同一个 refId，只有最后一条被删时才清理文献库。
+        still_used = {
+            str(row.get("ref_id") or "")
+            for row in remaining
+            if row.get("kind") == "paper"
+        }
         if library is not None:
             for paper_id in paper_ids:
+                if paper_id in still_used:
+                    continue
                 row = library.get(paper_id)
                 # 只删除属于这个项目的论文；已在全局文献库里的不动。
                 if row is not None and row.get("project_id") == project_id:
                     library.remove(paper_id)
-        return {"items": [_item(row) for row in store.list_items(project_id)]}
+        return {"items": [_item(row) for row in remaining]}
 
     @router.post("/projects/{project_id}/items/{item_id}/to-library")
     def add_to_library(project_id: str, item_id: str) -> dict[str, Any]:
@@ -457,6 +827,8 @@ def build_router(
         cwd = _workspace(session)
         try:
             await agent_client.ensure_session(session_id, cwd)
+            # 订阅先于发送建立：即使页面立刻关掉，后台任务也会把回复落库。
+            await pump.restart(session_id, cwd)
             await agent_client.send_message(session_id, text, cwd)
         except agent_client.AgentUnavailable as error:
             store.append_event(
@@ -517,49 +889,22 @@ def build_router(
                 yield await replay_notice(str(error))
                 return
 
-            # agent 的 in-memory 序号会在进程重启后回到 1，所以每次都从头订阅，
-            # 由 (agent_seq, at) 去重；只有新事件才会得到新的 Python seq。
-            queue: asyncio.Queue[Any] = asyncio.Queue()
-
-            async def pump() -> None:
-                try:
-                    async for raw in agent_client.stream_events(session_id, 0):
-                        await queue.put(raw)
-                    await queue.put(None)
-                except agent_client.AgentUnavailable as error:
-                    await queue.put(error)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as error:  # noqa: BLE001 - 上游异常统一降级为提示
-                    await queue.put(agent_client.AgentUnavailable(str(error)))
-
-            task = asyncio.create_task(pump())
-            try:
-                while True:
-                    try:
-                        item = await asyncio.wait_for(queue.get(), timeout=15)
-                    except asyncio.TimeoutError:
-                        yield ": ping\n\n"
-                        continue
-                    if item is None:
-                        break
-                    if isinstance(item, agent_client.AgentUnavailable):
-                        yield await replay_notice(str(item), "error")
-                        break
-                    agent_seq = int(item.get("seq") or 0)
-                    event = (
-                        store.append_agent_event(session_id, agent_seq, item)
-                        if agent_seq
-                        else store.append_event(session_id, item)
-                    )
-                    if event["seq"] <= cursor:
-                        continue
+            # 事件落库交给后台任务：页面关掉、断网或白屏都不会丢回复。
+            # 这里只负责把库里的新事件推给当前页面，多个标签页也不会重复写。
+            await pump.start(session_id, workspace)
+            last_ping = time.monotonic()
+            while True:
+                await asyncio.sleep(0.35)
+                for event in store.list_events(session_id, cursor):
                     cursor = event["seq"]
                     yield _sse(event)
-            finally:
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
+                error = pump.error(session_id)
+                if error and not pump.running(session_id):
+                    yield await replay_notice(error, "error")
+                    return
+                if time.monotonic() - last_ping > 15:
+                    last_ping = time.monotonic()
+                    yield ": ping\n\n"
 
         return StreamingResponse(
             relay(),

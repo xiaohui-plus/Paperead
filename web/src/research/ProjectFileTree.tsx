@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import type { MouseEvent, ReactNode } from 'react'
+import type {
+  KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent,
+  ReactNode,
+} from 'react'
 import {
   IconChevron,
   IconClipboard,
@@ -26,11 +30,12 @@ interface Props {
   onFile: (file: ProjectFile) => void
   onRefresh?: () => void
   onUpload?: () => void
+  onUploadFolder?: () => void
   onCreateFolder?: () => void
-  onRename?: (item: ProjectFile, name: string) => void
+  onRename?: (item: ProjectFile, name: string) => void | Promise<void>
   onDelete?: (item: ProjectFile) => void
-  onMove?: (item: ProjectFile, parentId: string | null) => void
-  onCopy?: (item: ProjectFile, parentId: string | null) => void
+  onMove?: (item: ProjectFile, parentId: string | null) => void | Promise<void>
+  onCopy?: (item: ProjectFile, parentId: string | null) => void | Promise<void>
   onCopyPath?: (item: ProjectFile) => void
   onAddToLibrary?: (item: ProjectFile) => void
   selectedFiles?: string[]
@@ -38,7 +43,7 @@ interface Props {
   onDeleteSelected?: () => void
 }
 
-type Clipboard = { itemId: string; mode: 'cut' | 'copy' }
+type Clipboard = { ids: string[]; mode: 'cut' | 'copy' }
 
 function iconFor(item: ProjectFile) {
   if (item.kind === 'folder') return <IconFolder />
@@ -73,6 +78,7 @@ export function ProjectFileTree({
   onFile,
   onRefresh,
   onUpload,
+  onUploadFolder,
   onCreateFolder,
   onRename,
   onDelete,
@@ -96,6 +102,7 @@ export function ProjectFileTree({
   const autoExpanded = useRef<Set<string>>(new Set())
 
   const byId = new Map(items.map((item) => [item.id, item]))
+  const activeItem = activeFileId ? byId.get(activeFileId) : undefined
   const children = new Map<string | null, ProjectFile[]>()
   for (const item of items) {
     const key = item.parentId ?? null
@@ -185,23 +192,118 @@ export function ProjectFileTree({
     if (value && value !== item.name) onRename?.(item, value)
   }
 
-  const pasteInto = (target: ProjectFile | null) => {
+  /** 右键/快捷键作用的对象：点中已选项时用多选，否则只处理当前项。 */
+  const selectionFor = (item: ProjectFile): string[] => {
+    const selected = selectedFiles ?? []
+    return selected.includes(item.id) ? selected : [item.id]
+  }
+
+  /** 粘贴目标：当前文件夹，或当前文件所在的文件夹。 */
+  const currentParentId = (): string | null => {
+    const active = activeFileId
+      ? byId.get(activeFileId)
+      : activeFolderId
+        ? byId.get(activeFolderId)
+        : undefined
+    if (!active) return null
+    return active.kind === 'folder' ? active.id : active.parentId ?? null
+  }
+
+  /** 某一项允许粘贴到哪个文件夹；undefined 表示不允许。 */
+  const pasteTargetFor = (item: ProjectFile): string | null | undefined => {
+    if (item.kind === 'folder') {
+      return isReadOnly(item) ? undefined : item.id
+    }
+    const parentId = item.parentId ?? null
+    const parent = parentId ? byId.get(parentId) : undefined
+    if (parent && isReadOnly(parent)) return undefined
+    return parentId
+  }
+
+  const applyClipboard = (ids: string[], mode: 'cut' | 'copy') => {
+    const usable = ids
+      .map((id) => byId.get(id))
+      .filter((entry): entry is ProjectFile => Boolean(entry))
+      .filter((entry) => !isReadOnly(entry))
+    if (usable.length === 0) return
+    setClipboard({ ids: usable.map((entry) => entry.id), mode })
+  }
+
+  const copySelection = (item: ProjectFile, mode: 'cut' | 'copy') => {
+    applyClipboard(selectionFor(item), mode)
+  }
+
+  const pasteTo = async (parentId: string | null) => {
     if (!clipboard) return
-    const item = byId.get(clipboard.itemId)
-    if (!item) {
-      setClipboard(null)
+    const mode = clipboard.mode
+    const sources = clipboard.ids
+      .map((id) => byId.get(id))
+      .filter((entry): entry is ProjectFile => Boolean(entry))
+      // 不能把文件夹粘进它自己或它的子目录。
+      .filter(
+        (entry) =>
+          !parentId ||
+          (parentId !== entry.id && !isDescendantOf(parentId, entry.id)),
+      )
+    setMenu(null)
+    if (mode === 'cut') setClipboard(null)
+    if (sources.length === 0) return
+    if (parentId) {
+      setExpanded((prev) => new Set(prev).add(parentId))
+    }
+    for (const item of sources) {
+      if (mode === 'cut') await onMove?.(item, parentId)
+      else await onCopy?.(item, parentId)
+    }
+  }
+
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (renamingId) return
+    const mod = event.ctrlKey || event.metaKey
+    const key = event.key.toLowerCase()
+    const active = activeFileId
+      ? byId.get(activeFileId)
+      : activeFolderId
+        ? byId.get(activeFolderId)
+        : undefined
+    if (mod && (key === 'c' || key === 'x')) {
+      event.preventDefault()
+      const ids =
+        selectedFiles && selectedFiles.length > 0
+          ? selectedFiles
+          : active
+            ? [active.id]
+            : []
+      applyClipboard(ids, key === 'c' ? 'copy' : 'cut')
       return
     }
-    if (target && isReadOnly(target)) return
-    const parentId = target && target.kind === 'folder' ? target.id : null
-    if (parentId === item.id || (parentId && isDescendantOf(parentId, item.id))) return
-    if (clipboard.mode === 'cut') {
-      onMove?.(item, parentId)
-      setClipboard(null)
-    } else {
-      onCopy?.(item, parentId)
+    if (mod && key === 'v') {
+      if (!clipboard) return
+      event.preventDefault()
+      void pasteTo(currentParentId())
+      return
     }
-    setMenu(null)
+    if (event.key === 'F2' && active && !isReadOnly(active)) {
+      event.preventDefault()
+      startRename(active)
+      return
+    }
+    if (event.key === 'Delete' && active) {
+      const ids =
+        selectedFiles && selectedFiles.length > 0
+          ? selectedFiles
+          : [active.id]
+      if (ids.length > 1 && onDeleteSelected) {
+        event.preventDefault()
+        onDeleteSelected()
+        return
+      }
+      const target = byId.get(ids[0]) ?? active
+      if (!isReadOnly(target)) {
+        event.preventDefault()
+        onDelete?.(target)
+      }
+    }
   }
 
   const openMenu = (event: MouseEvent, item: ProjectFile) => {
@@ -211,7 +313,16 @@ export function ProjectFileTree({
   }
 
   const draggingItem = dragId ? byId.get(dragId) ?? null : null
-  const clipItem = clipboard ? byId.get(clipboard.itemId) ?? null : null
+  const clipItems = clipboard
+    ? clipboard.ids
+        .map((id) => byId.get(id))
+        .filter((entry): entry is ProjectFile => Boolean(entry))
+    : []
+  const clipLabel = clipItems[0]
+    ? clipItems.length > 1
+      ? `${clipItems[0].name} 等 ${clipItems.length} 项`
+      : clipItems[0].name
+    : ''
   const fileCount = items.reduce(
     (count, item) => (item.kind === 'folder' ? count : count + 1),
     0,
@@ -237,6 +348,7 @@ export function ProjectFileTree({
               isFolder ? item.id === activeFolderId : item.id === activeFileId
             }
             data-multi={!isFolder && (selectedFiles ?? []).includes(item.id)}
+            data-cut={clipboard?.mode === 'cut' && clipboard.ids.includes(item.id)}
             data-drag={dragId === item.id}
             data-drop={dropId === item.id}
             style={{ paddingLeft: 6 + depth * 14 }}
@@ -324,6 +436,22 @@ export function ProjectFileTree({
             ) : (
               <span className="project-tree-name">{item.name}</span>
             )}
+            {!renaming && (
+              <button
+                type="button"
+                className="project-tree-more"
+                title="更多操作：重命名、复制、剪切、粘贴、删除"
+                aria-label={`${item.name} 的更多操作`}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  const rect = event.currentTarget.getBoundingClientRect()
+                  setMenu({ item, x: rect.right - 4, y: rect.bottom + 2 })
+                }}
+                onKeyDown={(event) => event.stopPropagation()}
+              >
+                ⋯
+              </button>
+            )}
           </div>
           {isFolder && isOpen && renderLevel(item.id, depth + 1)}
         </div>
@@ -332,7 +460,27 @@ export function ProjectFileTree({
   }
 
   return (
-    <div className="project-tree">
+    <div
+      className="project-tree"
+      onKeyDown={onKeyDown}
+      onDragOver={(event) => {
+        if (!dragId || event.target !== event.currentTarget) return
+        event.preventDefault()
+        event.dataTransfer.dropEffect = 'move'
+        setDropId('__root__')
+      }}
+      onDragLeave={(event) => {
+        if (event.target !== event.currentTarget) return
+        setDropId((prev) => (prev === '__root__' ? null : prev))
+      }}
+      onDrop={(event) => {
+        if (event.target !== event.currentTarget || !draggingItem) return
+        event.preventDefault()
+        setDragId(null)
+        setDropId(null)
+        if (draggingItem.parentId) onMove?.(draggingItem, null)
+      }}
+    >
       <div className="project-tree-toolbar">
         {onCreateFolder && (
           <button type="button" title="新建文件夹" onClick={onCreateFolder}>
@@ -346,16 +494,26 @@ export function ProjectFileTree({
             <span>上传</span>
           </button>
         )}
+        {onUploadFolder && (
+          <button
+            type="button"
+            title="打开自己电脑上的文件夹，保留子目录导入项目"
+            onClick={onUploadFolder}
+          >
+            <IconFolder />
+            <span>打开文件夹</span>
+          </button>
+        )}
         {onRefresh && (
           <button type="button" title="刷新文件列表" onClick={onRefresh}>
             <IconRefresh />
           </button>
         )}
-        {clipItem && (
+        {clipboard && clipItems.length > 0 && (
           <button
             type="button"
-            title={`粘贴到根目录（${clipItem.name}）`}
-            onClick={() => pasteInto(null)}
+            title={`粘贴到当前文件夹（${clipLabel}）`}
+            onClick={() => void pasteTo(currentParentId())}
           >
             <IconClipboard />
             <span>粘贴</span>
@@ -372,6 +530,20 @@ export function ProjectFileTree({
             <span>删除({selectedFiles.length})</span>
           </button>
         )}
+        {(!selectedFiles || selectedFiles.length === 0) &&
+          activeItem &&
+          onDelete &&
+          !isReadOnly(activeItem) && (
+            <button
+              type="button"
+              className="is-danger"
+              title="删除当前文件"
+              onClick={() => onDelete(activeItem)}
+            >
+              <IconTrash />
+              <span>删除</span>
+            </button>
+          )}
         <em>
           {fileCount} 个文件
           {selectedFiles && selectedFiles.length > 0
@@ -435,40 +607,59 @@ export function ProjectFileTree({
               <button
                 type="button"
                 onClick={() => {
-                  setClipboard({ itemId: menu.item.id, mode: 'cut' })
+                  copySelection(menu.item, 'cut')
                   setMenu(null)
                 }}
               >
                 <IconScissors />
                 剪切
+                {selectionFor(menu.item).length > 1
+                  ? ` ${selectionFor(menu.item).length} 项`
+                  : ''}
               </button>
               <button
                 type="button"
                 onClick={() => {
-                  setClipboard({ itemId: menu.item.id, mode: 'copy' })
+                  copySelection(menu.item, 'copy')
                   setMenu(null)
                 }}
               >
                 <IconCopy />
                 复制
+                {selectionFor(menu.item).length > 1
+                  ? ` ${selectionFor(menu.item).length} 项`
+                  : ''}
               </button>
-              {menu.item.kind === 'folder' && clipItem && (
-                <button type="button" onClick={() => pasteInto(menu.item)}>
-                  <IconClipboard />
-                  粘贴
-                </button>
-              )}
+            </>
+          )}
+          {clipboard && pasteTargetFor(menu.item) !== undefined && (
+            <button
+              type="button"
+              onClick={() => void pasteTo(pasteTargetFor(menu.item) ?? null)}
+            >
+              <IconClipboard />
+              粘贴
+              {clipboard.ids.length > 1 ? ` ${clipboard.ids.length} 项` : ''}
+            </button>
+          )}
+          {!isReadOnly(menu.item) && (
+            <>
               <div className="project-tree-menu-sep" />
               <button
                 type="button"
                 className="is-danger"
                 onClick={() => {
-                  onDelete?.(menu.item)
+                  const ids = selectionFor(menu.item)
+                  if (ids.length > 1 && onDeleteSelected) onDeleteSelected()
+                  else onDelete?.(menu.item)
                   setMenu(null)
                 }}
               >
                 <IconTrash />
                 删除
+                {selectionFor(menu.item).length > 1
+                  ? ` ${selectionFor(menu.item).length} 项`
+                  : ''}
               </button>
             </>
           )}

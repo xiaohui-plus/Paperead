@@ -94,11 +94,13 @@ jobs:
             Windows 10/11 x64 安装包。
 
             - 安装包：`Paperead_*_x64-setup.exe`
-            - 便携版：`Paperead_*_portable_x64.zip`
+            - 便携版：`Paperead_*_portable_x64.zip`（自带 pandoc，完全离线）
+            - pandoc 下载源：`pandoc-2.19.2-windows-x86_64.zip`
             - 源码：`Paperead_*_source.zip`
             - 自动更新清单：`latest.json`（随 Release 发布）
-            - 源码：对应 tag 的 GitHub 源码包
 
+            安装包不再内置 pandoc：首次启动会在后台自动下载一次（约 24MB），
+            之后离线可用；也可以在「设置 → 写作工具」里手动重试。
             首次启动会引导填写模型 API Key；PDF 与阅读数据默认保存在
             `%LOCALAPPDATA%\\paperead-data`。
           releaseDraft: true
@@ -121,3 +123,4 @@ jobs:
           files: |
             release/Paperead_*_portable_x64.zip
             release/Paperead_*_source.zip
+            release/pandoc-*.zip

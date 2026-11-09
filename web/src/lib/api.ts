@@ -1,4 +1,5 @@
 import type { Paper } from '../types'
+import { mediaUrl } from './mobile'
 
 /**
  * 数据加载。
@@ -33,7 +34,12 @@ export async function loadPaper(paperId = 'demo'): Promise<Paper> {
     page_sizes: data.page_sizes ?? [],
     columns: data.columns ?? 1,
     glossary: data.glossary ?? {},
-    blocks: data.blocks ?? [],
+    translation_lang: data.translation_lang ?? '',
+    progress: data.progress ?? { pct: 0, block_id: '', page: 0 },
+    // 安卓壳跨源访问时图片需要绝对地址和访问口令
+    blocks: (data.blocks ?? []).map((block: Paper['blocks'][number]) =>
+      block.image_path ? { ...block, image_path: mediaUrl(block.image_path) } : block,
+    ),
   } as Paper
 }
 

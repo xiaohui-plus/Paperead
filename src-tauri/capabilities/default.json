@@ -3,6 +3,7 @@
   "identifier": "default",
   "description": "Paperead desktop capability",
   "windows": ["main"],
+  "platforms": ["windows", "macOS", "linux"],
   "remote": {
     "urls": ["http://127.0.0.1:*", "http://localhost:*"]
   },

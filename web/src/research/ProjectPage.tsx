@@ -4,6 +4,7 @@ import {
   IconChat,
   IconClose,
   IconDownload,
+  IconFolder,
   IconPlus,
 } from '../components/icons'
 import { Markdown } from '../components/Markdown'
@@ -20,6 +21,7 @@ import { Composer } from './Composer'
 import { ProjectFileTree } from './ProjectFileTree'
 import { FilePreview } from './preview/FilePreview'
 import { SessionView } from './SessionView'
+import { tourBus } from '../tour/tourBus'
 
 interface Props {
   projectId: string
@@ -79,6 +81,8 @@ export function ProjectPage({
   const [error, setError] = useState<string | null>(null)
 
   const [tab, setTab] = useState<Tab>('sessions')
+  // 手机端：文件/会话栏是抽屉，默认收起，把高度留给会话正文
+  const [railOpen, setRailOpen] = useState(false)
   const [preview, setPreview] = useState<ProjectFile | null>(null)
   const [previewArtifact, setPreviewArtifact] = useState<ArtifactSummary | null>(null)
   const [activeFolderId, setActiveFolderId] = useState<string | null>(null)
@@ -97,6 +101,15 @@ export function ProjectPage({
 
   const renameRef = useRef<HTMLInputElement>(null)
   const uploadRef = useRef<HTMLInputElement>(null)
+  const folderRef = useRef<HTMLInputElement>(null)
+
+  // webkitdirectory 不在 React 的 input 类型里，挂载后手动加
+  useEffect(() => {
+    const el = folderRef.current
+    if (!el) return
+    el.setAttribute('webkitdirectory', '')
+    el.setAttribute('directory', '')
+  }, [])
 
   useEffect(() => {
     let alive = true
@@ -136,6 +149,19 @@ export function ProjectPage({
       input.select()
     }
   }, [renaming])
+
+  useEffect(() => {
+    tourBus.emit('project:tab-changed', { tab })
+  }, [tab])
+
+  useEffect(() => {
+    if (!railOpen) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setRailOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [railOpen])
 
   // 同一项目内再次从首页发起时，props 会给出新的首条消息。
   useEffect(() => {
@@ -225,10 +251,27 @@ export function ProjectPage({
     }
   }
 
+  const purge = async () => {
+    if (!project) return
+    setMenuOpen(false)
+    const ok = window.confirm(
+      `删除项目「${project.name}」？\n\n` +
+        '该项目下的所有文件、会话和产物都会被永久删除，无法恢复。',
+    )
+    if (!ok) return
+    try {
+      await researchApi.purgeProject(project.id)
+      onBack(project.kind)
+    } catch (purgeError) {
+      setError(errorText(purgeError))
+    }
+  }
+
   const openComposer = () => {
     setPreview(null)
     onSelectSession(null)
     setTab('sessions')
+    setRailOpen(false)
   }
 
   const send = async (text: string) => {
@@ -321,6 +364,33 @@ export function ProjectPage({
     }
   }
 
+  const uploadFolder = async (list: FileList | null) => {
+    if (!list || list.length === 0) return
+    setUploading(true)
+    try {
+      const entries = Array.from(list).map((file) => ({
+        file,
+        path:
+          (file as File & { webkitRelativePath?: string }).webkitRelativePath ||
+          file.name,
+      }))
+      const result = await researchApi.uploadFolder(
+        projectId,
+        entries,
+        activeFolderId,
+      )
+      applyItems(result.items)
+      setTab('files')
+      if (result.errors.length) {
+        setError(`部分文件没有导入：${result.errors.join('；')}`)
+      }
+    } catch (uploadError) {
+      setError(errorText(uploadError))
+    } finally {
+      setUploading(false)
+    }
+  }
+
   const applyItems = (next: ProjectFile[]) => {
     setFiles(next)
     setPreview((prev) => {
@@ -361,7 +431,8 @@ export function ProjectPage({
   }
 
   const deleteFile = async (item: ProjectFile) => {
-    if (!window.confirm(`确定删除「${item.name}」？`)) return
+    const what = item.kind === 'folder' ? '文件夹及其中的所有文件' : '文件'
+    if (!window.confirm(`确定删除${what}「${item.name}」？删除后无法恢复。`)) return
     try {
       applyItems(await researchApi.deleteItem(projectId, item.id))
     } catch (deleteError) {
@@ -380,7 +451,13 @@ export function ProjectPage({
 
   const deleteSelected = async () => {
     if (selectedFiles.length === 0) return
-    if (!window.confirm(`确定删除选中的 ${selectedFiles.length} 项？`)) return
+    if (
+      !window.confirm(
+        `确定删除选中的 ${selectedFiles.length} 项？\n\n文件夹里的文件会一起删除，删除后无法恢复。`,
+      )
+    ) {
+      return
+    }
     let next = files
     try {
       for (const id of selectedFiles) {
@@ -439,6 +516,16 @@ export function ProjectPage({
           </button>
         )}
 
+        <button
+          className="icon-btn project-rail-toggle"
+          title="文件与会话"
+          aria-label="文件与会话"
+          aria-expanded={railOpen}
+          onClick={() => setRailOpen((open) => !open)}
+        >
+          <IconFolder />
+        </button>
+
         <div className="project-head-actions">
           <button
             className="icon-btn"
@@ -450,6 +537,9 @@ export function ProjectPage({
           {menuOpen && (
             <div className="project-menu">
               <button onClick={() => void archive()}>归档项目</button>
+              <button className="is-danger" onClick={() => void purge()}>
+                删除项目
+              </button>
             </div>
           )}
         </div>
@@ -465,9 +555,16 @@ export function ProjectPage({
       )}
 
       <div className="project-body">
-        <aside className="project-rail">
+        {railOpen && (
+          <button
+            className="project-rail-scrim"
+            aria-label="关闭文件与会话"
+            onClick={() => setRailOpen(false)}
+          />
+        )}
+        <aside className="project-rail" data-open={railOpen}>
           <div className="project-rail-head">
-            <div className="project-rail-tabs">
+            <div className="project-rail-tabs" data-tour="project-rail-tabs">
               <button
                 data-active={tab === 'files'}
                 onClick={() => {
@@ -507,6 +604,16 @@ export function ProjectPage({
               event.target.value = ''
             }}
           />
+          <input
+            ref={folderRef}
+            type="file"
+            multiple
+            hidden
+            onChange={(event) => {
+              void uploadFolder(event.target.files)
+              event.target.value = ''
+            }}
+          />
 
           {tab === 'sessions' ? (
             <div className="project-session-list">
@@ -520,6 +627,7 @@ export function ProjectPage({
                     data-active={session.id === sessionId}
                     onClick={() => {
                       setPreview(null)
+                      setRailOpen(false)
                       onSelectSession(session.id)
                     }}
                   >
@@ -568,6 +676,7 @@ export function ProjectPage({
                 }}
                 onFile={(file) => {
                   setSelectedFiles([])
+                  setRailOpen(false)
                   if (file.kind === 'artifact') {
                     const artifact = artifacts.find(
                       (item) => item.id === file.refId,
@@ -582,11 +691,12 @@ export function ProjectPage({
                 }}
                 onRefresh={() => void refreshArtifacts()}
                 onUpload={() => uploadRef.current?.click()}
+                onUploadFolder={() => folderRef.current?.click()}
                 onCreateFolder={startFolder}
-                onRename={(item, name) => void renameFile(item, name)}
+                onRename={(item, name) => renameFile(item, name)}
                 onDelete={(item) => void deleteFile(item)}
-                onMove={(item, parentId) => void moveFile(item, parentId)}
-                onCopy={(item, parentId) => void copyFile(item, parentId)}
+                onMove={(item, parentId) => moveFile(item, parentId)}
+                onCopy={(item, parentId) => copyFile(item, parentId)}
                 onCopyPath={copyPath}
                 onAddToLibrary={(item) => void addToLibrary(item)}
                 onMultiSelect={toggleSelected}
@@ -621,6 +731,9 @@ export function ProjectPage({
                 onInitialTextConsumed?.()
               }}
               onMeta={updateSessionMeta}
+              onFilesUploaded={(uploaded) =>
+                setFiles((prev) => [...prev, ...uploaded])
+              }
             />
           ) : (
             <div className="project-empty">
@@ -634,8 +747,10 @@ export function ProjectPage({
               <Composer
                 autoFocus
                 running={false}
+                projectId={projectId}
                 placeholder="Enter 发送 · Shift+Enter 换行"
                 hint={sending ? '正在创建会话…' : '会话将在发送后创建'}
+                onUploaded={(file) => setFiles((prev) => [...prev, file])}
                 onSend={(text) => void send(text)}
                 onStop={() => undefined}
               />

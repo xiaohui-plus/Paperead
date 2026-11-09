@@ -24,17 +24,21 @@ whenToUse: 用户要求以 LaTeX 交付综述、论文或章节时。
    - 主文件 `main.tex`，必须包含完整 `\documentclass`、导言区、`\begin{document}...\end{document}`；
    - 不要把整篇 Markdown 塞进 tex；用 `\section`、`\subsection` 组织；
    - 图用项目文件树里已有的图片，`\includegraphics[width=0.9\linewidth]{文件名}`（相对 `main.tex` 所在目录）；不要引用不存在的图片；
+   - 模板带 `reviewTemplateGuide` 时，按其中 `figures` / `tables` 的章节分布安排 figure / table 环境，并在正文用“如图 N 所示”交叉引用；模板没有的图不要凭空添加；
+   - 图表标题要写清制作依据（基于什么数据/文献、回答什么问题），不要只写“模型对比图”这类空标题；
+   - `reviewTemplateGuide.format` 有值时按模板版式设置：`columns=2` 用双栏（ctexart/article 加 `twocolumn`），页边距按 `marginsMm` 写 geometry，标题编号与模板的 `headingStyle` 一致；
    - 表格用 booktabs（`\toprule / \midrule / \bottomrule`）；
    - 公式用 `$...$` 或 `equation / align`。
-4. 引用：
+4. 润色：正文按 `polish-writing` 技能逐段处理，只动文字，不动 `\cite`、数字与命令；已有 `.tex` 时只改正文文字，不改导言区与命令。
+5. 引用：
    - 正文只用 `\cite{key}` / `\citep{key}`，key 必须来自真实文献；
    - `references.bib` 用 `export_document(format="bib", papers="paperId1,paperId2")` 生成；
    - 没有对应 key 就写 `% TODO: 补引用`，不要编造。
-5. 编译：
+6. 编译：
    - 已有 `main.tex`：`export_document(format="pdf", source="main.tex")`；
    - 只有 Markdown 初稿：`export_document(format="latex", source="review-draft.md", title="...")`，会自动生成 `.tex` 并尽量编译 PDF；
    - 编译失败时读错误里的行号，修 `main.tex` 后再编译，最多 3 轮；仍然失败就交付 `.tex` 并说明原因。
-6. 交付：列出 `.tex` / `.bib` / `.pdf` 的真实路径、章节结构、未解决的引用与 TODO。
+7. 交付：列出 `.tex` / `.bib` / `.pdf` 的真实路径、章节结构、未解决的引用与 TODO。
 
 ## 内置模板
 

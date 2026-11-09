@@ -51,6 +51,105 @@ export interface SessionSummary {
   running: boolean
 }
 
+export type ReviewTemplateSource = 'default' | 'builtin' | 'upload' | 'paper'
+
+export interface ReviewTemplateFigure {
+  label: string
+  caption: string
+  page: number
+  section: string
+  type?: string
+  purpose?: string
+  context?: string
+}
+
+export interface ReviewTemplateSectionStat {
+  title: string
+  page: number
+  pages: number
+  chars: number
+  figures: number
+  tables: number
+  images?: number
+}
+
+export interface ReviewTemplateStyleRow {
+  term: string
+  count: number
+  per10k: number
+}
+
+export interface ReviewTemplateStyle {
+  citationStyle: string
+  sentenceUnit: string
+  avgSentenceLength: number
+  longSentenceRatio: number
+  avgParagraphLength: number
+  firstPersonPer10k: number
+  connectives: ReviewTemplateStyleRow[]
+  hedges: ReviewTemplateStyleRow[]
+}
+
+export interface ReviewTemplateFormat {
+  pageSize?: string
+  columns?: number
+  bodyFontSize?: number
+  titleFontSize?: number
+  marginsMm?: Record<string, number>
+  headingStyle?: string
+  headingExample?: string
+  captionSeparator?: string
+  abstract?: boolean
+  keywords?: boolean
+  referenceHeading?: string
+  citationStyle?: string
+}
+
+export interface ReviewTemplateGuide {
+  paperId?: string
+  title?: string
+  sections?: string[]
+  figures?: ReviewTemplateFigure[]
+  tables?: ReviewTemplateFigure[]
+  sectionStats?: ReviewTemplateSectionStat[]
+  style?: ReviewTemplateStyle
+  format?: ReviewTemplateFormat
+  notes?: string[]
+  markdown?: string
+}
+
+export interface ReviewTemplateOption {
+  id: string
+  name: string
+  source: ReviewTemplateSource
+  description: string
+  sections: string[]
+  guide?: ReviewTemplateGuide
+}
+
+export interface ReviewTemplateDetail extends ReviewTemplateOption {
+  markdown: string
+  error: string
+}
+
+export interface ReviewTemplatePaper {
+  id: string
+  title: string
+  authors: string
+  year: string | number
+  pages: number
+  status: string
+  isReview: boolean
+}
+
+export interface ReviewTemplateState {
+  selected: string
+  templates: ReviewTemplateOption[]
+  selectedDetail: ReviewTemplateDetail
+  library: ReviewTemplatePaper[]
+  uploaded?: ReviewTemplateOption
+}
+
 async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init)
   const data = await res.json().catch(() => ({}))
@@ -102,6 +201,13 @@ export const researchApi = {
     })
   },
 
+  /** 永久删除项目及其全部文件、会话和产物。 */
+  async purgeProject(projectId: string): Promise<void> {
+    await jsonFetch(`/api/research/projects/${projectId}/purge`, {
+      method: 'DELETE',
+    })
+  },
+
   async listFiles(projectId: string): Promise<ProjectFile[]> {
     const data = await jsonFetch<{ items: ProjectFile[] }>(
       `/api/research/projects/${projectId}/files`,
@@ -129,6 +235,25 @@ export const researchApi = {
     form.append('file', file)
     if (parentId) form.append('parentId', parentId)
     return jsonFetch<ProjectFile>(`/api/research/projects/${projectId}/files`, {
+      method: 'POST',
+      body: form,
+    })
+  },
+
+  /**
+   * 导入用户自己的文件夹：paths 与 entries 一一对应，
+   * 后端会按 `/` 拆分并保留子目录结构。
+   */
+  async uploadFolder(
+    projectId: string,
+    entries: { file: File; path: string }[],
+    parentId: string | null,
+  ): Promise<{ items: ProjectFile[]; added: number; errors: string[] }> {
+    const form = new FormData()
+    entries.forEach((entry) => form.append('files', entry.file))
+    form.append('paths', JSON.stringify(entries.map((entry) => entry.path)))
+    if (parentId) form.append('parentId', parentId)
+    return jsonFetch(`/api/research/projects/${projectId}/folder`, {
       method: 'POST',
       body: form,
     })
@@ -228,6 +353,43 @@ export const researchApi = {
     await jsonFetch<{ ok: boolean }>(
       `/api/research/sessions/${sessionId}/cancel`,
       { method: 'POST' },
+    )
+  },
+
+  getReviewTemplate(): Promise<ReviewTemplateState> {
+    return jsonFetch<ReviewTemplateState>('/api/research/review-templates')
+  },
+
+  selectReviewTemplate(id: string): Promise<ReviewTemplateState> {
+    return jsonFetch<ReviewTemplateState>(
+      '/api/research/review-templates/select',
+      json('POST', { id }),
+    )
+  },
+
+  async uploadReviewTemplate(file: File): Promise<ReviewTemplateState> {
+    const form = new FormData()
+    form.append('file', file)
+    return jsonFetch<ReviewTemplateState>('/api/research/review-templates/upload', {
+      method: 'POST',
+      body: form,
+    })
+  },
+
+  deleteReviewTemplateUpload(name: string): Promise<ReviewTemplateState> {
+    return jsonFetch<ReviewTemplateState>(
+      `/api/research/review-templates/uploads/${encodeURIComponent(name)}`,
+      { method: 'DELETE' },
+    )
+  },
+
+  previewReviewTemplatePaper(
+    paperId: string,
+    refresh = false,
+  ): Promise<ReviewTemplateOption & { error: string }> {
+    const suffix = refresh ? '?refresh=true' : ''
+    return jsonFetch<ReviewTemplateOption & { error: string }>(
+      `/api/research/review-templates/paper/${encodeURIComponent(paperId)}${suffix}`,
     )
   },
 }

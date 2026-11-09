@@ -71,7 +71,7 @@ export function apply(ctx, config = {}) {
     defineTool({
       name: 'library_search',
       description:
-        'Search the user local paper library (titles, abstracts and parsed full text). Each result carries a ~700-char abstract excerpt plus a text snippet; judge relevance from the abstract and do NOT call paper_read just to understand the topic. The library is mostly English papers, so prefer short English keywords (e.g. "diffusion", "dual-target"); Chinese queries usually return nothing.',
+        'Search the user local paper library (titles, abstracts and parsed full text). Results are reranked by concept coverage, field hits and evidence quality, and each result carries the best page plus up to three matching pages, so you can cite a page without a separate lookup. The library is mostly English papers, so prefer short English keywords (e.g. "diffusion", "dual-target"); Chinese queries usually return nothing.',
       parameters: {
         query: {
           type: 'string',
@@ -81,6 +81,16 @@ export function apply(ctx, config = {}) {
         limit: {
           type: 'number',
           description: 'Max results, default 10, at most 30.',
+        },
+        mode: {
+          type: 'string',
+          description:
+            'topic (default) searches title, abstract, tags and full text; title matches the title only, for verifying a known paper.',
+        },
+        minCoverage: {
+          type: 'number',
+          description:
+            '0-1, default 0.5 for multi-concept queries. Lower it only when a query returns too few results.',
         },
       },
       output: {
@@ -96,6 +106,8 @@ export function apply(ctx, config = {}) {
         return call('/internal/research/search/library', {
           q: args.query,
           limit: args.limit,
+          mode: args.mode,
+          minCoverage: args.minCoverage,
           sessionId,
         })
       },
@@ -110,14 +122,162 @@ export function apply(ctx, config = {}) {
       presentResult(_args, value) {
         const results = Array.isArray(value?.results) ? value.results : []
         const lines = results.map((item) => {
-          const page = item.page ? ` p${item.page}` : ''
-          return `- ${item.title}${page}：${item.snippet}`
+          const pages = Array.isArray(item.pages) && item.pages.length
+            ? item.pages.map((page) => `p${page}`).join(', ')
+            : item.page
+              ? `p${item.page}`
+              : '无页码'
+          const meta = [item.year, item.venue].filter(Boolean).join(' · ')
+          const coverage = typeof item.coverage === 'number'
+            ? `覆盖 ${Math.round(item.coverage * 100)}%`
+            : ''
+          return `- ${item.title}${meta ? `（${meta}）` : ''} · ${pages} · ${coverage}\n  ${item.snippet}`
         })
+        const summary = value?.notice || `命中 ${results.length} 篇。`
         return {
           card: 'generic',
           title: `本地文献 · ${results.length} 条`,
-          content: lines.length ? lines.join('\n') : '没有找到相关段落。',
+          content: `${summary}\n${lines.join('\n')}`.trim() || '没有找到相关段落。',
         }
+      },
+    }),
+  )
+
+  ctx.tools.register(
+    defineTool({
+      name: 'citation_check',
+      description:
+        'Audit a markdown review draft against the target review standard. Returns page-level citation ratio, unresolved paperIds, out-of-range pages, uncited claims, per-section source coverage, low-overlap citations, plus standard.gaps / standard.actions describing what is still missing (sections, evidence, citations) versus a full review. Run it after drafting, fetch whatever standard.actions asks for, revise, then run it again until standard.passed is true (max 3 rounds).',
+      parameters: {
+        source: {
+          type: 'string',
+          description:
+            'Draft file name or artifact title. Omit to audit the most recent markdown draft.',
+        },
+        template: {
+          type: 'string',
+          description:
+            'Review template id or uploaded template file name, e.g. "default", "narrative", "systematic", "file:我的模板.md", "upload:我的模板.md", or "paper:<paperId>" (use a library paper\'s section skeleton). Omit to use the project template; if none, the template chosen in app settings; if none, the system default applies.',
+        },
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: true },
+        render: (_args, value) => [{ type: 'text', text: asText(value) }],
+        presentationMeta: (_args, value) => ({
+          kind: 'citation_check',
+          pageRatio: value?.metrics?.pageRatio ?? null,
+          issues: Array.isArray(value?.issues) ? value.issues.length : 0,
+          standardScore: value?.standard?.score ?? null,
+          standardPassed: value?.standard?.passed ?? null,
+        }),
+      },
+      async execute(args, exec) {
+        return call(
+          `/internal/research/sessions/${encodeURIComponent(sessionIdOf(exec))}/citations/check`,
+          { source: args.source, template: args.template },
+        )
+      },
+      presentCall(args) {
+        return {
+          card: 'generic',
+          kind: 'citation_check',
+          title: '审计引用',
+          rawInput: args,
+        }
+      },
+      presentResult(_args, value) {
+        const metrics = value?.metrics || {}
+        const standard = value?.standard || {}
+        const ratio = Math.round((metrics.pageRatio || 0) * 100)
+        const head =
+          `页码级引用 ${ratio}% · 来源 ${metrics.sourcesUnique ?? 0} 个 · ` +
+          `全文 ${metrics.fulltextSources ?? 0} 篇 · 未解析 ${metrics.unresolved ?? 0} · ` +
+          `无引用论断 ${metrics.uncitedClaims ?? 0}`
+        const standardLine =
+          standard.score == null
+            ? ''
+            : `标准差距 ${standard.score}%${standard.passed ? '（已达标）' : '（未达标）'}`
+        const gaps = (standard.gaps || []).slice(0, 8).map((gap) => `- ${gap}`)
+        const actions = (standard.actions || []).slice(0, 6).map((item) => `- 下一步：${item}`)
+        const issues = (value?.issues || [])
+          .slice(0, 8)
+          .map((issue) => `- [${issue.kind}] 第 ${issue.line} 行：${issue.detail}`)
+        const suggestions = (value?.suggestions || []).map((item) => `- ${item}`)
+        const title = standardLine
+          ? `引用审计 · ${ratio}% · 标准 ${standard.score}%`
+          : `引用审计 · ${ratio}%`
+        return textResult(
+          title,
+          [head, standardLine, ...gaps, ...actions, ...issues, ...suggestions]
+            .filter(Boolean)
+            .join('\n'),
+        )
+      },
+    }),
+  )
+
+  ctx.tools.register(
+    defineTool({
+      name: 'run_command',
+      description:
+        'Run one shell command inside the project files/ directory (PowerShell on Windows). Use it for compiling LaTeX, running python/R analysis, git status and file conversion. Do not install system software, modify permissions or run destructive commands. The terminal may be disabled by the user; a 403 error means it is off.',
+      parameters: {
+        command: {
+          type: 'string',
+          required: true,
+          description: 'Command to execute, e.g. "python analysis.py".',
+        },
+        cwd: {
+          type: 'string',
+          description: 'Relative working directory inside project files/. Defaults to the project files root.',
+        },
+        timeoutMs: {
+          type: 'number',
+          description: 'Timeout in milliseconds, default 120000, max 600000.',
+        },
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: true },
+        render: (_args, value) => [
+          {
+            type: 'text',
+            text: [value?.stdout, value?.stderr].filter(Boolean).join('\n').trim() || '（无输出）',
+          },
+        ],
+        presentationMeta: (_args, value) => ({
+          kind: 'terminal',
+          exitCode: value?.exitCode ?? null,
+        }),
+      },
+      async execute(args, exec) {
+        return call(
+          `/internal/research/sessions/${encodeURIComponent(sessionIdOf(exec))}/run`,
+          {},
+          {
+            method: 'POST',
+            body: {
+              command: args.command,
+              cwd: args.cwd,
+              timeoutMs: args.timeoutMs,
+            },
+          },
+        )
+      },
+      presentCall(args) {
+        return {
+          card: 'generic',
+          kind: 'terminal',
+          title: '运行命令',
+          rawInput: { command: args.command, cwd: args.cwd },
+        }
+      },
+      presentResult(_args, value) {
+        if (value?.timedOut) {
+          return textResult('命令超时', `超过时限被终止。\n${value?.stderr || ''}`)
+        }
+        const code = value?.exitCode ?? '?'
+        const body = [value?.stdout, value?.stderr].filter(Boolean).join('\n').trim()
+        return textResult(`终端 · 退出码 ${code}`, body || '（无输出）')
       },
     }),
   )
@@ -376,6 +536,11 @@ export function apply(ctx, config = {}) {
         description: { type: 'string', description: 'New project description.' },
         researchQuestion: { type: 'string', description: 'New main research question.' },
         instructions: { type: 'string', description: 'Standing instructions for this project.' },
+        reviewTemplate: {
+          type: 'string',
+          description:
+            'Review template for this project: "default", a builtin id ("narrative" / "systematic"), an uploaded template file name in the project files (e.g. "我的5A模板.md"), an app-level upload ("upload:我的模板.md"), or a library paper ("paper:<paperId>"). Leave empty to fall back to app settings.',
+        },
       },
       output: {
         schema: { type: 'object', additionalProperties: true },
@@ -392,7 +557,7 @@ export function apply(ctx, config = {}) {
         const base = `/internal/research/sessions/${encodeURIComponent(sessionId)}`
         const result = {}
         const patch = {}
-        for (const key of ['name', 'description', 'researchQuestion', 'instructions']) {
+        for (const key of ['name', 'description', 'researchQuestion', 'instructions', 'reviewTemplate']) {
           if (typeof args[key] === 'string' && args[key].trim()) patch[key] = args[key]
         }
         if (Object.keys(patch).length) {
@@ -432,6 +597,190 @@ export function apply(ctx, config = {}) {
         if (value?.file) parts.push(`文件：${value.file.path}`)
         if (value?.artifact) parts.push(`产物：${value.artifact.title}`)
         return textResult('项目已更新', parts.join('\n') || '已写入。')
+      },
+    }),
+  )
+
+  ctx.tools.register(
+    defineTool({
+      name: 'file_read',
+      description:
+        'Read a text file saved in the current project (Markdown, txt, json, csv, bib, tex). Use project_read first to get the exact path or file name. Use this to read a draft back before revising it; artifact_read only covers artifacts, not project files.',
+      parameters: {
+        path: {
+          type: 'string',
+          required: true,
+          description: 'Relative path or file name shown by project_read.',
+        },
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: true },
+        render: (_args, value) => [{ type: 'text', text: asText(value) }],
+        presentationMeta: (_args, value) => ({
+          kind: 'file_read',
+          name: value?.file?.name || '',
+        }),
+      },
+      async execute(args, exec) {
+        const sessionId = sessionIdOf(exec)
+        return call(
+          `/internal/research/sessions/${encodeURIComponent(sessionId)}/files`,
+          { path: args.path },
+        )
+      },
+      presentCall(args) {
+        return {
+          card: 'generic',
+          kind: 'file_read',
+          title: '读取文件',
+          rawInput: args,
+        }
+      },
+      presentResult(_args, value) {
+        return textResult(
+          value?.file?.name || '文件内容',
+          value?.content || '（二进制文件，无法直接预览）',
+        )
+      },
+    }),
+  )
+
+  ctx.tools.register(
+    defineTool({
+      name: 'docx_read',
+      description:
+        'Read a Word (.docx) file in the current project. Returns paragraphs with stable index, style and text, every table as rows of cells, and the heading outline. Use project_read first to get the exact path, then use the paragraph index values with docx_edit. Old .doc files are not supported: ask the user to save them as .docx first.',
+      parameters: {
+        path: {
+          type: 'string',
+          required: true,
+          description: 'Relative path or file name shown by project_read, e.g. 综述草稿.docx.',
+        },
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: true },
+        render: (_args, value) => [{ type: 'text', text: asText(value) }],
+        presentationMeta: (_args, value) => ({
+          kind: 'docx_read',
+          paragraphs: Array.isArray(value?.paragraphs) ? value.paragraphs.length : 0,
+          tables: Array.isArray(value?.tables) ? value.tables.length : 0,
+        }),
+      },
+      async execute(args, exec) {
+        return call(
+          `/internal/research/sessions/${encodeURIComponent(sessionIdOf(exec))}/docx`,
+          { path: args.path },
+        )
+      },
+      presentCall(args) {
+        return {
+          card: 'generic',
+          kind: 'docx_read',
+          title: `读取 Word · ${args.path}`,
+          rawInput: args,
+        }
+      },
+      presentResult(_args, value) {
+        const paragraphs = Array.isArray(value?.paragraphs) ? value.paragraphs : []
+        const tables = Array.isArray(value?.tables) ? value.tables : []
+        const lines = paragraphs
+          .slice(0, 60)
+          .map((item) => `[${item.index}] ${item.style || 'Normal'}｜${item.text}`)
+        if (paragraphs.length > 60) lines.push(`…（还有 ${paragraphs.length - 60} 段）`)
+        const tableLines = tables.map(
+          (table, index) =>
+            `表格 ${index}：${table.rows.length} 行 × ${table.rows[0]?.length || 0} 列`,
+        )
+        return textResult(
+          `Word · ${paragraphs.length} 段 · ${tables.length} 个表格`,
+          [...lines, ...tableLines].join('\n') || '文档里没有可读内容。',
+        )
+      },
+    }),
+  )
+
+  ctx.tools.register(
+    defineTool({
+      name: 'docx_edit',
+      description:
+        'Edit a Word (.docx) in place while keeping its existing styles. Call docx_read first and pass paragraph/table index values from that result; inside one call every paragraph index still refers to the original paragraph list even if you also insert or delete. operations is a JSON array, each item is one of: ' +
+        'TEXT: {"op":"replace","find":"旧文字","replace":"新文字"}; {"op":"set_paragraph","index":3,"text":"整段新文字"}; {"op":"insert_paragraph","after":3,"text":"新段落","style":"Heading 2"}; {"op":"delete_paragraph","index":3}; {"op":"append_paragraph","text":"...","style":"Normal"}; ' +
+        'FORMAT: {"op":"format_paragraph","index":3,"font":"宋体","fontSize":12,"align":"justify","firstLineIndentChars":2,"lineSpacing":1.5} (target by index, indices:[1,2] or all:true; also bold, italic, underline, color, firstLineIndentPt, leftIndentPt, spaceBeforePt, spaceAfterPt); ' +
+        'STYLE: {"op":"create_style","name":"论文正文","base":"Normal","font":"宋体","fontSize":12,"firstLineIndentChars":2,"lineSpacing":1.5}; {"op":"modify_style","style":"论文正文",...}; {"op":"set_style","indices":[1,2],"style":"论文正文"}; {"op":"set_heading","index":0,"level":1}; ' +
+        'TABLE: {"op":"insert_table","after":2,"rows":2,"columns":2,"data":[["指标","数值"],["准确率","85%"]],"header":true,"borders":"grid","widthsPt":[120,200],"align":"center"} (borders: none/outer/all/grid); {"op":"table_add_row","table":0,"data":[...],"before":1}; {"op":"table_delete_row","table":0,"row":2}; {"op":"table_add_column","table":0,"data":[...]}; {"op":"table_delete_column","table":0,"column":1}; {"op":"table_merge_cells","table":0,"startRow":0,"startColumn":0,"endRow":0,"endColumn":1}; {"op":"table_set","table":0,"style":"...","header":true,"widthsPt":[...],"borders":"all","align":"center"}; {"op":"delete_table","table":0}; {"op":"set_table_cell","table":0,"row":1,"column":2,"text":"...", "font":"宋体","fontSize":10.5,"bold":true,"align":"center"}; ' +
+        'PAGE: {"op":"set_page","size":"A4","orientation":"landscape","marginTopCm":2.54,"marginBottomCm":2.54,"marginLeftCm":3.18,"marginRightCm":3.18} (size: A4/A3/A5/Letter/Legal or widthCm+heightCm; section index optional); {"op":"set_header","text":"...","pageNumber":true,"align":"right"}; {"op":"set_footer",...}; {"op":"insert_page_break","after":3}; {"op":"insert_section_break","after":3,"type":"nextPage"}; ' +
+        'CONTENT: {"op":"insert_list","after":3,"items":["a","b"],"ordered":true}; {"op":"insert_image","after":3,"image":"figures/fig1.png","widthCm":12,"align":"center","caption":"图 1 ..."}; {"op":"insert_hyperlink","after":3,"text":"链接","url":"https://..."}; {"op":"insert_toc","levels":"1-3","after":-1}. ' +
+        'Prefer several small operations over rewriting the whole document, and call docx_read again afterwards to verify. Never claim the file was changed without calling this tool. Old .doc files are not supported.',
+      parameters: {
+        path: {
+          type: 'string',
+          required: true,
+          description: 'Relative path or file name of the .docx to edit.',
+        },
+        operations: {
+          type: 'string',
+          required: true,
+          description:
+            'JSON array of operations, e.g. [{"op":"replace","find":"待补充","replace":"已补充"},{"op":"append_paragraph","text":"新的总结段。"}]',
+        },
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: true },
+        render: (_args, value) => [{ type: 'text', text: asText(value) }],
+        presentationMeta: (_args, value) => ({
+          kind: 'docx_edit',
+          applied: Array.isArray(value?.applied) ? value.applied.length : 0,
+          paragraphs: value?.paragraphs ?? null,
+        }),
+      },
+      async execute(args, exec) {
+        let operations
+        if (typeof args.operations === 'string' && args.operations.trim()) {
+          try {
+            operations = JSON.parse(args.operations)
+          } catch {
+            throw new Error(
+              'operations 必须是 JSON 数组，例如 [{"op":"replace","find":"旧","replace":"新"}]',
+            )
+          }
+        } else if (Array.isArray(args.operations)) {
+          operations = args.operations
+        } else {
+          throw new Error('operations 必须是 JSON 数组。')
+        }
+        return call(
+          `/internal/research/sessions/${encodeURIComponent(sessionIdOf(exec))}/docx`,
+          {},
+          { method: 'POST', body: { path: args.path, operations } },
+        )
+      },
+      presentCall(args) {
+        return {
+          card: 'generic',
+          kind: 'docx_edit',
+          title: `修改 Word · ${args.path}`,
+          rawInput: args,
+        }
+      },
+      presentResult(_args, value) {
+        const applied = Array.isArray(value?.applied) ? value.applied : []
+        const summary = applied
+          .map((item) => {
+            const bits = [item.op]
+            if (item.index != null) bits.push(`#${item.index}`)
+            if (Array.isArray(item.indices)) bits.push(`#${item.indices.join(',')}`)
+            if (Array.isArray(item.fields)) bits.push(`（${item.fields.join('、')}）`)
+            if (item.occurrences != null) bits.push(`（命中 ${item.occurrences} 处）`)
+            for (const key of ['table', 'row', 'column', 'image', 'style', 'level', 'items', 'name']) {
+              if (item[key] != null) bits.push(`${key}=${item[key]}`)
+            }
+            return `- ${bits.join(' ')}`
+          })
+          .join('\n')
+        return textResult(
+          `Word 已修改 · ${applied.length} 个操作`,
+          `${summary || '已保存。'}\n当前：${value?.paragraphs ?? '?'} 段 · ${value?.tables ?? '?'} 个表格`,
+        )
       },
     }),
   )
@@ -543,11 +892,11 @@ export function apply(ctx, config = {}) {
     defineTool({
       name: 'export_document',
       description:
-        'Export a project document: DOCX (pandoc), BibTeX, LaTeX (.tex) or PDF (compile .tex with the local TeX engine). Use format=latex to turn a markdown draft into a compilable .tex (Chinese defaults to ctexart), and format=pdf to compile an existing .tex or a markdown draft into PDF. Always writes real files into the project tree; never claim a file exists without this tool.',
+        'Export a project document: DOCX (pandoc), BibTeX, LaTeX (.tex), PDF (compile .tex with the local TeX engine) or PPTX (16:9 slide deck). Use format=latex to turn a markdown draft into a compilable .tex (Chinese defaults to ctexart), format=pdf to compile an existing .tex or a markdown draft into PDF, and format=pptx with deck to build a real .pptx for group meetings. Always writes real files into the project tree; never claim a file exists without this tool.',
       parameters: {
         format: {
           type: 'string',
-          description: 'docx (default) | bib | latex | pdf.',
+          description: 'docx (default) | bib | latex | pdf | pptx.',
         },
         source: {
           type: 'string',
@@ -590,6 +939,20 @@ export function apply(ctx, config = {}) {
           description:
             'For bib: comma-separated paperIds from library_search / academic_search.',
         },
+        subtitle: {
+          type: 'string',
+          description: 'For pptx: subtitle on the title slide.',
+        },
+        deck: {
+          type: 'string',
+          description:
+            'For pptx: a JSON array of slides. Each slide: {"kind":"title|section|bullets","title":"结论式标题","subtitle":"","bullets":["要点"],"chart":"柱状图：...","source":"Li 2026, p3","notes":"讲稿"}. Omit to convert a markdown outline automatically.',
+        },
+        pptTemplate: {
+          type: 'string',
+          description:
+            'For pptx: filename of a user-uploaded .pptx template in the current project (e.g. 组会模板.pptx). The deck keeps that template’s design; pages containing {{title}} / {{subtitle}} / {{bullets}} / {{source}} placeholders are reused by cloning, otherwise the template’s slide layouts are used.',
+        },
       },
       output: {
         schema: { type: 'object', additionalProperties: true },
@@ -602,6 +965,16 @@ export function apply(ctx, config = {}) {
       },
       async execute(args, exec) {
         const sessionId = sessionIdOf(exec)
+        let deck
+        if (typeof args.deck === 'string' && args.deck.trim()) {
+          try {
+            deck = JSON.parse(args.deck)
+          } catch {
+            throw new Error('deck 必须是 JSON 数组，例如 [{"kind":"bullets","title":"...","bullets":["..."]}]')
+          }
+        } else if (Array.isArray(args.deck)) {
+          deck = args.deck
+        }
         const result = await call(
           `/internal/research/sessions/${encodeURIComponent(sessionId)}/export`,
           {},
@@ -612,12 +985,15 @@ export function apply(ctx, config = {}) {
               source: args.source,
               content: args.content,
               title: args.title,
+              subtitle: args.subtitle,
               filename: args.filename,
               author: args.author,
               abstract: args.abstract,
               template: args.template,
               compile: args.compile,
               papers: splitTags(args.papers),
+              deck,
+              pptTemplate: args.pptTemplate,
             },
           },
         )
@@ -626,7 +1002,14 @@ export function apply(ctx, config = {}) {
       },
       presentCall(args) {
         const format = args.format || 'docx'
-        const labels = { bib: '导出 BibTeX', latex: '导出 LaTeX', tex: '导出 LaTeX', pdf: '编译 PDF' }
+        const labels = {
+          bib: '导出 BibTeX',
+          latex: '导出 LaTeX',
+          tex: '导出 LaTeX',
+          pdf: '编译 PDF',
+          pptx: '制作 PPT',
+          ppt: '制作 PPT',
+        }
         return {
           card: 'generic',
           kind: 'export_document',
@@ -642,6 +1025,21 @@ export function apply(ctx, config = {}) {
         const notes = []
         if (value?.compiled) notes.push(`已编译 PDF（${value.engine || 'LaTeX'}）`)
         if (value?.warning) notes.push(`未编译 PDF：${value.warning}`)
+        if (typeof value?.slides === 'number') notes.push(`共 ${value.slides} 页`)
+        if (value?.template && value.template !== 'builtin') {
+          notes.push(`已套用模板：${value.template}`)
+        }
+        const audit = value?.citation
+        if (audit?.metrics) {
+          const metrics = audit.metrics
+          notes.push(
+            `引用审计：页码级 ${Math.round((metrics.pageRatio || 0) * 100)}%` +
+              ` · 未解析 ${metrics.unresolved || 0}` +
+              ` · 无引用论断 ${metrics.uncitedClaims || 0}`,
+          )
+          for (const warning of audit.warnings || []) notes.push(`注意：${warning}`)
+          if (audit.report) notes.push(`审计报告：${audit.report}`)
+        }
         return textResult(
           `已导出 · ${value?.format || ''}`,
           [files.join('\n') || '没有生成文件。', ...notes].join('\n\n'),

@@ -61,6 +61,26 @@ function safeJson(text) {
   }
 }
 
+// 工具失败的说明通常在 tool-result 的文本块里，`event.data.error` 往往为空；
+// 不透传出来，前端只能显示一个没有原因的“失败”。
+function blockText(block, limit) {
+  const content = Array.isArray(block?.content) ? block.content : []
+  const text = content
+    .filter((item) => item && typeof item === 'object' && item.type === 'text')
+    .map((item) => item.text)
+    .filter((item) => typeof item === 'string' && item)
+    .join('\n')
+  return text ? text.slice(0, limit) : undefined
+}
+
+function errorText(block) {
+  return blockText(block, 600)
+}
+
+function resultText(block) {
+  return blockText(block, 4000)
+}
+
 export function apply(ctx, config = {}) {
   const token = config.token || ''
   const defaultModel = config.defaultModel || 'deepseek-v4-flash'
@@ -147,7 +167,8 @@ export function apply(ctx, config = {}) {
           callId,
           name: callId ? callNames.get(sid)?.get(callId) : undefined,
           isError: Boolean(event.data.error) || block?.isError === true,
-          error: event.data.error,
+          error: event.data.error ?? (block?.isError ? errorText(block) : undefined),
+          result: block?.isError ? undefined : resultText(block),
           meta: event.data.meta,
         })
         break

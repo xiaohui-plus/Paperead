@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
-import { getGuide, makeGuide, type Guide } from '../lib/library'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { getGuide, makeGuide, waitForGenerated, type Guide } from '../lib/library'
 import { loadModelSettings, readyModel, toPayload } from '../lib/settings'
+import { tourBus } from '../tour/tourBus'
 import { IconSpark } from './icons'
 
 interface Props {
@@ -33,6 +34,19 @@ export function GuidePanel({ paperId, onOpenSettings, settingsVersion = 0 }: Pro
       return new Set()
     }
   })
+  const mountedRef = useRef(true)
+
+  useEffect(() => {
+    if (!guide) return
+    tourBus.emit('reader:guide-ready', { paperId })
+  }, [guide, paperId])
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   const generate = useCallback(
     async (refresh = false) => {
@@ -49,7 +63,19 @@ export function GuidePanel({ paperId, onOpenSettings, settingsVersion = 0 }: Pro
         const g = await makeGuide(paperId, toPayload(cfg), refresh)
         setGuide(g)
       } catch (e) {
-        setError(e instanceof Error ? e.message : '导读生成失败')
+        const msg = e instanceof Error ? e.message : '导读生成失败'
+        // 切走再切回来会重复请求，后端以「正在生成中」拒绝；继续等上一次的结果
+        if (msg.includes('正在生成中')) {
+          const cached = await waitForGenerated(() => getGuide(paperId), () => mountedRef.current)
+          if (!mountedRef.current) return
+          if (cached) {
+            setGuide(cached)
+          } else {
+            setError('这次生成耗时较长，稍后重新进入「导读」即可查看')
+          }
+          return
+        }
+        setError(msg)
       } finally {
         setLoading(false)
       }
@@ -159,7 +185,7 @@ export function GuidePanel({ paperId, onOpenSettings, settingsVersion = 0 }: Pro
   )
 
   return (
-    <div className="guide">
+    <div className="guide" data-tour-guide="ready">
       <section className="guide-summary">
         <p className="guide-eyebrow">循序渐进导读</p>
         {guide.oneliner && <p className="guide-oneliner">{guide.oneliner}</p>}

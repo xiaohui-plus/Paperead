@@ -15,12 +15,15 @@
                      GET  /internal/research/artifacts/{artifactId}
     library_tag      GET  /internal/research/library/papers
                      PUT  /internal/research/papers/{paperId}/tags
+    docx_read        GET  /internal/research/sessions/{id}/docx
+    docx_edit        POST /internal/research/sessions/{id}/docx
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -34,6 +37,10 @@ from paperead.scholar.cite import build_bibtex
 from paperead.scholar.http import FriendlyError
 from paperead.scholar.models import paper_from_dict
 from paperead.scholar.search import SOURCE_KEYS, SearchInput
+from server.research import templates as template_store
+from server.research.citations import audit_review
+from server.research.deck import build_deck, parse_outline
+from server.research.docx_edit import DocxError, edit_docx, read_docx
 from server.research.files import files_root, safe_name, save_bytes
 from server.research.latex import (
     bib_stem,
@@ -43,12 +50,16 @@ from server.research.latex import (
     has_cjk,
     read_text,
 )
+from server.research.review_standard import evaluate as evaluate_review
+from server.research.review_standard import list_templates, resolve_template
 from server.research.store import ResearchStore
+from server.research.terminal import run_command
 from server.scholar_api import import_paper
 
 MAX_READ_CHARS = 20000
 TEXT_SUFFIXES = {".md", ".txt", ".json", ".csv", ".bib", ".tex", ".yaml", ".yml"}
 SOURCES = set(SOURCE_KEYS)
+CITATION_REPORT_NAME = "citation-report.md"
 
 
 def _check(token: str | None) -> None:
@@ -64,6 +75,7 @@ class ProjectPatchIn(BaseModel):
     description: str | None = None
     research_question: str | None = Field(default=None, alias="researchQuestion")
     instructions: str | None = None
+    review_template: str | None = Field(default=None, alias="reviewTemplate")
 
 
 class FileIn(BaseModel):
@@ -85,24 +97,116 @@ class TagsIn(BaseModel):
     mode: str = "append"  # append | replace
 
 
+class DocxEditIn(BaseModel):
+    """docx_edit 的入参：目标文件 + 一串按顺序执行的操作。"""
+
+    path: str = Field(..., min_length=1)
+    operations: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class ImportIn(BaseModel):
     id: str = Field(..., min_length=3, max_length=300)
 
 
+class RunIn(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    command: str
+    cwd: str | None = None
+    timeout_ms: int | None = Field(default=120_000, alias="timeoutMs")
+
+
 class ExportIn(BaseModel):
-    format: str = "docx"  # docx | bib | latex | pdf
+    model_config = ConfigDict(populate_by_name=True)
+
+    format: str = "docx"  # docx | bib | latex | pdf | pptx
     source: str | None = None  # 项目文件名 / 产物名
     content: str | None = None
     title: str | None = None
+    subtitle: str | None = None
     filename: str | None = None
     author: str | None = None
+    date: str | None = None
     abstract: str | None = None
     template: str | None = None  # auto | ctexart | article
     compile: bool = True  # latex 格式下是否顺带编译 PDF
     papers: list[str] = Field(default_factory=list)  # bib 用的 paperId
+    deck: list[dict[str, Any]] | None = None  # pptx 用的结构化幻灯片
+    ppt_template: str | None = Field(default=None, alias="pptTemplate")  # 用户上传的 .pptx 模板
 
 
-def _project_payload(project: dict[str, Any]) -> dict[str, Any]:
+def _read_review_template(research: ResearchStore, project_id: str) -> str:
+    """读项目级“综述模板”选择（存在 project.json，不占数据库列）。"""
+    path = Path(research.workspace(project_id)) / "project.json"
+    try:
+        meta = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    value = meta.get("review_template") if isinstance(meta, dict) else ""
+    return str(value or "")
+
+
+def _write_review_template(
+    research: ResearchStore, project_id: str, value: str
+) -> None:
+    path = Path(research.workspace(project_id)) / "project.json"
+    try:
+        meta = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    if value:
+        meta["review_template"] = value
+    else:
+        meta.pop("review_template", None)
+    path.write_text(
+        json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8"
+    )
+
+
+def _global_template_root(research: ResearchStore) -> Path:
+    """``data/research`` → ``data/review-templates``。"""
+    return template_store.root_for(Path(research.root))
+
+
+def _effective_template_choice(
+    research: ResearchStore, project_id: str, explicit: str | None = None
+) -> str:
+    """本次指定 > 项目设置 > 应用设置 > 系统默认。"""
+    if explicit is not None:
+        return explicit
+    project_choice = _read_review_template(research, project_id)
+    if project_choice:
+        return project_choice
+    return template_store.read_choice(_global_template_root(research)) or "default"
+
+
+def _resolve_review_template(
+    choice: str | None,
+    files_dir: Path,
+    research: ResearchStore,
+    library: Any,
+) -> tuple[list[str] | None, str, str]:
+    root = _global_template_root(research)
+    return resolve_template(
+        choice,
+        files_dir,
+        external=lambda value: template_store.resolve_global(value, root, library),
+    )
+
+
+def _project_payload(
+    project: dict[str, Any], research: ResearchStore, library: Any = None
+) -> dict[str, Any]:
+    project_template = _read_review_template(research, str(project["id"]))
+    global_template = template_store.read_choice(_global_template_root(research))
+    template = project_template or global_template or ""
+    guide: dict[str, Any] = {}
+    if template.startswith("paper:") and library is not None:
+        guide = template_store.paper_guide(
+            _global_template_root(research), library, template[6:]
+        )
     return {
         "id": project["id"],
         "kind": project["kind"],
@@ -110,6 +214,13 @@ def _project_payload(project: dict[str, Any]) -> dict[str, Any]:
         "description": project.get("description") or "",
         "researchQuestion": project.get("research_question") or "",
         "instructions": project.get("instructions") or "",
+        # 项目没设时回落到应用设置，agent 不用再猜当前该用哪套骨架。
+        "reviewTemplate": template,
+        "reviewTemplateSource": (
+            "project" if project_template else "global" if global_template else "default"
+        ),
+        # 论文模板的结构、图表放置与语言风格；upload/default 时为空。
+        "reviewTemplateGuide": guide,
         "workspace": project["workspace"],
         "createdAt": project["created_at"],
         "updatedAt": project["updated_at"],
@@ -187,6 +298,8 @@ def _export_source(
             return Path(name).stem, direct
         return "", ""
     for row in artifacts:  # list_artifacts 已按创建时间倒序
+        if Path(str(row.get("path") or "")).name == CITATION_REPORT_NAME:
+            continue
         if str(row.get("path") or "").lower().endswith((".md", ".txt")):
             title, text = _artifact_text(row)
             if text:
@@ -212,6 +325,9 @@ def _bib_dict(row: dict[str, Any]) -> dict[str, Any]:
         year = int(year) if year not in (None, "") else None
     except (TypeError, ValueError):
         year = None
+    if year is None:
+        guessed = _publication_year(row)
+        year = int(guessed) if guessed.isdigit() else None
     return {
         "id": row.get("source_id") or row["id"],
         "source": row.get("source") or "openalex",
@@ -223,6 +339,58 @@ def _bib_dict(row: dict[str, Any]) -> dict[str, Any]:
         "url": row.get("url") or "",
         "abstract": row.get("abstract") or "",
     }
+
+
+def _first_surname(authors: Any) -> str:
+    """从 “Katherine Berry / Zhang B, Bian S” 里取第一作者姓。"""
+    if isinstance(authors, list):
+        first = str(authors[0] if authors else "")
+    else:
+        first = str(authors or "").split(",")[0]
+    parts = first.strip().split()
+    if not parts:
+        return ""
+    # “Zhang B” 这种姓在前、缩写在后的写法，取第一个词。
+    if len(parts) >= 2 and re.fullmatch(r"[A-Z][A-Za-z.\-]{0,2}", parts[-1]):
+        return parts[0]
+    return parts[-1]
+
+
+def _publication_year(row: dict[str, Any]) -> str:
+    year = row.get("year")
+    if year not in (None, ""):
+        return str(year)
+    # 文献库多数条目没有 year，只能从 arXiv 编号或 DOI 推断：
+    # arxiv:2509.07887 / arxiv.org/abs/2610.24124 → 2025 / 2026
+    # 10.1038/s41467-024-47120-y → 2024（Nature 系 DOI 用三位年份）
+    text = " ".join(
+        str(row.get(key) or "") for key in ("source_id", "url", "doi", "filename")
+    )
+    match = re.search(r"arxiv[.:/](?:abs/)?(\d{2})\d{2}\.\d{4,5}", text, re.IGNORECASE)
+    if match:
+        return f"20{match.group(1)}"
+    match = re.search(r"-(0\d{2})-\d{4,5}", text)
+    if match:
+        return str(2000 + int(match.group(1)))
+    match = re.search(r"(?:19|20)\d{2}", str(row.get("filename") or ""))
+    return match.group(0) if match else ""
+
+
+def _citation_labels(text: str, library: Any) -> dict[str, str]:
+    """paperId → “作者 年份”，供 PDF 导出替换内部主键。"""
+    labels: dict[str, str] = {}
+    if library is None:
+        return labels
+    for row in _cited_rows(text, library):
+        paper_id = str(row.get("id") or "")
+        if not paper_id:
+            continue
+        surname = _first_surname(row.get("authors"))
+        year = _publication_year(row)
+        label = " ".join(part for part in (surname, year) if part)
+        if label:
+            labels[paper_id] = label
+    return labels
 
 
 def _find_source_path(
@@ -253,8 +421,143 @@ def _find_source_path(
     return None
 
 
+_PPT_SUFFIXES = {".pptx", ".potx"}
+
+
+def _find_ppt_template(
+    research: ResearchStore, project_id: str, source: str | None
+) -> tuple[Path | None, str]:
+    """在项目文件里找用户上传的 PPT 模板，返回 (路径, 展示名)。"""
+    if not source:
+        return None, ""
+    workspace = Path(research.workspace(project_id))
+    name = safe_name(source)
+    for item in research.list_items(project_id):
+        path = research.item_path(project_id, item)
+        if path is None or path.suffix.lower() not in _PPT_SUFFIXES:
+            continue
+        if source in {item.get("title"), item.get("path")} or path.name == name:
+            return path, str(item.get("title") or path.name)
+    for candidate in (workspace / "files" / name, workspace / "artifacts" / name):
+        if candidate.is_file() and candidate.suffix.lower() in _PPT_SUFFIXES:
+            return candidate, candidate.name
+    return None, ""
+
+
+_PAPER_ID_RE = re.compile(r"\bp_[0-9a-f]{10,16}\b")
+_DOI_RE = re.compile(r"\b10\.\d{4,9}/[^\s)\]），。；、]+")
+
+
+def _cited_rows(text: str, library: Any) -> list[dict[str, Any]]:
+    """从正文里找出被引用的 paperId / DOI，用于自动生成参考文献表。"""
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for paper_id in _PAPER_ID_RE.findall(text):
+        if paper_id in seen:
+            continue
+        row = library.get(paper_id)
+        if row:
+            rows.append(row)
+            seen.add(paper_id)
+
+    dois = {match.rstrip(".").lower() for match in _DOI_RE.findall(text)}
+    if dois:
+        for row in library.list(include_project=True):
+            doi = str(row.get("doi") or "").strip().lower()
+            if doi and doi in dois and row["id"] not in seen:
+                rows.append(row)
+                seen.add(row["id"])
+    return rows
+
+
+def _export_pptx(
+    research: ResearchStore, project: dict[str, Any], body: ExportIn
+) -> dict[str, Any]:
+    """把结构化 slides（或 markdown 提纲）渲染成 16:9 的 .pptx。"""
+    pid = str(project["id"])
+    workspace = Path(project["workspace"])
+    title = (body.title or "").strip()
+    slides = [item for item in (body.deck or []) if isinstance(item, dict)]
+
+    if not slides:
+        _found, text = _export_source(research, pid, body.source)
+        if body.content:
+            text = body.content
+        if not text.strip():
+            return {
+                "format": "pptx",
+                "files": [],
+                "error": "没有可用的提纲：请传 deck（结构化 slides）或 source / content。",
+            }
+        slides = parse_outline(text, title=title)
+        title = title or str(slides[0].get("title") or "")
+
+    if body.subtitle and slides:
+        slides[0].setdefault("subtitle", body.subtitle)
+    if body.author:
+        slides[0].setdefault("author", body.author)
+    if body.date:
+        slides[0].setdefault("date", body.date)
+
+    template_bytes: bytes | None = None
+    template_label = "builtin"
+    if body.ppt_template:
+        template_path, template_label = _find_ppt_template(
+            research, pid, body.ppt_template
+        )
+        if template_path is None:
+            return {
+                "format": "pptx",
+                "files": [],
+                "error": (
+                    f"没有找到 PPT 模板：{body.ppt_template}。"
+                    "请先把 .pptx 上传到项目文件树，再用文件名指定。"
+                ),
+            }
+        template_bytes = template_path.read_bytes()
+
+    try:
+        blob = build_deck(slides, title=title, template=template_bytes)
+    except Exception as error:  # noqa: BLE001 - 渲染失败要回显原因
+        return {"format": "pptx", "files": [], "error": f"生成 PPT 失败：{error}"}
+
+    filename = safe_name(body.filename or f"{title or '汇报'}.pptx")
+    if not filename.lower().endswith(".pptx"):
+        filename += ".pptx"
+    relative, size = save_bytes(workspace, filename, blob)
+    item = research.add_item(
+        pid,
+        "file",
+        filename,
+        path=relative,
+        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        size=size,
+    )
+    return {
+        "format": "pptx",
+        "files": [
+            {
+                "name": filename,
+                "path": relative,
+                "size": size,
+                "itemId": item["id"],
+                "kind": "pptx",
+            }
+        ],
+        "slides": len(slides),
+        "title": title,
+        "template": template_label,
+    }
+
+
 def _export_latex(
-    research: ResearchStore, project: dict[str, Any], body: ExportIn, fmt: str
+    research: ResearchStore,
+    project: dict[str, Any],
+    body: ExportIn,
+    fmt: str,
+    audit: Callable[[str], dict[str, Any]] | None = None,
+    library: Any | None = None,
 ) -> dict[str, Any]:
     """把 Markdown 稿转成 .tex，或在已有 .tex 上编译 PDF。
 
@@ -284,6 +587,12 @@ def _export_latex(
             "error": "没有找到要导出的正文：请传 content，或让 source 指向项目里的文稿。",
         }
 
+    # 已经是完整 .tex 的稿件不做 Markdown 引用审计，避免把 \cite 当成 0 引用。
+    citation = (
+        audit(text)
+        if audit is not None and not text.lstrip().startswith("\\documentclass")
+        else None
+    )
     files: list[dict[str, Any]] = []
     source_root = files_root(workspace)
     # 只有项目文件树里的 .tex 才就地编译；产物里的 .tex 复制一份到 files/ 再编译，
@@ -312,6 +621,36 @@ def _export_latex(
     else:
         target_dir = source_path.parent if existing_tex is not None else source_root
         bib = bib_stem(target_dir) or bib_stem(source_root) or bib_stem(workspace)
+        nocite = False
+        # 没有 .bib 时，按正文里出现的 paperId / DOI 自动生成一份，
+        # 让 PDF 至少有一份可核对的参考文献表。
+        if bib is None and library is not None:
+            cited = _cited_rows(text, library)
+            if cited:
+                bib_text = build_bibtex(
+                    [paper_from_dict(_bib_dict(row)) for row in cited]
+                )
+                bib_file = target_dir / "references.bib"
+                bib_file.write_text(bib_text, encoding="utf-8")
+                bib_relative = bib_file.resolve().relative_to(source_root).as_posix()
+                research.add_item(
+                    pid,
+                    "file",
+                    "references.bib",
+                    path=bib_relative,
+                    mime="text/plain",
+                    size=bib_file.stat().st_size,
+                )
+                files.append(
+                    {
+                        "name": "references.bib",
+                        "path": bib_relative,
+                        "size": bib_file.stat().st_size,
+                        "kind": "bib",
+                    }
+                )
+                bib = "references"
+                nocite = True
         tex, style, error = build_tex(
             text,
             title=title,
@@ -319,6 +658,8 @@ def _export_latex(
             abstract=body.abstract or "",
             template=body.template or "auto",
             bib_name=bib,
+            nocite=nocite,
+            citation_labels=_citation_labels(text, library) if library is not None else None,
         )
         if error:
             return {"format": fmt, "files": [], "error": error}
@@ -326,6 +667,8 @@ def _export_latex(
         filename = safe_name(body.filename or "main.tex")
         if not filename.lower().endswith(".tex"):
             filename += ".tex"
+        # bibtex 对带点的 jobname 容易失败，统一把主干里的点换成短横线。
+        filename = f"{Path(filename).stem.replace('.', '-')}.tex"
         relative, size = save_bytes(workspace, filename, tex.encode("utf-8"))
         item = research.add_item(
             pid, "file", filename, path=relative, mime="text/x-tex", size=size
@@ -348,6 +691,8 @@ def _export_latex(
         "source": title,
         "compiled": False,
     }
+    if citation is not None:
+        result["citation"] = citation
 
     if fmt == "latex" and not body.compile:
         return result
@@ -378,6 +723,112 @@ def _export_latex(
     else:
         result["warning"] = error
     return result
+
+
+_ISSUE_LABELS = {
+    "unresolved_paper": "未解析引用",
+    "page_unverifiable": "页码无法核对",
+    "page_out_of_range": "页码超出范围",
+    "weak_support": "弱支持",
+    "uncited_claim": "无引用论断",
+}
+
+
+def _citation_markdown(report: dict[str, Any], label: str) -> str:
+    metrics = report.get("metrics") or {}
+    lines = [
+        f"# 引用审计 · {label}",
+        "",
+        "| 指标 | 数值 |",
+        "| --- | --- |",
+        f"| 引用总数 | {metrics.get('citationsTotal', 0)} |",
+        f"| 本地引用 | {metrics.get('localCitations', 0)} |",
+        f"| 页码级引用 | {metrics.get('pageLevel', 0)} |",
+        f"| 页码级引用率 | {round(float(metrics.get('pageRatio') or 0) * 100)}% |",
+        f"| 来源数 | {metrics.get('sourcesUnique', 0)} |",
+        f"| 有页码来源 | {metrics.get('sourcesWithPage', 0)} |",
+        f"| 全文来源 | {metrics.get('fulltextSources', 0)} |",
+        f"| 未解析引用 | {metrics.get('unresolved', 0)} |",
+        f"| 弱支持 | {metrics.get('weakSupport', 0)} |",
+        f"| 无引用论断 | {metrics.get('uncitedClaims', 0)} |",
+        f"| 分节 | {metrics.get('sections', 0)}"
+        f"（来源不足 2 篇：{metrics.get('weakSections', 0)}） |",
+        "",
+        "## 建议",
+        "",
+    ]
+    lines.extend(f"- {item}" for item in report.get("suggestions") or [])
+    issues = report.get("issues") or []
+    if issues:
+        lines.extend(["", "## 明细", ""])
+        for issue in issues[:30]:
+            label_text = _ISSUE_LABELS.get(str(issue.get("kind")), str(issue.get("kind")))
+            where = f"第 {issue.get('line')} 行"
+            if issue.get("paperId"):
+                where += f" · {issue['paperId']}"
+                if issue.get("page"):
+                    where += f" p{issue['page']}"
+            detail = str(issue.get("detail") or "")
+            claim = str(issue.get("claim") or "").strip()
+            suffix = f"「{claim}」" if claim else ""
+            lines.append(f"- {where} {label_text}：{detail}{suffix}")
+    return "\n".join(lines) + "\n"
+
+
+def _audit_export(
+    research: ResearchStore,
+    library: Any,
+    project: dict[str, Any],
+    text: str,
+    label: str,
+    session_id: str,
+) -> dict[str, Any]:
+    """导出前跑一次引用审计，并把报告写成项目产物。"""
+    project_id = str(project["id"])
+    report = audit_review(text, project_id, library)
+    metrics = report.get("metrics") or {}
+    warnings: list[str] = []
+    if metrics.get("unresolved"):
+        warnings.append(
+            f"{metrics['unresolved']} 处引用无法解析：paperId 不在本地库或页码超出全文范围。"
+        )
+    if float(metrics.get("pageRatio") or 0) < 0.6:
+        warnings.append(
+            f"页码级引用率 {round(float(metrics['pageRatio']) * 100)}%，低于 60%："
+            "关键论断需要先 paper_read 再标注页码。"
+        )
+    if metrics.get("uncitedClaims"):
+        warnings.append(f"{metrics['uncitedClaims']} 处结论句没有引用。")
+
+    workspace = Path(project["workspace"])
+    target_dir = workspace / "artifacts"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / CITATION_REPORT_NAME
+    markdown = _citation_markdown(report, label or "综述草稿")
+    try:
+        target.write_text(markdown, encoding="utf-8")
+        registered = {
+            str(row.get("path") or "")
+            for row in research.list_artifacts(project_id)
+        }
+        if CITATION_REPORT_NAME not in registered:
+            research.add_artifact(
+                project_id,
+                "引用审计报告",
+                "note",
+                CITATION_REPORT_NAME,
+                session_id=session_id,
+                meta={"metrics": metrics},
+            )
+    except OSError:
+        pass
+
+    return {
+        "metrics": metrics,
+        "warnings": warnings,
+        "report": f"artifacts/{CITATION_REPORT_NAME}",
+        "suggestions": report.get("suggestions") or [],
+    }
 
 
 def build_router(
@@ -551,7 +1002,7 @@ def build_router(
                 "title": session["title"],
                 "status": session["status"],
             },
-            "project": _project_payload(project),
+            "project": _project_payload(project, research, library),
             "files": [
                 {
                     "name": item["title"],
@@ -578,6 +1029,149 @@ def build_router(
             "library": {"papers": len(rows), "tags": tags[:50]},
         }
 
+    @router.get("/sessions/{session_id}/files")
+    def read_file(
+        session_id: str,
+        path: str = Query(..., description="project_read 返回的相对路径或文件名"),
+        x_internal_token: str | None = Header(default=None, alias="x-internal-token"),
+    ) -> dict[str, Any]:
+        """读取当前项目里的文本文件，供 agent 在后续轮次检查/修订草稿。"""
+        _check(x_internal_token)
+        _session, project = _session_project(session_id)
+        project_id = str(project["id"])
+        wanted = path.strip()
+        items = research.list_items(project_id)
+        item = next(
+            (
+                row
+                for row in items
+                if wanted in {row.get("path"), row.get("title")}
+            ),
+            None,
+        )
+        if item is None:
+            name = safe_name(wanted)
+            item = next(
+                (
+                    row
+                    for row in items
+                    if Path(str(row.get("path") or "")).name == name
+                ),
+                None,
+            )
+        if item is None:
+            raise HTTPException(status_code=404, detail="file not found")
+        file_path = research.item_path(project_id, item)
+        if not file_path.is_file():
+            raise HTTPException(status_code=404, detail="file not found")
+        text = _read_text(file_path)
+        return {
+            "file": {
+                "name": item["title"],
+                "path": item.get("path") or "",
+                "kind": item["kind"],
+                "size": int(item.get("size") or 0),
+            },
+            "content": text,
+            "binary": not text and file_path.suffix.lower() not in TEXT_SUFFIXES,
+            "truncated": "…（已截断）" in text,
+        }
+
+    @router.get("/sessions/{session_id}/review/templates")
+    def review_templates(
+        session_id: str,
+        x_internal_token: str | None = Header(default=None, alias="x-internal-token"),
+    ) -> dict[str, Any]:
+        """可选综述模板：系统默认 / 内置 / 应用设置 / 项目内上传。"""
+        _check(x_internal_token)
+        _session, project = _session_project(session_id)
+        project_id = str(project["id"])
+        files_dir = files_root(research.workspace(project_id))
+        global_root = _global_template_root(research)
+        project_choice = _read_review_template(research, project_id)
+        global_choice = template_store.read_choice(global_root)
+        selected = project_choice or global_choice or "default"
+
+        items = list_templates(files_dir)
+        known = {str(item.get("id")) for item in items}
+        for item in template_store.list_options(global_root):
+            if item["id"] not in known:
+                items.append(item)
+                known.add(str(item["id"]))
+        detail = template_store.describe(selected, global_root, library)
+        guide = detail.get("guide") or {}
+        if selected.startswith("paper:") and detail.get("name"):
+            items.append(
+                {
+                    "id": selected,
+                    "name": detail["name"],
+                    "source": "paper",
+                    "description": "来自文献库的综述结构",
+                    "sections": detail.get("sections") or [],
+                    "guide": guide,
+                }
+            )
+        return {
+            "selected": selected,
+            "scope": "project" if project_choice else "global" if global_choice else "default",
+            "globalSelected": global_choice or "default",
+            "guide": guide,
+            "templates": items,
+        }
+
+    @router.get("/sessions/{session_id}/citations/check")
+    def check_citations(
+        session_id: str,
+        source: str | None = Query(default=None, description="草稿文件名或产物标题"),
+        template: str | None = Query(default=None, description="模板 id 或项目内模板文件名"),
+        x_internal_token: str | None = Header(default=None, alias="x-internal-token"),
+    ) -> dict[str, Any]:
+        """审计综述草稿的引用结构，返回可验证的页码/来源指标。"""
+        _check(x_internal_token)
+        _session, project = _session_project(session_id)
+        project_id = str(project["id"])
+        title, text = _export_source(research, project_id, source)
+        if not text:
+            raise HTTPException(status_code=404, detail="没有找到可审计的 Markdown 草稿")
+        report = audit_review(text, project_id, library)
+        report["source"] = {"title": title or source or "未命名", "chars": len(text)}
+        # 草稿与“标准综述”的差距：让 agent 每轮都能看到还缺哪些章节、证据与引用。
+        choice = _effective_template_choice(research, project_id, template)
+        sections, label, error = _resolve_review_template(
+            choice,
+            files_root(research.workspace(project_id)),
+            research,
+            library,
+        )
+        report["standard"] = evaluate_review(
+            text, report, sections=sections, template_label=label
+        )
+        if error:
+            report["standard"]["error"] = error
+        return report
+
+    @router.post("/sessions/{session_id}/run")
+    def run_terminal(
+        session_id: str,
+        body: RunIn,
+        x_internal_token: str | None = Header(default=None, alias="x-internal-token"),
+    ) -> dict[str, Any]:
+        """在项目 files/ 目录内执行一条命令。"""
+        _check(x_internal_token)
+        _session, project = _session_project(session_id)
+        try:
+            return run_command(
+                research,
+                str(project["id"]),
+                body.command,
+                cwd=body.cwd,
+                timeout_ms=body.timeout_ms,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @router.patch("/sessions/{session_id}/project")
     def patch_project(
         session_id: str,
@@ -590,12 +1184,15 @@ def build_router(
             key: value
             for key, value in body.model_dump(exclude_none=True).items()
         }
+        template = patch.pop("review_template", None)
+        if template is not None:
+            _write_review_template(research, str(project["id"]), str(template))
         if not patch:
-            return {"project": _project_payload(project)}
+            return {"project": _project_payload(project, research, library)}
         updated = research.update_project(str(project["id"]), **patch)
         if updated is None:
             raise HTTPException(status_code=404, detail="project not found")
-        return {"project": _project_payload(updated)}
+        return {"project": _project_payload(updated, research, library)}
 
     # ── 项目文件 / 产物 ────────────────────────────────
 
@@ -629,13 +1226,117 @@ def build_router(
             }
         }
 
+    def _docx_target(
+        project: dict[str, Any], wanted: str
+    ) -> tuple[str, dict[str, Any], Path]:
+        """把路径 / 标题 / 文件名定位到项目里的 .docx 文件。"""
+        project_id = str(project["id"])
+        target = wanted.strip()
+        items = research.list_items(project_id)
+        item = next(
+            (
+                row
+                for row in items
+                if target in {str(row.get("path") or ""), str(row.get("title") or "")}
+            ),
+            None,
+        )
+        if item is None:
+            name = safe_name(target)
+            item = next(
+                (
+                    row
+                    for row in items
+                    if Path(str(row.get("path") or "")).name == name
+                ),
+                None,
+            )
+        if item is None:
+            raise HTTPException(status_code=404, detail="file not found")
+        file_path = research.item_path(project_id, item)
+        if not file_path.is_file():
+            raise HTTPException(status_code=404, detail="file not found")
+        if file_path.suffix.lower() != ".docx":
+            raise HTTPException(status_code=400, detail="只支持 .docx 文件")
+        return project_id, item, file_path
+
+    @router.get("/sessions/{session_id}/docx")
+    def docx_read_file(
+        session_id: str,
+        path: str = Query(..., description="项目里的 .docx 路径或文件名"),
+        x_internal_token: str | None = Header(default=None, alias="x-internal-token"),
+    ) -> dict[str, Any]:
+        """读取 docx 的段落 / 表格结构，供 agent 定位要修改的地方。"""
+        _check(x_internal_token)
+        _session, project = _session_project(session_id)
+        _project_id, item, file_path = _docx_target(project, path)
+        try:
+            result = read_docx(file_path)
+        except DocxError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        result["file"].update(
+            {"path": item.get("path") or "", "itemId": item["id"]}
+        )
+        return result
+
+    @router.post("/sessions/{session_id}/docx")
+    def docx_edit_file(
+        session_id: str,
+        body: DocxEditIn,
+        x_internal_token: str | None = Header(default=None, alias="x-internal-token"),
+    ) -> dict[str, Any]:
+        """按操作列表就地修改项目里的 docx，保存后同步文件列表里的大小。"""
+        _check(x_internal_token)
+        _session, project = _session_project(session_id)
+        project_id, item, file_path = _docx_target(project, body.path)
+        try:
+            result = edit_docx(file_path, body.operations, Path(project["workspace"]))
+        except DocxError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        research.set_item_size(project_id, str(item["id"]), result["file"]["size"])
+        result["file"].update(
+            {"path": item.get("path") or "", "itemId": item["id"]}
+        )
+        return result
+
     def _write_artifact(
         project: dict[str, Any], session_id: str, body: ArtifactIn
     ) -> dict[str, Any]:
         workspace = Path(project["workspace"])
         target_dir = workspace / "artifacts"
         target_dir.mkdir(parents=True, exist_ok=True)
-        fallback = (body.title or "未命名产物").strip() + ".md"
+        project_id = str(project["id"])
+        title = (body.title or "").strip()
+        fallback = (title or "未命名产物") + ".md"
+
+        # 同名产物视为“同一份稿子的新版本”：覆盖文件、版本号 +1，
+        # 而不是生成 综述初稿-1.md / 综述初稿-2.md 这样的一串副本。
+        existing = None
+        for row in research.list_artifacts(project_id):
+            row_title = (row.get("title") or "").strip()
+            if title and row_title == title:
+                existing = row
+                break
+            if (
+                not title
+                and body.filename
+                and Path(str(row.get("path") or "")).name == safe_name(body.filename)
+            ):
+                existing = row
+                break
+
+        if existing is not None:
+            filename = Path(str(existing.get("path") or "")).name or safe_name(fallback)
+            target = target_dir / filename
+            target.write_text(body.content, encoding="utf-8")
+            row = research.revise_artifact(
+                str(existing["id"]),
+                path=filename,
+                session_id=session_id,
+                kind=body.kind or existing.get("kind"),
+            )
+            return _artifact_payload(row)
+
         filename = safe_name(body.filename or fallback)
         target = target_dir / filename
         if target.exists():
@@ -647,7 +1348,7 @@ def build_router(
                     break
         target.write_text(body.content, encoding="utf-8")
         row = research.add_artifact(
-            str(project["id"]),
+            project_id,
             body.title or target.stem,
             body.kind or "note",
             target.name,
@@ -791,10 +1492,27 @@ def build_router(
             }
 
         if fmt in {"latex", "pdf"}:
-            return _export_latex(research, project, body, fmt)
+            label = body.source or body.title or "综述草稿"
+            return _export_latex(
+                research,
+                project,
+                body,
+                fmt,
+                audit=lambda text: _audit_export(
+                    research, library, project, text, label, session_id
+                ),
+                library=library,
+            )
+
+        if fmt in {"pptx", "ppt"}:
+            return _export_pptx(research, project, body)
 
         if fmt != "docx":
-            return {"format": fmt, "files": [], "error": "只支持 docx、bib、latex、pdf 四种格式。"}
+            return {
+                "format": fmt,
+                "files": [],
+                "error": "只支持 docx、bib、latex、pdf、pptx 五种格式。",
+            }
 
         title, text = _export_source(research, pid, body.source)
         if body.content:
@@ -805,6 +1523,14 @@ def build_router(
                 "files": [],
                 "error": "没有找到要导出的正文：请传 content，或 source 指向项目里的 markdown 文件。",
             }
+        citation = _audit_export(
+            research,
+            library,
+            project,
+            text,
+            body.source or title or "综述草稿",
+            session_id,
+        )
         exe = find_pandoc()
         if not exe:
             return {
@@ -849,6 +1575,7 @@ def build_router(
             "files": [{"name": filename, "path": relative, "size": size, "itemId": item["id"]}],
             "bytes": size,
             "source": title or body.source or "",
+            "citation": citation,
         }
 
     return router

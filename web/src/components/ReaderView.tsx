@@ -1,17 +1,33 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
-import type { Block, Paper, ViewMode } from '../types'
+import type { Block, Paper, ReaderContextItem, ViewMode } from '../types'
 import { loadPaper } from '../lib/api'
 import { outlineOf } from '../lib/blocks'
 import { keyPoints } from '../lib/assistant'
-import { translateStream } from '../lib/library'
+import {
+  addAnnotation,
+  deleteAnnotation,
+  extractHighlights,
+  listAnnotations,
+  listHighlights,
+  saveProgress,
+  translateStream,
+  updateAnnotation,
+  type Annotation,
+  type ReadingHighlight,
+} from '../lib/library'
+import { mediaUrl } from '../lib/mobile'
+import type { AnnotationActions } from './Annotations'
+import { loadTargetLang } from '../lib/translation'
+import { loadAutoHighlights } from '../lib/readingPrefs'
 import {
   loadModelSettings,
   readyModel,
@@ -20,7 +36,7 @@ import {
   type ModelKind,
 } from '../lib/settings'
 import { TopBar } from './TopBar'
-import { LeftPanel } from './LeftPanel'
+import { LeftPanel, PANEL_TABS, type TabKey } from './LeftPanel'
 import { MobileDock } from './MobileDock'
 import { PdfPages } from './PdfPages'
 import { Reader } from './Reader'
@@ -35,6 +51,11 @@ const PANEL_WIDTH_KEY = 'paperead.panelWidth'
 const MIN_PANEL_WIDTH = 260
 const MAX_PANEL_WIDTH = 640
 const DEFAULT_PANEL_WIDTH = 344
+
+function readInitialTab(): TabKey {
+  const q = new URLSearchParams(window.location.search).get('tab')
+  return (PANEL_TABS.some((t) => t.key === q) ? q : 'guide') as TabKey
+}
 
 function readPanelWidth(): number {
   try {
@@ -63,7 +84,7 @@ export function ReaderView({ paperId, onBack }: Props) {
   const [settledPage, setSettledPage] = useState(1)
   const [translating, setTranslating] = useState(false)
   // 示例数据只有 paper.json，没有 PDF 可看
-  const pdfHref = `/api/papers/${encodeURIComponent(paperId)}/file`
+  const pdfHref = mediaUrl(`/api/papers/${encodeURIComponent(paperId)}/file`)
   const canShowPdf = paperId !== 'demo'
   const [pdfMode, setPdfMode] = useState(
     () =>
@@ -87,7 +108,19 @@ export function ReaderView({ paperId, onBack }: Props) {
   )
   const [settingsKind, setSettingsKind] = useState<ModelKind>('answer')
   const [settingsVersion, setSettingsVersion] = useState(0)
+  const [annotations, setAnnotations] = useState<Annotation[]>([])
+  const [highlights, setHighlights] = useState<ReadingHighlight[]>([])
+  const [autoHighlights, setAutoHighlights] = useState(loadAutoHighlights)
+  // 示例数据没有后端，标注/进度只在真实论文上启用
+  const annotationsEnabled = paperId !== 'demo'
   const [panelWidth, setPanelWidth] = useState(readPanelWidth)
+  const [panelTab, setPanelTab] = useState<TabKey>(readInitialTab)
+  // 阅读页点图表/公式旁的小圆圈 → 加入左侧问答附录
+  const [contextItems, setContextItems] = useState<ReaderContextItem[]>([])
+  const contextIds = useMemo(
+    () => new Set(contextItems.map((item) => item.id)),
+    [contextItems],
+  )
   const [resizingPanel, setResizingPanel] = useState(false)
   const panelWidthRef = useRef(panelWidth)
   const dragRef = useRef<{
@@ -98,6 +131,7 @@ export function ReaderView({ paperId, onBack }: Props) {
   const workspaceRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const savedScroll = useRef(0)
+  const restored = useRef(false)
   const paperRef = useRef<Paper | null>(null)
   const pageById = useRef<Map<string, number>>(new Map())
   const requested = useRef<Set<number>>(new Set())
@@ -105,6 +139,9 @@ export function ReaderView({ paperId, onBack }: Props) {
   const inFlight = useRef(false)
   const inFlightPages = useRef<number[]>([])
   const queued = useRef<number[] | null>(null)
+  /** 已经提取过阅读重点的页（服务端也会去重，这里只减少请求） */
+  const extractedPages = useRef<Set<number>>(new Set())
+  const requestingHighlights = useRef<Set<number>>(new Set())
 
   // ── 阅读助手宽度：拖动中间分隔线调整 ───────────────────
   const maxPanelWidth = () => {
@@ -212,6 +249,21 @@ export function ReaderView({ paperId, onBack }: Props) {
     persistPanelWidth(next)
   }
 
+  // ── 图表/公式 → 问答附录 ───────────────────────────────
+  const attachContext = (item: ReaderContextItem) => {
+    setContextItems((prev) =>
+      prev.some((one) => one.id === item.id) ? prev : [...prev, item].slice(-6),
+    )
+    setPanelTab('chat')
+  }
+  const removeContext = (id: string) =>
+    setContextItems((prev) => prev.filter((one) => one.id !== id))
+  const clearContext = () => setContextItems([])
+
+  useEffect(() => {
+    setContextItems([])
+  }, [paperId])
+
   // ── 加载（解析没完成时自动重试） ───────────────────────
   useEffect(() => {
     let alive = true
@@ -256,6 +308,186 @@ export function ReaderView({ paperId, onBack }: Props) {
     pageById.current = map
   }, [paper])
 
+  // ── 高亮 / 笔记 ────────────────────────────────────────
+  useEffect(() => {
+    if (!annotationsEnabled) {
+      setAnnotations([])
+      return
+    }
+    let alive = true
+    listAnnotations(paperId)
+      .then((rows) => {
+        if (alive) setAnnotations(rows)
+      })
+      .catch(() => {
+        if (alive) setAnnotations([])
+      })
+    return () => {
+      alive = false
+    }
+  }, [paperId, annotationsEnabled])
+
+  // 设置里切换「自动阅读重点」：立即生效，不用刷新
+  useEffect(() => {
+    const onChanged = (event: Event) => {
+      setAutoHighlights(Boolean((event as CustomEvent).detail))
+    }
+    window.addEventListener('paperead:auto-highlights-changed', onChanged)
+    return () =>
+      window.removeEventListener('paperead:auto-highlights-changed', onChanged)
+  }, [])
+
+  const mergeHighlights = useCallback((page: number, items: ReadingHighlight[]) => {
+    setHighlights((prev) => [...prev.filter((item) => item.page !== page), ...items])
+    extractedPages.current.add(page)
+  }, [])
+
+  // ── 自动阅读重点（研究目标 / 方法 / 结论） ──────────────
+  useEffect(() => {
+    if (!annotationsEnabled) {
+      setHighlights([])
+      extractedPages.current = new Set()
+      return
+    }
+    let alive = true
+    listHighlights(paperId)
+      .then((data) => {
+        if (!alive) return
+        setHighlights(data.highlights ?? [])
+        extractedPages.current = new Set(
+          Object.keys(data.pages ?? {}).map((page) => Number(page)),
+        )
+      })
+      .catch(() => {
+        if (alive) setHighlights([])
+      })
+    return () => {
+      alive = false
+    }
+  }, [paperId, annotationsEnabled])
+
+  const annotationActions = useMemo<AnnotationActions | undefined>(() => {
+    if (!annotationsEnabled) return undefined
+    return {
+      create: async (input) => {
+        const row = await addAnnotation(paperId, input)
+        setAnnotations((prev) => [...prev, row])
+      },
+      update: async (id, patch) => {
+        const row = await updateAnnotation(paperId, id, patch)
+        setAnnotations((prev) => prev.map((item) => (item.id === row.id ? row : item)))
+      },
+      remove: async (id) => {
+        await deleteAnnotation(paperId, id)
+        setAnnotations((prev) => prev.filter((item) => item.id !== id))
+      },
+    }
+  }, [paperId, annotationsEnabled])
+
+  // 设置里切换译文语言：清掉本地旧译文，交给翻译流程按新语言重来
+  useEffect(() => {
+    if (paperId === 'demo') return
+    const onChanged = () => {
+      requested.current.clear()
+      abortRef.current?.abort()
+      const lang = loadTargetLang()
+      setHighlights([])
+      extractedPages.current = new Set()
+      requestingHighlights.current.clear()
+      setPaper((prev) =>
+        prev
+          ? {
+              ...prev,
+              translation_lang: lang,
+              glossary: {},
+              blocks: prev.blocks.map((b) => ({ ...b, translated: '' })),
+            }
+          : prev,
+      )
+    }
+    window.addEventListener('paperead:translation-changed', onChanged)
+    return () =>
+      window.removeEventListener('paperead:translation-changed', onChanged)
+  }, [paperId])
+
+  // 打开论文时如果库里的译文语言和当前设置不一致，先清掉旧译文再按新语言翻。
+  // 空值表示旧版本数据（默认中文），不能因此误清。
+  useEffect(() => {
+    if (!paper || paperId === 'demo') return
+    const lang = loadTargetLang()
+    if ((paper.translation_lang || 'zh-Hans') === lang) return
+    setHighlights([])
+    extractedPages.current = new Set()
+    requestingHighlights.current.clear()
+    setPaper((prev) =>
+      prev
+        ? {
+            ...prev,
+            translation_lang: lang,
+            glossary: {},
+            blocks: prev.blocks.map((b) => ({ ...b, translated: '' })),
+          }
+        : prev,
+    )
+  }, [paper, paperId])
+
+  // ── 阅读进度 ───────────────────────────────────────────
+  // 打开论文时回到上次位置；深链优先，避免覆盖用户主动跳转
+  useEffect(() => {
+    if (!paper || pdfMode || !annotationsEnabled || restored.current) return
+    restored.current = true
+    const hash = decodeURIComponent(window.location.hash.slice(1))
+    const progress = paper.progress
+    if (hash || !progress || (!progress.block_id && !progress.pct)) return
+    // 一次性动作：论文对象会随翻译流更新，这里不能把定时器绑在依赖清理上
+    window.setTimeout(() => {
+      const el = scrollRef.current
+      if (!el) return
+      const node = progress.block_id
+        ? el.querySelector<HTMLElement>(`#${CSS.escape(progress.block_id)}`)
+        : null
+      if (node) {
+        node.scrollIntoView({ block: 'start' })
+      } else {
+        el.scrollTop = (progress.pct / 100) * Math.max(0, el.scrollHeight - el.clientHeight)
+      }
+    }, 120)
+  }, [paper, pdfMode, annotationsEnabled])
+
+  // 滚动停稳后低频上报，避免每帧写盘
+  const readerReady = Boolean(paper)
+  useEffect(() => {
+    if (!readerReady || pdfMode || !annotationsEnabled) return
+    const el = scrollRef.current
+    if (!el) return
+    let timer: number | undefined
+    const report = () => {
+      const max = Math.max(0, el.scrollHeight - el.clientHeight)
+      const pct = max ? Math.min(100, Math.max(0, (el.scrollTop / max) * 100)) : 0
+      const threshold = el.getBoundingClientRect().top + 120
+      let blockId = ''
+      el.querySelectorAll<HTMLElement>('[data-block-id]').forEach((node) => {
+        if (node.getBoundingClientRect().top <= threshold) {
+          blockId = node.dataset.blockId || blockId
+        }
+      })
+      void saveProgress(paperId, {
+        pct: Math.round(pct * 10) / 10,
+        block_id: blockId,
+        page: pageById.current.get(blockId) ?? 1,
+      }).catch(() => {})
+    }
+    const onScroll = () => {
+      if (timer) window.clearTimeout(timer)
+      timer = window.setTimeout(report, 1200)
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => {
+      el.removeEventListener('scroll', onScroll)
+      if (timer) window.clearTimeout(timer)
+    }
+  }, [readerReady, pdfMode, annotationsEnabled, paperId])
+
   // ── 按页懒翻译：单飞 + 看门狗重试（流式，逐段出现） ──────
   const ensurePages = useCallback(
     async (pages: number[]) => {
@@ -263,6 +495,7 @@ export function ReaderView({ paperId, onBack }: Props) {
       if (!current || paperId === 'demo') return
       const cfg = readyModel(loadModelSettings(), 'answer')
       if (!cfg) return
+      const targetLang = loadTargetLang()
       // 同一时刻只跑一条流。用户快速滑动时：若正在翻的页已经离开视野，
       // 直接中止它，把配额让给用户真正停下来的那一页；否则排到队尾。
       if (inFlight.current) {
@@ -273,13 +506,15 @@ export function ReaderView({ paperId, onBack }: Props) {
         return
       }
 
+      const sameLang = (current.translation_lang || 'zh-Hans') === targetLang
       const need = pages.filter((pg) => {
         if (requested.current.has(pg)) return false
         const blocks = current.blocks.filter(
           (b) => b.page === pg && b.translatable && b.text.trim(),
         )
         if (!blocks.length) return false
-        return blocks.some((b) => !b.translated)
+        // 目标语言变了：即使本地已有旧译文，也要重新请求
+        return !sameLang || blocks.some((b) => !b.translated)
       })
       if (!need.length) return
 
@@ -295,6 +530,24 @@ export function ReaderView({ paperId, onBack }: Props) {
           toPayload(cfg),
           need,
           (evt) => {
+            if (evt.type === 'reset') {
+              setHighlights([])
+              extractedPages.current = new Set()
+              requestingHighlights.current.clear()
+              setPaper((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      translation_lang: evt.target_lang ?? loadTargetLang(),
+                      glossary: {},
+                      blocks: prev.blocks.map((b) => ({ ...b, translated: '' })),
+                    }
+                  : prev,
+              )
+            }
+            if (evt.type === 'highlights' && evt.page) {
+              mergeHighlights(evt.page, evt.highlights ?? [])
+            }
             if (evt.type === 'block' && evt.block) {
               const updated = evt.block as unknown as Block
               setPaper((prev) =>
@@ -308,6 +561,8 @@ export function ReaderView({ paperId, onBack }: Props) {
             }
           },
           ac.signal,
+          targetLang,
+          autoHighlights,
         )
       } catch (e) {
         if (!(e instanceof DOMException && e.name === 'AbortError')) {
@@ -325,7 +580,7 @@ export function ReaderView({ paperId, onBack }: Props) {
         if (next) window.setTimeout(() => void ensurePages(next), 0)
       }
     },
-    [paperId],
+    [paperId, mergeHighlights, autoHighlights],
   )
 
   // 进入阅读页先翻当前页 + 下一页；滚动停稳后换页继续增量翻
@@ -363,6 +618,56 @@ export function ReaderView({ paperId, onBack }: Props) {
     }, 3000)
     return () => window.clearInterval(timer)
   }, [settledPage, ensurePages, paperId])
+
+  // 翻译完成后补提取阅读重点：新翻的页由翻译流直接带回，
+  // 这里兜底处理「打开时已经翻好」的旧论文。服务端会跳过已处理页。
+  useEffect(() => {
+    if (paperId === 'demo' || !configured || !autoHighlights) return
+    const run = () => {
+      const current = paperRef.current
+      if (!current) return
+      const cfg = readyModel(loadModelSettings(), 'answer')
+      if (!cfg) return
+      const maxPage = current.page_count || 1
+      const pages = [settledPage, settledPage + 1].filter((p) => p >= 1 && p <= maxPage)
+      const need = pages.filter(
+        (pg) =>
+          !extractedPages.current.has(pg) &&
+          !requestingHighlights.current.has(pg) &&
+          current.blocks.some(
+            (b) => b.page === pg && b.translatable && b.text.trim() && b.translated,
+          ),
+      )
+      if (!need.length) return
+      need.forEach((pg) => requestingHighlights.current.add(pg))
+      void extractHighlights(paperId, toPayload(cfg), need)
+        .then((res) => {
+          const processed = new Set(res.processed ?? [])
+          processed.forEach((pg) =>
+            mergeHighlights(
+              pg,
+              (res.highlights ?? []).filter((item) => item.page === pg),
+            ),
+          )
+          // 服务端已经处理过的页也记下来，避免每 4 秒重复请求
+          Object.keys(res.pages ?? {}).forEach((page) =>
+            extractedPages.current.add(Number(page)),
+          )
+        })
+        .catch(() => {
+          // 失败不记账，下一轮重试
+        })
+        .finally(() => {
+          need.forEach((pg) => requestingHighlights.current.delete(pg))
+        })
+    }
+    const first = window.setTimeout(run, 1500)
+    const timer = window.setInterval(run, 4000)
+    return () => {
+      window.clearTimeout(first)
+      window.clearInterval(timer)
+    }
+  }, [paperId, settledPage, configured, mergeHighlights, autoHighlights])
 
   // ── 深链 / 目录高亮 / 当前页 ───────────────────────────
   useEffect(() => {
@@ -539,6 +844,15 @@ export function ReaderView({ paperId, onBack }: Props) {
                 setSettingsOpen(true)
               }}
               settingsVersion={settingsVersion}
+              annotations={annotations}
+              onUpdateAnnotation={annotationActions?.update ?? (async () => {})}
+              onDeleteAnnotation={annotationActions?.remove ?? (async () => {})}
+              highlights={highlights}
+              tab={panelTab}
+              onTab={setPanelTab}
+              contextItems={contextItems}
+              onRemoveContext={removeContext}
+              onClearContext={clearContext}
             />
             <div
               className="panel-resizer"
@@ -581,6 +895,11 @@ export function ReaderView({ paperId, onBack }: Props) {
                   ? '正在翻译当前页…'
                   : '当前页还没有译文，停在这里几秒会自动开始翻译。'
             }
+            annotations={annotations}
+            annotationActions={annotationActions}
+            highlights={highlights}
+            contextIds={contextIds}
+            onAttachContext={attachContext}
           />
         )}
       </div>
@@ -598,6 +917,13 @@ export function ReaderView({ paperId, onBack }: Props) {
             setSettingsOpen(true)
           }}
           settingsVersion={settingsVersion}
+          annotations={annotations}
+          onUpdateAnnotation={annotationActions?.update ?? (async () => {})}
+          onDeleteAnnotation={annotationActions?.remove ?? (async () => {})}
+          highlights={highlights}
+          contextItems={contextItems}
+          onRemoveContext={removeContext}
+          onClearContext={clearContext}
         />
       )}
 

@@ -39,8 +39,41 @@ _SECTION_RE = re.compile(
 )
 # 编号小节标题：2.1 Foo Bar
 _NUM_HEADING_RE = re.compile(r"^\d+(?:\.\d+)*\.?\s+[A-Z][A-Za-z]")
-# 图注 / 表注
-_CAPTION_RE = re.compile(r"^(?:Figure|Fig\.|FIGURE|Table|TABLE|Tab\.)\s*\d+", re.IGNORECASE)
+# 图注 / 表注。编号既可能是阿拉伯数字（Table 3），也可能是罗马数字
+# （MDPI/IEEE 常见的 TABLE II），还可能是补充材料编号（Table S1）。
+_CAP_NUM = r"(?:\d+(?:\.\d+)*|[IVXLCDM]+|[A-Z]\d+)"
+_CAPTION_RE = re.compile(
+    rf"^(?:Supplementary\s+)?(?:Figure|Fig\.|FIGURE|Table|TABLE|Tab\.)\s*{_CAP_NUM}\b",
+    re.IGNORECASE,
+)
+_TABLE_CAP_RE = re.compile(
+    rf"^(?:Supplementary\s+)?(?:Table|TABLE|Tab\.)\s*{_CAP_NUM}\b",
+    re.IGNORECASE,
+)
+# 只包含公式编号的行：(3) / （3.1）。裸数字多是页码或图里的数据标签，不收
+_EQ_NUM_ONLY_RE = re.compile(r"^[（(]\s*[A-Z]?\d{1,3}(?:\.\d+)?\s*[)）]$")
+
+
+def _is_caption_text(text: str) -> bool:
+    """区分「表题」和「正文里以 Table 1 开头的句子」。
+
+    `Table 1 shows ...` 这种引用句也以 Figure/Table + 编号开头，但不是图注。
+    真的图注在编号后通常紧跟冒号/句点，或者以大写标题开头。
+    """
+    t = text.strip()
+    if not t or len(t) > 400:
+        return False
+    m = _CAPTION_RE.match(t)
+    if not m:
+        return False
+    after = t[m.end():]
+    if after[:1] in (":", "：", ".", "-", "–", "—"):
+        return True
+    rest = after.strip()
+    if not rest:
+        return True
+    first = rest[:1]
+    return first.isupper() or first.isdigit() or first in "（(“\"'["
 # 数学字体（Computer Modern 数学族）
 _MATH_FONTS = ("CMMI", "CMEX", "CMSY", "MSBM", "MTMI", "MTEX", "EUSM", "EUFM", "Symbol")
 
@@ -112,6 +145,7 @@ class Block:
     caption: str = ""               # figure/table 的图注
     table_html: str = ""            # 表格结构化结果（find_tables 成功时）
     latex: str = ""                 # 公式的 LaTeX（formula.py 识别后写入）
+    eq_number: str = ""             # 公式编号（PDF 里印出来的 (3) / (2.1)）
     translatable: bool = True
     translated: str = ""
 
@@ -128,6 +162,7 @@ class Block:
             "image_path": self.image_path,
             "table_html": self.table_html,
             "latex": self.latex,
+            "eq_number": self.eq_number,
             "translatable": self.translatable,
             "translated": self.translated,
             "bbox": [round(v, 1) for v in self.bbox],
@@ -243,6 +278,7 @@ def _collect_lines(doc: pymupdf.Document) -> list[Line]:
 def _mark_margins(lines: list[Line], doc: pymupdf.Document) -> None:
     """标记页眉/页脚：几何位置 + 跨页重复文本双重判定。"""
     heights = {p: doc[p].rect.height for p in range(len(doc))}
+    widths = {p: doc[p].rect.width for p in range(len(doc))}
     for ln in lines:
         h = heights.get(ln.page - 1, 792)
         if ln.y1 < h * _HEADER_RATIO or ln.y0 > h * _FOOTER_RATIO:
@@ -261,6 +297,12 @@ def _mark_margins(lines: list[Line], doc: pymupdf.Document) -> None:
         for ln in lines:
             key = re.sub(r"\d+", "#", ln.text.strip().lower())
             if key in repeats and ln.page > 1:
+                # 右边缘的「(2)」这类是公式编号，不是页码：每页公式编号会重复
+                # 出现 (1)(2)...，归一化后都是 (##)，不能被当成页眉页脚丢掉
+                if _EQ_NUM_ONLY_RE.match(ln.text.strip()):
+                    w = widths.get(ln.page - 1, 612)
+                    if ln.x1 > w * 0.6:
+                        continue
                 ln.is_margin = True
 
 
@@ -453,6 +495,28 @@ def _guess_body_size(lines: list[Line]) -> float:
     return weights.most_common(1)[0][0] if weights else 10.0
 
 
+_CONTINUE_AFTER = ",，、;；:-–—/"
+_CONTINUE_START = re.compile(r"^(?:[a-z]|\d|\(|\[)")
+
+
+def _continues_paragraph(prev: str, nxt: str) -> bool:
+    """跨栏/跨页的两行是否属于同一段。
+
+    只认明确的接续证据：上一段没有以句末标点结束，且本行以小写、
+    数字或左括号开头，或上一行停在逗号/分号/连字符上。不确定就断开，
+    宁可多一段，也不要把两段粘成一段。
+    """
+    prev = prev.rstrip().rstrip('”"’')
+    nxt = nxt.lstrip()
+    if not prev or not nxt:
+        return False
+    if prev[-1] in ".!?。！？:：":
+        return False
+    if prev[-1] in _CONTINUE_AFTER:
+        return True
+    return bool(_CONTINUE_START.match(nxt))
+
+
 def _join_text(prev: str, nxt: str) -> str:
     """合并两行：处理 LaTeX 断词与空格。"""
     prev = prev.rstrip()
@@ -548,6 +612,24 @@ def _looks_equation(text: str, is_math_font: bool) -> bool:
     return not _STOP_RE.search(t)
 
 
+_EQ_NUMBER_RE = re.compile(r"[（(]\s*([A-Z]?\d{1,3}(?:\.\d+)?)\s*[)）]\s*[.,;]?\s*$")
+
+
+def _split_eq_number(text: str) -> tuple[str, str]:
+    """把行尾右对齐的公式编号 `(3)` 从公式正文里拆出来。
+
+    编号要单独渲染（前端右对齐），不能留在 LaTeX 里：视觉模型会把
+    `(3)` 当成公式的一部分，导致 KaTeX 排版出一个漂移的编号。
+    """
+    m = _EQ_NUMBER_RE.search(text)
+    if not m:
+        return text, ""
+    body = text[: m.start()].rstrip()
+    if len(body) < 2:
+        return text, ""
+    return body, m.group(1)
+
+
 def _build_blocks(ordered: list[Line], body_size: float) -> list[Block]:
     blocks: list[Block] = []
     cur: dict | None = None
@@ -596,11 +678,12 @@ def _build_blocks(ordered: list[Line], body_size: float) -> list[Block]:
     def flush_eq():
         nonlocal eq
         if eq and eq["text"].strip():
+            text, number = _split_eq_number(eq["text"].strip())
             blocks.append(
                 Block(
                     id="", order=len(blocks), page=eq["page"], kind="equation",
-                    text=eq["text"].strip(), bbox=eq["bbox"], translatable=False,
-                    size=eq.get("size", 0.0),
+                    text=text, bbox=eq["bbox"], translatable=False,
+                    size=eq.get("size", 0.0), eq_number=number,
                 )
             )
         eq = None
@@ -674,9 +757,13 @@ def _build_blocks(ordered: list[Line], body_size: float) -> list[Block]:
             cur = start(ln)
             continue
 
+        # 上一行是否写满，要用「上一行自己所在栏」的边界判断；
+        # 跨栏/跨页时如果拿新栏的右边界比，会误判成段落结束。
+        prev_left, prev_right = edges.get(
+            (cur["page"], cur["col"]), (cur["last_x0"], cur["last_x1"])
+        )
+        prev_short = cur["last_x1"] < prev_right - 0.08 * max(prev_right - prev_left, 1.0)
         left, right = edges.get((ln.page, ln.col), (ln.x0, ln.x1))
-        col_w = max(right - left, 1.0)
-        prev_short = cur["last_x1"] < right - 0.08 * col_w      # 上一行没写满 → 段落结束
         # 首行缩进：既要相对栏左边界缩进，又要相对上一行缩进（否则整段每行都会被误判）
         indented = (
             ln.x0 - left > 0.8 * ln.size
@@ -684,11 +771,26 @@ def _build_blocks(ordered: list[Line], body_size: float) -> list[Block]:
         )
         gap = ln.y0 - cur["last_y1"]
 
-        new_para = (
+        same_style = (
+            abs(ln.size - cur["size"]) <= 1.0 and ln.bold == cur["bold"]
+        )
+        # 跨栏（左→右、右→下一页左栏）和跨页的断行：满足「上一行写满 +
+        # 上一段没说完 + 本行小写/接续符开头 + 无首行缩进」就接回同一段。
+        # 这是 Scholaread 强调的阅读连续性；只在有明确接续证据时合并，
+        # 避免把相邻的两个段落粘在一起。
+        cross = ln.page != cur["page"] or ln.col != cur["col"]
+        continuation = (
+            cross
+            and same_style
+            and not prev_short
+            and not indented
+            and _continues_paragraph(cur["text"], ln.text)
+        )
+
+        new_para = (not continuation) and (
             ln.col != cur["col"]
             or gap > max(line_h * 1.55, 6)
-            or abs(ln.size - cur["size"]) > 1.0
-            or ln.bold != cur["bold"]
+            or not same_style
             or prev_short
             or indented
         )
@@ -905,13 +1007,57 @@ def _classify(blocks: list[Block], body_size: float, page_height: float = 792.0)
             b.translatable = False
             continue
 
-        if _CAPTION_RE.match(t):
+        if _CAPTION_RE.match(t) and _is_caption_text(t):
             b.kind = "caption"
         elif _FOOTNOTE_RE.search(t) and len(t) < 400:
             b.kind = "footnote"
             b.translatable = False
         else:
             b.kind = "para"
+
+
+def _attach_equation_numbers(blocks: list[Block], doc: pymupdf.Document) -> list[Block]:
+    """把右边缘独立的 `(3)` 行挂到同一水平线上的公式块上。
+
+    双栏 PDF 里公式正文和编号常被切成两个 block（编号落在右栏边界），
+    只靠行内文本拆不出来。这里按「同一基线 + 编号在公式右侧」配对，
+    没有编号的公式保持为空，前端就不显示编号。
+    """
+    equations = [b for b in blocks if b.kind == "equation"]
+    if not equations:
+        return blocks
+
+    widths = {p + 1: doc[p].rect.width for p in range(len(doc))}
+    drop: set[int] = set()
+    for b in blocks:
+        if b.kind != "para" or not _EQ_NUM_ONLY_RE.match(b.text.strip()):
+            continue
+        width = widths.get(b.page, 612)
+        if b.bbox[2] < width * 0.6:
+            continue
+        cy = (b.bbox[1] + b.bbox[3]) / 2
+        cands = [
+            e for e in equations
+            if e.page == b.page
+            and not e.eq_number
+            and e.bbox[0] < b.bbox[0]
+            and (e.bbox[1] + e.bbox[3]) / 2 - 10 <= cy <= (e.bbox[1] + e.bbox[3]) / 2 + 10
+        ]
+        if not cands:
+            continue
+        eq = min(cands, key=lambda e: abs((e.bbox[1] + e.bbox[3]) / 2 - cy))
+        number = b.text.strip().strip("()（）").strip()
+        if number:
+            eq.eq_number = number
+            drop.add(id(b))
+
+    if not drop:
+        return blocks
+    out = [b for b in blocks if id(b) not in drop]
+    for i, blk in enumerate(out):
+        blk.order = i
+        blk.id = f"b{i:04d}"
+    return out
 
 
 def _drop_noise(blocks: list[Block]) -> list[Block]:
@@ -994,28 +1140,116 @@ def _merge_across_pages(blocks: list[Block]) -> list[Block]:
     return out
 
 
-def _find_page_tables(doc: pymupdf.Document) -> dict[int, list[tuple[pymupdf.Rect, str]]]:
-    """用 PyMuPDF 内置表格识别拿到结构化表格（HTML）。"""
-    out: dict[int, list[tuple[pymupdf.Rect, str]]] = {}
-    for pno in range(len(doc)):
-        page = doc[pno]
+def _is_table_caption(text: str) -> bool:
+    return bool(_TABLE_CAP_RE.match(text.strip())) and _is_caption_text(text)
+
+
+def _overlap_ratio(a: pymupdf.Rect, b: pymupdf.Rect) -> float:
+    """相交面积占较小矩形面积的比例（0~1）。"""
+    inter = a & b
+    if inter.is_empty:
+        return 0.0
+    small = min(a.width * a.height, b.width * b.height) or 1.0
+    return inter.width * inter.height / small
+
+
+def _rect_gap(a: pymupdf.Rect, b: pymupdf.Rect) -> float:
+    """两个矩形的最近间距；相交时为 0。"""
+    dx = max(a.x0 - b.x1, b.x0 - a.x1, 0.0)
+    dy = max(a.y0 - b.y1, b.y0 - a.y1, 0.0)
+    return max(dx, dy)
+
+
+def _page_tables(page: pymupdf.Page, strategy: str = "lines") -> list[tuple[pymupdf.Rect, str, int]]:
+    """单页表格识别。lines 策略找有线框的表，text 策略找纯空白分隔的无框表。"""
+    try:
+        kwargs = {} if strategy == "lines" else {"strategy": strategy}
+        found = page.find_tables(**kwargs)
+    except Exception:
+        return []
+    rows: list[tuple[pymupdf.Rect, str, int]] = []
+    for tab in getattr(found, "tables", None) or []:
         try:
-            found = page.find_tables()
+            rect = pymupdf.Rect(tab.bbox)
+            if rect.width < 60 or rect.height < 18:
+                continue
+            html = ""
+            for meth in ("to_html", "to_markdown"):
+                if hasattr(tab, meth):
+                    html = getattr(tab, meth)() or ""
+                    break
+            rows.append((rect, html, int(getattr(tab, "col_count", 0) or 0)))
         except Exception:
             continue
-        for tab in getattr(found, "tables", None) or []:
-            try:
-                rect = pymupdf.Rect(tab.bbox)
-                if rect.width < 60 or rect.height < 18:
-                    continue
-                html = ""
-                for meth in ("to_html", "to_markdown"):
-                    if hasattr(tab, meth):
-                        html = getattr(tab, meth)() or ""
-                        break
-                out.setdefault(pno + 1, []).append((rect, html))
-            except Exception:
+    return rows
+
+
+def _find_page_tables(doc: pymupdf.Document) -> dict[int, list[tuple[pymupdf.Rect, str, int]]]:
+    """逐页找表：先用线框策略，没找到再用文本对齐策略。
+
+    MDPI/IEEE 的综述表经常只有横线、列间靠空白对齐，`lines` 策略会整表漏掉；
+    反过来 `text` 策略容易把双栏正文误判成表。所以按「lines 优先、text 补漏」
+    两段式跑，并做一次重叠去重。
+    """
+    out: dict[int, list[tuple[pymupdf.Rect, str, int]]] = {}
+    for pno in range(len(doc)):
+        page = doc[pno]
+        tables = _page_tables(page, "lines")
+        if not tables:
+            tables = _page_tables(page, "text")
+        # 同一张表可能被两种策略各命中一次，或一张大表被切成几块：合并重叠项
+        merged: list[tuple[pymupdf.Rect, str, int]] = []
+        for rect, html, cols in tables:
+            for i, (r0, h0, c0) in enumerate(merged):
+                if _overlap_ratio(rect, r0) > 0.6:
+                    merged[i] = (r0 | rect, h0 or html, max(c0, cols))
+                    break
+            else:
+                merged.append((rect, html, cols))
+        if merged:
+            out[pno + 1] = merged
+    return out
+
+
+def _table_crop_rect(page: pymupdf.Page, rect: pymupdf.Rect, margin: float = 4.0) -> pymupdf.Rect:
+    """把表格识别框扩到「整张表」：包含整栏宽度和贴边的横线/表头。
+
+    find_tables 的 bbox 常常从第一条单元格文字开始，漏掉左侧类别列和表头线；
+    直接裁会缺边。这里按同纵向范围的文字边界扩到整栏，并入紧邻的细横线。
+    """
+    out = pymupdf.Rect(rect)
+    x0, x1 = out.x0, out.x1
+    try:
+        for b in page.get_text("dict")["blocks"]:
+            if b.get("type") != 0:
                 continue
+            br = pymupdf.Rect(b["bbox"])
+            cy = (br.y0 + br.y1) / 2
+            if out.y0 - 3 <= cy <= out.y1 + 3:
+                x0 = min(x0, br.x0)
+                x1 = max(x1, br.x1)
+    except Exception:
+        pass
+    page_rect = page.rect
+    out = pymupdf.Rect(
+        max(page_rect.x0, x0 - margin),
+        max(page_rect.y0, out.y0 - margin),
+        min(page_rect.x1, x1 + margin),
+        min(page_rect.y1, out.y1 + margin),
+    )
+    try:
+        for d in page.get_drawings():
+            dr = pymupdf.Rect(d["rect"])
+            if dr.height > 14:            # 只并入横线/分隔线，不并入整块图形
+                continue
+            if dr.x0 < out.x0 - 8 or dr.x1 > out.x1 + 8:
+                continue
+            if dr.y0 <= out.y0 + 10 and dr.y1 >= out.y0 - 10:
+                out |= dr
+            elif dr.y0 <= out.y1 + 10 and dr.y1 >= out.y1 - 10:
+                out |= dr
+    except Exception:
+        pass
     return out
 
 
@@ -1030,45 +1264,69 @@ def _extract_tables_structured(
         return blocks
 
     insert_before: dict[str, list[Block]] = {}
+    insert_after: dict[str, list[Block]] = {}
     dropped: set[int] = set()
+    last_cap: tuple[int, Block] | None = None
 
-    for page_no, tables in detected.items():
+    for page_no in sorted(detected):
+        page = doc[page_no - 1]
         captions = [
             b for b in blocks
-            if b.page == page_no and b.kind == "caption"
-            and re.match(r"^(Table|TABLE|Tab\.)\s*\d", b.text)
+            if b.page == page_no and b.kind == "caption" and _is_table_caption(b.text)
         ]
-        used: set[int] = set()
-        for k, (rect, html) in enumerate(tables):
-            best, best_d = None, 1e9
-            for idx, c in enumerate(captions):
-                if idx in used:
+        used: set[str] = set()
+        for k, (rect, html, _cols) in enumerate(detected[page_no]):
+            cap: Block | None = None
+            best_d = 1e9
+            for c in captions:
+                if c.id in used:
                     continue
                 dist = min(abs(c.bbox[1] - rect.y1), abs(rect.y0 - c.bbox[3]))
-                if dist < best_d and dist <= 160:
-                    best, best_d = idx, dist
-            if best is None:
+                if dist < best_d and dist <= 200:
+                    cap, best_d = c, dist
+
+            continued = False
+            if cap is None and last_cap is not None:
+                # 跨页续表：本页顶部就是表格，且上一页有表题 → 沿用上一页表题
+                lp, last = last_cap
+                if page_no - lp <= 1 and rect.y0 <= page.rect.height * 0.30:
+                    cap, continued = last, True
+            if cap is None:
                 continue
-            used.add(best)
-            cap = captions[best]
-            img = _crop(doc[page_no - 1], rect, out_dir / f"p{page_no:03d}_tab{k}.png")
-            insert_before.setdefault(cap.id, []).append(
-                Block(
-                    id=f"tab_{page_no}_{k}", order=0, page=page_no, kind="table",
-                    text="", bbox=(rect.x0, rect.y0, rect.x1, rect.y1),
-                    image_path=img, caption=cap.text, table_html=html,
-                    translatable=False,
-                )
+            if not continued:
+                used.add(cap.id)
+                last_cap = (page_no, cap)
+
+            crop = _table_crop_rect(page, rect)
+            img = _crop(
+                page, crop, out_dir / f"p{page_no:03d}_tab{k}.png",
+                target_px=TABLE_TARGET_PX,
             )
+            if not img:
+                continue
+            label = f"{cap.text}（续）" if continued else cap.text
+            blk = Block(
+                id=f"tab_{page_no}_{k}", order=0, page=page_no, kind="table",
+                text="", bbox=(crop.x0, crop.y0, crop.x1, crop.y1),
+                image_path=img, caption=label, table_html=html,
+                translatable=False,
+            )
+            # 表题在表上方（MDPI/IEEE）→ 表插到表题后面；表题在表下方 → 插到表题前面
+            if cap.bbox[3] <= rect.y0:
+                insert_after.setdefault(cap.id, []).append(blk)
+            else:
+                insert_before.setdefault(cap.id, []).append(blk)
+
+            # 表格区域里的散碎文本已经画进裁图，不再作为正文/公式/图注留下
             for b in blocks:
-                if b.page != page_no or b.kind in ("figure", "table"):
+                if b.page != page_no or b.kind in ("figure", "table", "caption"):
                     continue
                 cx = (b.bbox[0] + b.bbox[2]) / 2
                 cy = (b.bbox[1] + b.bbox[3]) / 2
                 if rect.x0 - 2 <= cx <= rect.x1 + 2 and rect.y0 - 2 <= cy <= rect.y1 + 2:
                     dropped.add(id(b))
 
-    if not insert_before:
+    if not insert_before and not insert_after:
         return blocks
 
     result: list[Block] = []
@@ -1078,10 +1336,51 @@ def _extract_tables_structured(
         if b.id in insert_before:
             result.extend(insert_before.pop(b.id))
         result.append(b)
+        if b.id in insert_after:
+            result.extend(insert_after.pop(b.id))
     for i, blk in enumerate(result):
         blk.order = i
         blk.id = f"b{i:04d}"
     return result
+
+
+def _has_table_neighbour(blocks: list[Block], idx: int) -> bool:
+    """表题前后是否已经有 table 块（结构化识别成功的表）。"""
+    for j in (idx - 1, idx + 1):
+        if 0 <= j < len(blocks) and blocks[j].kind == "table":
+            return True
+    return False
+
+
+def _collect_table_rows(
+    blocks: list[Block], start: int, step: int, cap: Block
+) -> list[int]:
+    """从表题开始，向一个方向收集连续的「表格行」短块。
+
+    表格行在版面里就是一行行短文本：高度小、间距紧、没有句末标点。
+    碰到长段落、图表、另一个表题或间距明显变大就停止。
+    """
+    idx = start
+    picked: list[int] = []
+    edge = cap.bbox[1] if step < 0 else cap.bbox[3]
+    while 0 <= idx < len(blocks):
+        p = blocks[idx]
+        if p.page != cap.page:
+            break
+        if p.kind in ("figure", "table", "caption", "equation", "reference", "footnote"):
+            break
+        gap = (edge - p.bbox[3]) if step < 0 else (p.bbox[1] - edge)
+        if gap < -10 or gap > 26:
+            break
+        h = p.bbox[3] - p.bbox[1]
+        if h > 60 or len(p.text.strip()) > 240:
+            break
+        picked.append(idx)
+        edge = min(edge, p.bbox[1]) if step < 0 else max(edge, p.bbox[3])
+        idx += step
+        if len(picked) >= 80:
+            break
+    return picked
 
 
 def _extract_tables_by_caption(
@@ -1089,52 +1388,64 @@ def _extract_tables_by_caption(
     blocks: list[Block],
     out_dir: Path,
 ) -> list[Block]:
-    """兜底：find_tables 没识别出来的表，以「Table N:」图注为锚点向上收集短块后整块裁图。"""
+    """兜底：find_tables 漏掉的表，以表题为锚点收集周围短块后整块裁图。
+
+    表题可能在表上方（MDPI/IEEE）也可能在下方，因此上下都扫，取更像表格的一侧。
+    """
+    drop: set[int] = set()
+    before: dict[int, list[Block]] = {}
+    after: dict[int, list[Block]] = {}
+
+    for i, b in enumerate(blocks):
+        if b.kind != "caption" or not _is_table_caption(b.text):
+            continue
+        if _has_table_neighbour(blocks, i):
+            continue
+
+        up = _collect_table_rows(blocks, i - 1, -1, b)
+        down = _collect_table_rows(blocks, i + 1, 1, b)
+        picked = down if len(down) >= len(up) else up
+        if len(picked) < 2:
+            continue
+
+        page = doc[b.page - 1]
+        raw = pymupdf.Rect(
+            min(blocks[k].bbox[0] for k in picked) - 3,
+            min(blocks[k].bbox[1] for k in picked) - 3,
+            max(blocks[k].bbox[2] for k in picked) + 3,
+            max(blocks[k].bbox[3] for k in picked) + 3,
+        )
+        rect = _table_crop_rect(page, raw)
+        img = _crop(
+            page, rect, out_dir / f"p{b.page:03d}_tbl_cap{i:04d}.png",
+            target_px=TABLE_TARGET_PX,
+        )
+        if not img:
+            continue
+        tbl = Block(
+            id="", order=0, page=b.page, kind="table", text="",
+            bbox=(rect.x0, rect.y0, rect.x1, rect.y1),
+            image_path=img, caption=b.text, translatable=False,
+        )
+        # 表题在表上方 → 表放在表题后面；表题在下方（向上收集）→ 表放在表题前面
+        if picked is down:
+            after.setdefault(i, []).append(tbl)
+        else:
+            before.setdefault(i, []).append(tbl)
+        drop.update(picked)
+
+    if not before and not after:
+        return blocks
+
     result: list[Block] = []
-    for b in blocks:
-        if b.kind == "caption" and re.match(r"^(Table|TABLE|Tab\.)\s*\d", b.text):
-            limit_y = b.bbox[1]
-            idx = len(result) - 1
-            region: list[int] = []
-            while idx >= 0:
-                p = result[idx]
-                if p.page != b.page:
-                    break
-                if p.kind in ("figure", "table", "caption"):
-                    break
-                # 表头上的短"标题"（如 "Model"）属于表格，一并吸收
-                if p.kind == "heading" and (len(p.text) > 40 or limit_y - p.bbox[3] > 24):
-                    break
-                if p.bbox[3] > limit_y + 14:
-                    break
-                if p.bbox[3] - p.bbox[1] > 48:      # 段落式高块，不是表格单元
-                    break
-                if limit_y - p.bbox[1] > 320:
-                    break
-                region.append(idx)
-                idx -= 1
-            if len(region) >= 2:
-                rect = pymupdf.Rect(
-                    min(result[k].bbox[0] for k in region) - 3,
-                    min(result[k].bbox[1] for k in region) - 3,
-                    max(result[k].bbox[2] for k in region) + 3,
-                    max(result[k].bbox[3] for k in region) + 3,
-                )
-                img = _crop(
-                    doc[b.page - 1], rect,
-                    out_dir / f"p{b.page:03d}_table{len(region)}.png",
-                )
-                if img:
-                    for k in sorted(region, reverse=True):
-                        result.pop(k)
-                    result.append(
-                        Block(
-                            id="", order=0, page=b.page, kind="table", text="",
-                            bbox=(rect.x0, rect.y0, rect.x1, rect.y1),
-                            image_path=img, caption=b.text, translatable=False,
-                        )
-                    )
+    for i, b in enumerate(blocks):
+        if i in drop:
+            continue
+        if i in before:
+            result.extend(before[i])
         result.append(b)
+        if i in after:
+            result.extend(after[i])
 
     for i, blk in enumerate(result):
         blk.order = i
@@ -1178,6 +1489,38 @@ def _drop_equation_orphans(blocks: list[Block]) -> list[Block]:
     return out
 
 
+def _drop_equations_inside_floats(blocks: list[Block]) -> list[Block]:
+    """丢掉落在图表裁图区域里的「公式」。
+
+    图表里的坐标轴刻度、图例、流程图箭头旁的短标注经常是数学字体，
+    会被版面解析误判成公式块，进而被裁成一张张碎图。它们已经包含在
+    图表切片里了，留在阅读流里只会变成重复且看不懂的公式。
+    """
+    floats = [b for b in blocks if b.kind in ("figure", "table")]
+    if not floats:
+        return blocks
+
+    out: list[Block] = []
+    for b in blocks:
+        if b.kind == "equation":
+            cx = (b.bbox[0] + b.bbox[2]) / 2
+            cy = (b.bbox[1] + b.bbox[3]) / 2
+            inside = any(
+                f.page == b.page
+                and f.bbox[0] - 2 <= cx <= f.bbox[2] + 2
+                and f.bbox[1] - 2 <= cy <= f.bbox[3] + 2
+                for f in floats
+            )
+            if inside:
+                continue
+        out.append(b)
+
+    for i, blk in enumerate(out):
+        blk.order = i
+        blk.id = f"b{i:04d}"
+    return out
+
+
 def _extract_tables(
     doc: pymupdf.Document,
     blocks: list[Block],
@@ -1196,6 +1539,8 @@ def _extract_tables(
 CROP_TARGET_PX = 1400
 CROP_DPI_MIN = 200
 CROP_DPI_MAX = 520
+# 表格文字更小、列更多，按更高的目标宽度渲染，避免缩略后数字糊成一团
+TABLE_TARGET_PX = 1800
 EQUATION_TARGET_PX = 1200
 EQUATION_DPI_MAX = 600
 
@@ -1231,6 +1576,84 @@ def _crop(
         return None
 
 
+def _merge_rects(rects: list[pymupdf.Rect], gap: float = 4.0) -> list[pymupdf.Rect]:
+    """合并重叠/紧邻的图形区域，避免同一张图被切成好几块重复切片。"""
+    out: list[pymupdf.Rect] = []
+    for r in sorted(rects, key=lambda x: (x.y0, x.x0)):
+        for i, m in enumerate(out):
+            if _overlap_ratio(r, m) > 0.5 or _rect_gap(r, m) <= gap:
+                out[i] = m | r
+                break
+        else:
+            out.append(pymupdf.Rect(r))
+
+    # 链式合并：A 与 B 合并后可能又与 C 相交，重复扫描直到稳定
+    changed = True
+    while changed and len(out) > 1:
+        changed = False
+        for i in range(len(out)):
+            for j in range(i + 1, len(out)):
+                if _overlap_ratio(out[i], out[j]) > 0.5 or _rect_gap(out[i], out[j]) <= gap:
+                    out[i] |= out[j]
+                    out.pop(j)
+                    changed = True
+                    break
+            if changed:
+                break
+    return out
+
+
+def _figure_rects(page: pymupdf.Page) -> list[pymupdf.Rect]:
+    """一页里的插图区域：位图 + 矢量图，合并去重后扩到图注/坐标轴标注。"""
+    rects: list[pymupdf.Rect] = []
+    try:
+        for info in page.get_image_info():
+            r = pymupdf.Rect(info["bbox"])
+            if r.width * r.height > 4000 and r.height > 40:
+                rects.append(r)
+    except Exception:
+        pass
+    rects = _merge_rects(rects)
+
+    # 矢量图：drawing 聚合成大区域，且区域内基本没有文字
+    try:
+        drawings = page.get_drawings()
+    except Exception:
+        drawings = []
+    if drawings:
+        dr = pymupdf.Rect()
+        for d in drawings:
+            r = pymupdf.Rect(d["rect"])
+            if r.width > 20 and r.height > 20:
+                dr |= r
+        if (
+            not dr.is_empty
+            and dr.width * dr.height > 9000
+            and dr.height > 60
+            and not _rect_has_text(page, dr)
+        ):
+            rects = _merge_rects([*rects, dr])
+
+    return [_figure_crop_rect(page, r) for r in rects]
+
+
+def _figure_crop_rect(page: pymupdf.Page, rect: pymupdf.Rect) -> pymupdf.Rect:
+    """把图片框并到紧邻的矢量元素（坐标轴、图例框），保留少量留白。"""
+    out = pymupdf.Rect(rect)
+    region = pymupdf.Rect(rect.x0 - 8, rect.y0 - 8, rect.x1 + 8, rect.y1 + 8)
+    try:
+        for d in page.get_drawings():
+            dr = pymupdf.Rect(d["rect"])
+            if dr.is_empty or not dr.intersects(region):
+                continue
+            # 只吸收贴着图片的小元素，避免把整页装饰线吞进来
+            if dr.width <= rect.width * 1.4 and dr.height <= rect.height * 1.4:
+                out |= dr
+    except Exception:
+        pass
+    return pymupdf.Rect(out.x0 - 2, out.y0 - 2, out.x1 + 2, out.y1 + 2)
+
+
 def _extract_figures(
     doc: pymupdf.Document,
     blocks: list[Block],
@@ -1238,40 +1661,29 @@ def _extract_figures(
 ) -> list[Block]:
     """把每页图片区域裁成 PNG，并按「图注」配对插入阅读顺序。"""
     insert_before: dict[str, list[Block]] = {}
+    insert_after: dict[str, list[Block]] = {}
     pending: dict[int, list[Block]] = {}
 
     for pno in range(len(doc)):
         page = doc[pno]
         page_no = pno + 1
-        rects: list[pymupdf.Rect] = []
-
-        # 1) 位图
-        for info in page.get_image_info():
-            r = pymupdf.Rect(info["bbox"])
-            if r.width * r.height > 4000 and r.height > 40:
-                rects.append(r)
-
-        # 2) 矢量图：drawing 聚合成大区域，且区域内基本没有文字
-        drawings = page.get_drawings()
-        if drawings:
-            dr = pymupdf.Rect()
-            for d in drawings:
-                r = pymupdf.Rect(d["rect"])
-                if r.width > 20 and r.height > 20:
-                    dr |= r
-            if (
-                not dr.is_empty
-                and dr.width * dr.height > 9000
-                and dr.height > 60
-                and not _rect_has_text(page, dr)
-            ):
-                rects.append(dr)
-
+        table_rects = [
+            pymupdf.Rect(b.bbox) for b in blocks
+            if b.page == page_no and b.kind == "table"
+        ]
+        rects = _figure_rects(page)
         if not rects:
             continue
 
-        captions = [b for b in blocks if b.page == page_no and b.kind == "caption"]
+        captions = [
+            b for b in blocks
+            if b.page == page_no and b.kind == "caption" and not _is_table_caption(b.text)
+        ]
+        used: set[str] = set()
         for k, r in enumerate(rects):
+            # 表格已经有独立切片，图片识别不能再把同一块区域当插图重复放一次
+            if any(_overlap_ratio(r, t) > 0.25 for t in table_rects):
+                continue
             img = _crop(page, r, out_dir / f"p{page_no:03d}_fig{k}.png")
             if not img:
                 continue
@@ -1280,19 +1692,33 @@ def _extract_figures(
                 text="", bbox=(r.x0, r.y0, r.x1, r.y1), image_path=img,
                 translatable=False,
             )
-            # 就近配对：图注通常紧贴图片下方
-            cands = [
+            # 就近配对：常见图注在图片下方，少数期刊在上方
+            below = [
                 c for c in captions
-                if -10 <= c.bbox[1] - r.y1 <= 110
+                if c.id not in used and -10 <= c.bbox[1] - r.y1 <= 120
             ]
-            if cands:
-                cap = min(cands, key=lambda c: abs(c.bbox[1] - r.y1))
+            above = [
+                c for c in captions
+                if c.id not in used and -10 <= r.y0 - c.bbox[3] <= 90
+            ]
+            cap = None
+            side = "below"
+            if below:
+                cap = min(below, key=lambda c: abs(c.bbox[1] - r.y1))
+            elif above:
+                cap = min(above, key=lambda c: abs(r.y0 - c.bbox[3]))
+                side = "above"
+            if cap:
                 fig.caption = cap.text
-                insert_before.setdefault(cap.id, []).append(fig)
+                used.add(cap.id)
+                if side == "below":
+                    insert_before.setdefault(cap.id, []).append(fig)
+                else:
+                    insert_after.setdefault(cap.id, []).append(fig)
             else:
                 pending.setdefault(page_no, []).append(fig)
 
-    if not insert_before and not pending:
+    if not insert_before and not insert_after and not pending:
         return blocks
 
     result: list[Block] = []
@@ -1300,6 +1726,8 @@ def _extract_figures(
         if b.id in insert_before:
             result.extend(insert_before.pop(b.id))
         result.append(b)
+        if b.id in insert_after:
+            result.extend(insert_after.pop(b.id))
     for page_no, figs in pending.items():
         idx = max(
             (i for i, b in enumerate(result) if b.page == page_no),
@@ -1514,6 +1942,7 @@ def parse_pdf(
         body_size = _guess_body_size(ordered)
         blocks = _build_blocks(ordered, body_size)
         _classify(blocks, body_size, doc[0].rect.height)
+        blocks = _attach_equation_numbers(blocks, doc)
         blocks = _merge_affiliations(blocks)
         blocks = _drop_noise(blocks)
         blocks = _drop_equation_orphans(blocks)
@@ -1526,6 +1955,8 @@ def parse_pdf(
             blocks = _extract_tables(doc, blocks, out / "tables")
             blocks = _extract_figures(doc, blocks, out / "figures")
             blocks = _collapse_vector_figure_pages(doc, blocks, out / "figures")
+            # 图表裁好之后再清一次：图里的坐标轴/标注不该再作为公式出现
+            blocks = _drop_equations_inside_floats(blocks)
             blocks = _crop_equations(doc, blocks, out / "equations")
         else:
             for i, b in enumerate(blocks):

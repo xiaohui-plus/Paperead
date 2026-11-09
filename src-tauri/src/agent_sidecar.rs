@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use rand::RngCore;
 use tauri::{AppHandle, Manager};
 
-use crate::{api, paths};
+use crate::desktop::{api, paths};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -58,13 +58,19 @@ impl AgentSidecar {
             .map_err(|error| format!("复制 agent 日志句柄失败：{error}"))?;
 
         let node = node_path(&agent_dir);
-        let llm_key = paths::var("PAPEREAD_LLM_KEY")
+        let env_key = paths::var("PAPEREAD_LLM_KEY")
             .or_else(|| paths::var("PAPEREAD_API_KEY"))
             .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok())
             .unwrap_or_default();
-        let llm_base = paths::var("PAPEREAD_LLM_BASE")
-            .or_else(|| paths::var("PAPEREAD_BASE_URL"))
-            .unwrap_or_else(|| "https://api.deepseek.com".into());
+        let env_base = paths::var("PAPEREAD_LLM_BASE").or_else(|| paths::var("PAPEREAD_BASE_URL"));
+        // 没有显式覆盖时走本机 LLM 代理，这样研究输入框里切换模型可以即时生效。
+        let (llm_base, llm_key) = match env_base {
+            Some(base) => (base, env_key),
+            None => (
+                format!("http://127.0.0.1:{python_port}/api/llm-proxy/v1"),
+                python_token.to_string(),
+            ),
+        };
         let model = paths::var("PAPEREAD_MODEL")
             .unwrap_or_else(|| "deepseek-v4-flash".into());
 

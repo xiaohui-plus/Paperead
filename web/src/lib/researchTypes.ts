@@ -26,6 +26,7 @@ export interface AgentEvent {
   input?: unknown
   isError?: boolean
   error?: string
+  result?: string
   meta?: unknown
   items?: PlanItem[]
 }
@@ -41,6 +42,9 @@ export interface ToolCall {
   argumentsText: string
   input?: unknown
   error?: string
+  result?: string
+  /** tool.end 透传的展示元数据（如 terminal 的退出码）。 */
+  meta?: unknown
   startedAt: number | null
   endedAt: number | null
 }
@@ -90,6 +94,32 @@ export const EMPTY_CHAT: ChatState = {
   offline: false,
 }
 
+/**
+ * 把任意事件字段归一化成可渲染文本。
+ * agent 的错误有时是对象（例如 `{name: 'ToolOutputError', code: '...'}`），
+ * 直接塞进 React 子节点会触发 error #31 并让整页白屏。
+ */
+export function asText(value: unknown): string {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (Array.isArray(value)) return value.map(asText).filter(Boolean).join('\n')
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    if (typeof record.message === 'string' && record.message.trim()) return record.message
+    if (typeof record.error === 'string' && record.error.trim()) return record.error
+    const name = typeof record.name === 'string' ? record.name : ''
+    const code = typeof record.code === 'string' ? record.code : ''
+    if (name || code) return [name, code].filter(Boolean).join(': ')
+    try {
+      return JSON.stringify(value, null, 2)
+    } catch {
+      return String(value)
+    }
+  }
+  return String(value)
+}
+
 export function formatDuration(ms: number): string {
   const total = Math.max(0, Math.round(ms / 1000))
   if (total < 60) return `${total} 秒`
@@ -108,6 +138,9 @@ const TOOL_TITLES: Record<string, string> = {
   project_read: '读取项目',
   project_write: '写入项目',
   artifact_read: '读取产物',
+  file_read: '读取文件',
+  citation_check: '引用审计',
+  run_command: '运行命令',
   library_tag: '文献标签',
   web_search: '网页搜索',
   echo: '回声',
@@ -122,7 +155,7 @@ export function toolSubtitle(tool: ToolCall): string {
   const input = tool.input
   if (input && typeof input === 'object') {
     const record = input as Record<string, unknown>
-    for (const key of ['query', 'paperId', 'artifactId', 'doi', 'title', 'filename', 'path', 'name', 'url']) {
+    for (const key of ['query', 'paperId', 'artifactId', 'doi', 'title', 'filename', 'path', 'command', 'source', 'name', 'url']) {
       const value = record[key]
       if (typeof value === 'string' && value.trim()) return value.trim()
     }

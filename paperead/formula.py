@@ -31,8 +31,9 @@ PROMPT = (
     "1. 只输出 LaTeX 正文，不要 $ 或 $$ 包裹，不要 \\begin{equation}，"
     "不要 Markdown 代码块，不要任何解释；\n"
     "2. 多行/对齐公式用 \\begin{aligned} ... \\end{aligned}；\n"
-    "3. 保留公式编号时用 \\tag{n}；\n"
-    "4. 无法识别时只输出 NONE。"
+    "3. 不要输出公式编号（如 (3)、(2.1)），编号由版式单独保存；\n"
+    "4. 不要输出图表里的坐标轴刻度、图例文字；只识别真正的数学公式；\n"
+    "5. 无法识别时只输出 NONE。"
 )
 
 _FENCE_RE = re.compile(r"^```(?:latex|tex)?\s*|\s*```$", re.IGNORECASE)
@@ -53,6 +54,24 @@ def _strip_wrappers(tex: str) -> str:
         tex = tex.strip()
         if tex == before:
             break
+    return tex
+
+
+_NUMBER_SUFFIX_RE = re.compile(
+    r"(?:\\tag\*?\{[^{}]*\}|[（(]\s*[A-Z]?\d{1,3}(?:\.\d+)?\s*[)）])\s*$"
+)
+
+
+def _strip_number(tex: str) -> str:
+    """去掉模型擅自带上的编号（\\tag{3} 或行尾 (3)）。
+
+    编号由版面解析单独保存到 `Block.eq_number`，前端右对齐渲染；
+    留在 LaTeX 里会跟着公式居中，位置不对。
+    """
+    prev = None
+    while tex and tex != prev:
+        prev = tex
+        tex = _NUMBER_SUFFIX_RE.sub("", tex).strip()
     return tex
 
 
@@ -112,8 +131,9 @@ async def recognize_latex(image: bytes, model: str | None = None, backend=None) 
         }
     ]
     caller = backend.chat if backend is not None else chat
-    raw = await caller(messages, model=model, temperature=0.0, max_tokens=1200)
+    raw = await caller(messages, model=model, temperature=0.0, max_tokens=1600)
     tex = _strip_wrappers(raw)
+    tex = _strip_number(tex)
     ok, reason = validate_latex(tex)
     if not ok:
         logger.info("公式识别结果被丢弃（%s）：%s", reason, tex[:80])

@@ -27,6 +27,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 import httpx
+import pymupdf
 from fastapi import (
     BackgroundTasks,
     FastAPI,
@@ -46,6 +47,8 @@ from starlette.background import BackgroundTask
 from paperead import __version__
 from paperead.env import env
 from paperead.formula import recognize_equations, recognize_latex
+from paperead.highlights import CATEGORIES as HIGHLIGHT_CATEGORIES
+from paperead.highlights import extract_highlights
 from paperead.layout import Block, parse_pdf
 from paperead.llm import LLMConfig, OpenAICompatBackend
 from paperead.tutor import build_guide
@@ -63,7 +66,14 @@ from paperead.translate import (
     translate_block,
     translate_paper,
 )
-from server.store import FolderExistsError, FolderNameError, LibraryStore
+from server.llm_proxy import build_llm_proxy_router
+from server.onboarding import OnboardingStore, build_onboarding_router
+from server.store import (
+    ATTACHMENT_LIMIT,
+    FolderExistsError,
+    FolderNameError,
+    LibraryStore,
+)
 from server.scholar_api import build_router as build_scholar_router
 from server.research import ResearchStore
 from server.research import build_router as build_research_router
@@ -71,8 +81,10 @@ from server.research.abstracts import fill_one as fill_abstract
 from server.research.search import LibrarySearch
 from server.research.search_api import build_router as build_internal_router
 from server.research.tools_api import build_router as build_tools_router
+from server.toolchain_api import router as toolchain_router
 from server.runtime import (
     allowed_origins,
+    bind_host,
     default_data_dir,
     ensure_data_dir,
     is_frozen,
@@ -101,8 +113,24 @@ _update_cache: dict = {"checked_at": 0.0, "payload": None}
 
 store = LibraryStore(DATA_DIR)
 research_store = ResearchStore(DATA_DIR / "research")
+onboarding_store = OnboardingStore(DATA_DIR)
+
+
+def _has_user_data() -> bool:
+    """升级用户已经有文献或研究项目，不再触发新手教程。"""
+    return bool(store.list()) or bool(
+        research_store.list_projects(include_archived=True)
+    )
+
 
 app = FastAPI(title="Paperead", version=__version__)
+
+# 安装包不带 pandoc：桌面版首次启动在后台下载一次，之后离线可用。
+# 设 PAPEREAD_PANDOC_AUTODOWNLOAD=0 可关闭，测试和开发环境默认不下载。
+if is_frozen() and env("PAPEREAD_PANDOC_AUTODOWNLOAD", "1") != "0":
+    from server.research import pandoc_setup
+
+    pandoc_setup.start_if_missing()
 
 # 项目/文件/会话等具体路由必须先于下面的 /api/research/{path:path} 代理注册，
 # 否则会被通配代理拦截，误报“研究 agent 尚未启动”。
@@ -111,7 +139,12 @@ def _schedule_parse(paper_id: str) -> None:
     asyncio.create_task(_parse_task(paper_id))
 
 
-app.include_router(build_research_router(research_store, store, _schedule_parse))
+app.include_router(build_llm_proxy_router(DATA_DIR, TOKEN))
+app.include_router(
+    build_research_router(research_store, store, _schedule_parse, DATA_DIR)
+)
+app.include_router(toolchain_router)
+app.include_router(build_onboarding_router(onboarding_store, _has_user_data))
 
 # 研究 agent 的工具接口：本机调用，自带 token，不走 /api 的 cookie 鉴权。
 app.include_router(
@@ -129,18 +162,27 @@ async def guard(request: Request, call_next):
     TOKEN 为空，鉴权关闭，保持原有开发体验。
     """
     path = request.url.path
-    if path.startswith("/api"):
+    if path.startswith("/api/llm-proxy/"):
+        # 研究 agent 用 Authorization: Bearer <token> 调本地 LLM 代理
+        if TOKEN and request.headers.get("authorization") != f"Bearer {TOKEN}":
+            return JSONResponse({"detail": "unauthorized"}, status_code=403)
+    elif path.startswith("/api"):
         # 旧版壳/脚本可能还在发 x-paper-reflow-token，继续接受。
         supplied = (
             request.cookies.get("pr_token")
             or request.headers.get("x-paperead-token")
             or request.headers.get("x-paper-reflow-token")
+            # 图片/PDF 等媒体请求由 <img src> 发起，带不了自定义头，用查询参数传 token
+            or request.query_params.get("pr_token")
         )
         if TOKEN and supplied != TOKEN:
             return JSONResponse({"detail": "unauthorized"}, status_code=403)
         origin = request.headers.get("origin")
         if origin and origin not in ORIGINS:
-            return JSONResponse({"detail": "origin not allowed"}, status_code=403)
+            # 用局域网 IP / 域名访问时，页面自身的 Origin 与 Host 同源，直接放行
+            parsed = urlparse(origin)
+            if parsed.netloc != request.headers.get("host", ""):
+                return JSONResponse({"detail": "origin not allowed"}, status_code=403)
 
     response = await call_next(request)
     content_type = response.headers.get("content-type", "")
@@ -157,7 +199,7 @@ async def guard(request: Request, call_next):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=sorted(ORIGINS),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -455,6 +497,54 @@ async def get_vision_config() -> dict:
     }
 
 
+# 文献检索的运行时配置：CORE 需要 API Key，Semantic Scholar 可选。localStorage
+# 是唯一来源，前端启动/保存设置时推给本服务；这里只改进程环境变量，不落盘
+# （重启后前端会再同步）。
+_CORE_KEY_ENV = os.environ.get("PAPEREAD_CORE_API_KEY")
+_S2_KEY_ENV = os.environ.get("PAPEREAD_S2_API_KEY")
+
+
+class ScholarConfigReq(BaseModel):
+    coreApiKey: str | None = None
+    s2ApiKey: str | None = None
+
+
+def _apply_scholar_key(name: str, value: str | None, fallback: str | None) -> None:
+    """推送的 Key 写进环境变量；清空时退回启动时的环境变量。"""
+    if value is None:
+        return
+    key = value.strip()
+    if key:
+        os.environ[name] = key
+    elif fallback:
+        os.environ[name] = fallback
+    else:
+        os.environ.pop(name, None)
+
+
+def _mask_key(key: str) -> str:
+    if not key:
+        return ""
+    return f"{key[:4]}••••{key[-4:]}" if len(key) > 8 else "••••"
+
+
+@app.post("/api/config/scholar")
+async def set_scholar_config(req: ScholarConfigReq) -> dict:
+    _apply_scholar_key("PAPEREAD_CORE_API_KEY", req.coreApiKey, _CORE_KEY_ENV)
+    _apply_scholar_key("PAPEREAD_S2_API_KEY", req.s2ApiKey, _S2_KEY_ENV)
+    return {"ok": True, "configured": bool(env("PAPEREAD_CORE_API_KEY", ""))}
+
+
+@app.get("/api/config/scholar")
+async def get_scholar_config() -> dict:
+    core = env("PAPEREAD_CORE_API_KEY", "") or ""
+    s2 = env("PAPEREAD_S2_API_KEY", "") or ""
+    return {
+        "core": {"configured": bool(core), "masked": _mask_key(core)},
+        "s2": {"configured": bool(s2), "masked": _mask_key(s2)},
+    }
+
+
 @app.post("/api/ping")
 async def ping(req: PingReq) -> dict:
     """连通性测试：一次最小文本调用，验证地址/密钥/模型名是否匹配。"""
@@ -559,7 +649,12 @@ async def delete_folder(folder_id: str) -> dict:
 
 @app.get("/api/papers")
 async def list_papers() -> dict:
-    return {"papers": [_public(r) for r in store.list()], "mock": MOCK}
+    papers = []
+    for row in store.list():
+        item = _public(row)
+        item["annotation_count"] = len(store.list_annotations(row["id"]))
+        papers.append(item)
+    return {"papers": papers, "mock": MOCK}
 
 
 @app.post("/api/papers/upload")
@@ -586,6 +681,51 @@ async def upload_papers(
         # 上传后立刻后台解析（布局 + 图表 + 公式裁图），不阻塞上传响应
         asyncio.create_task(_parse_task(row["id"]))
     return {"added": added, "failed": failed}
+
+
+@app.post("/api/papers/{paper_id}/attachments")
+async def upload_attachment(
+    paper_id: str, file: UploadFile = File(...)
+) -> dict:
+    """问答附件：随问题上传的补充材料，按论文分目录保存。"""
+    row = store.get(paper_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="论文不存在")
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="文件为空")
+    if len(data) > ATTACHMENT_LIMIT:
+        raise HTTPException(status_code=413, detail="附件不能超过 20 MB")
+    info = store.save_attachment(
+        paper_id, file.filename or "attachment", data, title=row.get("title") or ""
+    )
+    path = store.attachment_path(paper_id, info["name"])
+    chars = len(_attachment_text(path)) if path else 0
+    store.annotate_attachment(paper_id, info["name"], textChars=chars)
+    info["textChars"] = chars
+    return info
+
+
+@app.get("/api/papers/{paper_id}/attachments")
+async def list_attachments(paper_id: str) -> dict:
+    if not store.get(paper_id):
+        raise HTTPException(status_code=404, detail="论文不存在")
+    return {"items": store.list_attachments(paper_id)}
+
+
+@app.delete("/api/papers/{paper_id}/attachments/{name}")
+async def delete_attachment(paper_id: str, name: str) -> dict:
+    if not store.delete_attachment(paper_id, name):
+        raise HTTPException(status_code=404, detail="附件不存在")
+    return {"deleted": name}
+
+
+@app.get("/api/papers/{paper_id}/attachments/{name}")
+async def get_attachment(paper_id: str, name: str) -> FileResponse:
+    path = store.attachment_path(paper_id, name)
+    if path is None:
+        raise HTTPException(status_code=404, detail="附件不存在")
+    return FileResponse(path)
 
 
 @app.post("/api/papers/import")
@@ -679,6 +819,12 @@ async def paper_blocks(paper_id: str) -> dict:
         "page_sizes": store.page_sizes(paper_id),
         "columns": row.get("columns", 1),
         "glossary": row.get("glossary", {}),
+        "translation_lang": row.get("translation_lang") or "",
+        "progress": {
+            "pct": float(row.get("read_pct") or 0),
+            "block_id": row.get("read_block") or "",
+            "page": int(row.get("read_page") or 0),
+        },
         "blocks": blocks,
     }
 
@@ -807,6 +953,205 @@ async def block_provenance(paper_id: str, block_id: str) -> dict:
     return {"block_id": block_id, "citations": results}
 
 
+# ── 标注 / 笔记 ──────────────────────────────────────────
+
+ANNOTATION_COLORS = {"yellow", "green", "blue", "pink"}
+
+
+class AnnotationIn(BaseModel):
+    block_id: str = Field(..., min_length=1, max_length=24)
+    source: str = Field("en", pattern="^(en|zh)$")
+    start: int = Field(..., ge=0)
+    end: int = Field(..., ge=0)
+    quote: str = Field("", max_length=4000)
+    color: str = Field("yellow", max_length=20)
+    note: str = Field("", max_length=5000)
+
+
+class AnnotationPatch(BaseModel):
+    color: str | None = Field(None, max_length=20)
+    note: str | None = Field(None, max_length=5000)
+    quote: str | None = Field(None, max_length=4000)
+    start: int | None = Field(None, ge=0)
+    end: int | None = Field(None, ge=0)
+
+
+def _annotation_text(blocks: list[dict], block_id: str, source: str) -> str:
+    block = next((b for b in blocks if b.get("id") == block_id), None)
+    if block is None:
+        raise HTTPException(status_code=404, detail="段落不存在")
+    text = block.get("text") if source == "en" else (block.get("translated") or "")
+    return text or ""
+
+
+def _check_range(start: int, end: int, text: str) -> None:
+    if end <= start:
+        raise HTTPException(status_code=400, detail="标注范围无效")
+    if end > len(text):
+        raise HTTPException(status_code=400, detail="标注范围超出段落长度")
+
+
+@app.get("/api/papers/{paper_id}/annotations")
+async def list_annotations(paper_id: str) -> dict:
+    if not store.get(paper_id):
+        raise HTTPException(status_code=404, detail="论文不存在")
+    return {"annotations": store.list_annotations(paper_id)}
+
+
+@app.post("/api/papers/{paper_id}/annotations", status_code=201)
+async def add_annotation(paper_id: str, req: AnnotationIn) -> dict:
+    if not store.get(paper_id):
+        raise HTTPException(status_code=404, detail="论文不存在")
+    blocks = store.read_blocks(paper_id) or []
+    text = _annotation_text(blocks, req.block_id, req.source)
+    _check_range(req.start, req.end, text)
+    color = req.color if req.color in ANNOTATION_COLORS else "yellow"
+    return store.add_annotation(
+        paper_id,
+        {
+            "block_id": req.block_id,
+            "source": req.source,
+            "start": req.start,
+            "end": req.end,
+            "quote": req.quote,
+            "color": color,
+            "note": req.note,
+        },
+    )
+
+
+@app.patch("/api/papers/{paper_id}/annotations/{annotation_id}")
+async def update_annotation(
+    paper_id: str, annotation_id: str, req: AnnotationPatch
+) -> dict:
+    if not store.get(paper_id):
+        raise HTTPException(status_code=404, detail="论文不存在")
+    patch = req.model_dump(exclude_none=True)
+    if "color" in patch and patch["color"] not in ANNOTATION_COLORS:
+        raise HTTPException(status_code=400, detail="不支持的颜色")
+    row = store.update_annotation(paper_id, annotation_id, patch)
+    if row is None:
+        raise HTTPException(status_code=404, detail="标注不存在")
+    return row
+
+
+@app.delete("/api/papers/{paper_id}/annotations/{annotation_id}")
+async def delete_annotation(paper_id: str, annotation_id: str) -> dict:
+    if not store.get(paper_id):
+        raise HTTPException(status_code=404, detail="论文不存在")
+    if not store.delete_annotation(paper_id, annotation_id):
+        raise HTTPException(status_code=404, detail="标注不存在")
+    return {"ok": True}
+
+
+class ProgressIn(BaseModel):
+    pct: float = Field(0, ge=0, le=100)
+    block_id: str = Field("", max_length=24)
+    page: int = Field(1, ge=1)
+
+
+@app.put("/api/papers/{paper_id}/progress")
+async def save_progress(paper_id: str, req: ProgressIn) -> dict:
+    """记住读到哪里：只在滚动停稳后由前端低频上报。"""
+    if not store.get(paper_id):
+        raise HTTPException(status_code=404, detail="论文不存在")
+    row = store.update(
+        paper_id,
+        read_pct=round(req.pct, 1),
+        read_block=req.block_id,
+        read_page=req.page,
+        read_at=time.time(),
+    )
+    return {
+        "ok": True,
+        "progress": {
+            "pct": float((row or {}).get("read_pct") or 0),
+            "block_id": (row or {}).get("read_block") or "",
+            "page": int((row or {}).get("read_page") or 0),
+        },
+    }
+
+
+# ── 自动阅读重点（研究目标 / 方法 / 结论） ───────────────
+
+class HighlightsReq(BaseModel):
+    config: LLMConfigIn | None = None
+    pages: list[int] = Field(default_factory=list, max_length=12)
+    force: bool = False
+
+
+@app.get("/api/papers/{paper_id}/highlights")
+async def get_reading_highlights(paper_id: str) -> dict:
+    if not store.get(paper_id):
+        raise HTTPException(status_code=404, detail="论文不存在")
+    return {
+        "highlights": store.list_highlights(paper_id),
+        "pages": store.highlight_pages(paper_id),
+        "categories": HIGHLIGHT_CATEGORIES,
+    }
+
+
+@app.post("/api/papers/{paper_id}/highlights")
+async def make_reading_highlights(paper_id: str, req: HighlightsReq) -> dict:
+    """为已翻译的页补生成阅读重点；已处理过的页默认跳过。"""
+    if not store.get(paper_id):
+        raise HTTPException(status_code=404, detail="论文不存在")
+    blocks = store.read_blocks(paper_id)
+    if blocks is None:
+        raise HTTPException(status_code=409, detail="还在解析中，请稍后再试")
+
+    if req.config:
+        from paperead.llm import set_backend
+
+        set_backend(
+            OpenAICompatBackend(
+                LLMConfig(
+                    api_key=req.config.api_key,
+                    base_url=req.config.base_url.rstrip("/"),
+                    model=req.config.model,
+                    timeout=req.config.timeout,
+                )
+            )
+        )
+        model = req.config.model
+    elif env("PAPEREAD_API_KEY"):
+        model = env("PAPEREAD_MODEL")
+    else:
+        raise HTTPException(status_code=400, detail="未配置模型，无法提取阅读重点")
+
+    translated_pages = sorted(
+        {
+            int(row.get("page") or 0)
+            for row in blocks
+            if row.get("translatable") and (row.get("translated") or "").strip()
+        }
+    )
+    requested = sorted(set(req.pages)) or translated_pages
+    processed: list[int] = []
+    added: list[dict] = []
+    for page in requested:
+        if page not in translated_pages:
+            continue
+        if not req.force and str(page) in store.highlight_pages(paper_id):
+            continue
+        items = await _extract_page_highlights(paper_id, page, model=model)
+        if items is None:
+            # 抽取失败：不记成已处理，下次滚动停稳还会再试
+            continue
+        processed.append(page)
+        added.extend(items)
+
+    return {
+        "highlights": added,
+        "pages": {
+            str(page): store.highlight_pages(paper_id).get(str(page))
+            for page in requested
+            if str(page) in store.highlight_pages(paper_id)
+        },
+        "processed": processed,
+    }
+
+
 @app.get("/api/papers/{paper_id}/lineage")
 async def get_lineage(paper_id: str) -> dict:
     if not store.get(paper_id):
@@ -874,6 +1219,9 @@ class AskReq(BaseModel):
     config: LLMConfigIn | None = None
     web: bool = True
     client_id: str | None = None
+    attachments: list[str] = Field(default_factory=list)
+    # 阅读页点图表/公式旁的小圆圈加入「附录」的块 id
+    block_ids: list[str] = Field(default_factory=list)
 
 
 @dataclass
@@ -1001,6 +1349,115 @@ def _schedule_writer(
     task.add_done_callback(lambda t: _bg_tasks.pop(t, None))
 
 
+ATTACH_TEXT_LIMIT = 12_000
+ATTACH_TOTAL_LIMIT = 30_000
+
+
+def _attachment_text(path: Path) -> str:
+    """抽取附件文本：PDF / docx 取正文，文本类直接读。失败返回空串。"""
+    suffix = path.suffix.lower()
+    try:
+        if suffix == ".pdf":
+            doc = pymupdf.open(str(path))
+            try:
+                parts: list[str] = []
+                used = 0
+                for page in doc:
+                    text = page.get_text() or ""
+                    parts.append(text)
+                    used += len(text)
+                    if used >= ATTACH_TEXT_LIMIT:
+                        break
+                return "\n".join(parts)[:ATTACH_TEXT_LIMIT]
+            finally:
+                doc.close()
+        if suffix == ".docx":
+            from docx import Document
+
+            document = Document(str(path))
+            return "\n".join(p.text for p in document.paragraphs)[:ATTACH_TEXT_LIMIT]
+        if suffix in {
+            ".txt",
+            ".md",
+            ".markdown",
+            ".csv",
+            ".tsv",
+            ".json",
+            ".bib",
+            ".tex",
+            ".yaml",
+            ".yml",
+            ".log",
+            ".py",
+            ".r",
+        }:
+            return path.read_text(encoding="utf-8", errors="replace")[:ATTACH_TEXT_LIMIT]
+    except Exception as error:  # 附件抽取失败不应打断问答
+        log.warning("读取问答附件失败：%s", error)
+    return ""
+
+
+def _attachment_context(paper_id: str, names: list[str]) -> str:
+    blocks: list[str] = []
+    total = 0
+    for name in names:
+        path = store.attachment_path(paper_id, name)
+        if path is None:
+            continue
+        header = f"### 附件：{path.name}（{path.stat().st_size} 字节）"
+        text = _attachment_text(path)
+        if text.strip():
+            body = text[: max(0, ATTACH_TOTAL_LIMIT - total)]
+            total += len(body)
+            blocks.append(f"{header}\n{body}")
+        else:
+            blocks.append(
+                f"{header}\n（未能抽取文本，可能是图片或扫描件；只能按文件名参考）"
+            )
+        if total >= ATTACH_TOTAL_LIMIT:
+            break
+    if not blocks:
+        return ""
+    return "以下是用户随问题上传的附件内容，请优先结合它们回答：\n\n" + "\n\n".join(
+        blocks
+    )
+
+
+def _block_context(paper_id: str, block_ids: list[str]) -> str:
+    """把阅读页「附录」里选中的图表/公式拼成问答材料。"""
+    if not block_ids:
+        return ""
+    rows = {b.get("id"): b for b in (store.read_blocks(paper_id) or [])}
+    parts: list[str] = []
+    for block_id in block_ids[:6]:
+        b = rows.get(block_id)
+        if not b:
+            continue
+        kind = b.get("kind")
+        page = b.get("page") or 0
+        if kind == "equation":
+            num = (b.get("eq_number") or "").strip()
+            head = f"### 公式{f'（{num}）' if num else ''} · 第 {page} 页"
+            tex = (b.get("latex") or "").strip()
+            body = f"$$\n{tex}\n$$" if tex else (b.get("text") or "")
+        elif kind in ("figure", "table"):
+            label = "图" if kind == "figure" else "表"
+            caption = (b.get("caption") or "").strip()
+            head = f"### {label}{f'：{caption}' if caption else ''} · 第 {page} 页"
+            body = f"用户在阅读页选中了这个{label}的截图，图片已在阅读页展示。"
+            if kind == "table" and b.get("table_html"):
+                body += "该表已识别出结构，可结合表格的行列与数值回答。"
+        else:
+            continue
+        parts.append(f"{head}\n{body}")
+    if not parts:
+        return ""
+    return (
+        "以下是用户在阅读时加入「附录」的图表/公式，请优先结合它们回答：\n\n"
+        + "\n\n".join(parts)
+    )
+
+
 async def _prepare_ask(
     paper_id: str, req: AskReq, standalone: str, expanded: list[str]
 ) -> _AskPrep:
@@ -1030,6 +1487,12 @@ async def _prepare_ask(
     refs = dict(list(refs.items())[:4])
 
     context = qa_engine.build_context(hits, refs, web_results, docs)
+    attachment_block = _attachment_context(paper_id, req.attachments)
+    if attachment_block:
+        context = f"{context}\n\n{attachment_block}" if context else attachment_block
+    block_block = _block_context(paper_id, req.block_ids)
+    if block_block:
+        context = f"{context}\n\n{block_block}" if context else block_block
 
     sources = []
     floor = top_score * 0.4
@@ -1245,6 +1708,85 @@ class TranslateReq(BaseModel):
     pages: list[int] | None = Field(
         default=None, description="只翻这些页；不传则整篇翻译"
     )
+    target_lang: str = Field("zh-Hans", description="译文目标语言")
+    auto_highlights: bool = Field(
+        True, description="翻完一页后是否自动提取研究目标/方法/结论"
+    )
+
+
+TRANSLATION_LANGS = {
+    "zh-Hans": "简体中文",
+    "zh-Hant": "繁體中文",
+    "ja": "日语",
+    "ko": "韩语",
+    "fr": "法语",
+    "de": "德语",
+    "es": "西班牙语",
+    "ru": "俄语",
+}
+
+
+def _norm_lang(lang: str | None) -> str:
+    return lang if lang in TRANSLATION_LANGS else "zh-Hans"
+
+
+def _target_name(lang: str) -> str:
+    return TRANSLATION_LANGS.get(lang, "简体中文")
+
+
+def _reset_for_language(paper_id: str, lang: str) -> bool:
+    """目标语言变了：清空旧译文和术语表，让本次请求从头翻。
+
+    必须在 `_lock_for(paper_id)` 内调用，避免和正在跑的翻译流互相覆盖。
+    """
+    row = store.get(paper_id) or {}
+    if (row.get("translation_lang") or "zh-Hans") == lang:
+        return False
+    blocks = store.read_blocks(paper_id) or []
+    for block in blocks:
+        block["translated"] = ""
+    store.write_blocks(paper_id, blocks)
+    store.update(paper_id, glossary={}, translated=0, translation_lang=lang)
+    # 旧译文对应的重点引用也失效了
+    store.clear_highlights(paper_id)
+    return True
+
+
+def _page_blocks(paper_id: str, page: int) -> list[Block]:
+    rows = store.read_blocks(paper_id) or []
+    return [
+        Block(**{**row, "bbox": tuple(row["bbox"])})
+        for row in rows
+        if int(row.get("page") or 0) == int(page)
+    ]
+
+
+_highlighting: set[tuple[str, int]] = set()
+
+
+async def _extract_page_highlights(
+    paper_id: str, page: int, model: str | None = None
+) -> list[dict] | None:
+    """翻译完一页后，顺带抽取研究目标/方法/结论。
+
+    返回 None 表示「还没准备好或抽取失败」，调用方不要把这页记成已处理；
+    返回 [] 表示抽取成功但这一页确实没有可标的重点。
+    """
+    key = (paper_id, int(page))
+    if key in _highlighting:
+        return None
+    blocks = _page_blocks(paper_id, page)
+    if not any(b.translatable and (b.translated or "").strip() for b in blocks):
+        return None
+    _highlighting.add(key)
+    try:
+        items = await extract_highlights(blocks, model=model)
+        return store.replace_page_highlights(paper_id, page, items)
+    except Exception as exc:
+        log.warning("阅读重点提取失败 %s p%s：%s", paper_id, page, exc)
+        return None
+    finally:
+        _highlighting.discard(key)
 
 
 @app.post("/api/papers/{paper_id}/translate")
@@ -1273,8 +1815,23 @@ async def translate(paper_id: str, req: TranslateReq) -> dict:
         _translating.add(key)
 
     try:
-        blocks = await _translate_pages(paper_id, req.config, pages)
-        return {"ok": True, "status": "done", "pages": pages, "blocks": blocks}
+        blocks = await _translate_pages(paper_id, req.config, pages, req.target_lang)
+        translated_pages = sorted({int(b.get("page") or 0) for b in blocks})
+        highlights: list[dict] = []
+        if req.auto_highlights:
+            for page in translated_pages:
+                page_highlights = await _extract_page_highlights(
+                    paper_id, page, model=req.config.model
+                )
+                if page_highlights:
+                    highlights.extend(page_highlights)
+        return {
+            "ok": True,
+            "status": "done",
+            "pages": pages,
+            "blocks": blocks,
+            "highlights": highlights,
+        }
     except Exception as e:
         log.exception("翻译失败 %s", paper_id)
         raise HTTPException(status_code=502, detail=f"翻译失败：{e}") from e
@@ -1283,10 +1840,15 @@ async def translate(paper_id: str, req: TranslateReq) -> dict:
 
 
 async def _translate_pages(
-    paper_id: str, cfg: LLMConfigIn, pages: list[int] | None
+    paper_id: str,
+    cfg: LLMConfigIn,
+    pages: list[int] | None,
+    target_lang: str = "zh-Hans",
 ) -> list[dict]:
     """翻译指定页的块，返回这些块的最新数据。"""
+    lang = _norm_lang(target_lang)
     async with _lock_for(paper_id):
+        _reset_for_language(paper_id, lang)
         all_blocks = store.read_blocks(paper_id) or []
         targets = [
             (i, b) for i, b in enumerate(all_blocks)
@@ -1317,16 +1879,27 @@ async def _translate_pages(
         if not glossary:
             # 术语表对整篇扫一次就够，缓存下来给后续每次按页翻译复用
             everything = [Block(**{**b, "bbox": tuple(b["bbox"])}) for b in all_blocks]
-            glossary = await build_glossary(everything)
+            glossary = await build_glossary(everything, target_name=_target_name(lang))
 
-        await translate_paper(objs, glossary, concurrency=8)
+        await translate_paper(
+            objs,
+            glossary,
+            concurrency=8,
+            target_name=_target_name(lang),
+            target_lang=lang,
+        )
 
         for (idx, _), obj in zip(targets, objs):
             all_blocks[idx] = obj.to_dict()
 
         store.write_blocks(paper_id, all_blocks)
         done = sum(1 for b in all_blocks if b.get("translated"))
-        store.update(paper_id, translated=done, glossary=glossary)
+        store.update(
+            paper_id,
+            translated=done,
+            glossary=glossary,
+            translation_lang=lang,
+        )
         return [all_blocks[i] for i, _ in targets]
 
 
@@ -1379,8 +1952,12 @@ async def translate_stream(paper_id: str, req: TranslateReq) -> StreamingRespons
         _translating.add(key)
         done = 0
         all_blocks: list[dict] = []
+        lang = _norm_lang(req.target_lang)
+        target_name = _target_name(lang)
         try:
             async with _lock_for(paper_id):
+                if _reset_for_language(paper_id, lang):
+                    yield _sse({"type": "reset", "target_lang": lang})
                 all_blocks = store.read_blocks(paper_id) or []
                 targets = [
                     (i, b) for i, b in enumerate(all_blocks)
@@ -1401,7 +1978,9 @@ async def translate_stream(paper_id: str, req: TranslateReq) -> StreamingRespons
                     everything = [
                         Block(**{**b, "bbox": tuple(b["bbox"])}) for b in all_blocks
                     ]
-                    glossary = await build_glossary(everything)
+                    glossary = await build_glossary(
+                        everything, target_name=target_name
+                    )
                     store.update(paper_id, glossary=glossary)
 
                 sem = asyncio.Semaphore(8)
@@ -1415,8 +1994,9 @@ async def translate_stream(paper_id: str, req: TranslateReq) -> StreamingRespons
                                 tex = await translate_block(
                                     b, glossary, prev_tail, next_head,
                                     temperature=0.25 if attempt == 0 else 0.15,
+                                    target_name=target_name,
                                 )
-                                if quality_ok(b.text, tex) or attempt == 1:
+                                if quality_ok(b.text, tex, lang=lang) or attempt == 1:
                                     b.translated = tex
                                     return i, b
                             except Exception as e:
@@ -1439,7 +2019,33 @@ async def translate_stream(paper_id: str, req: TranslateReq) -> StreamingRespons
                     for t in tasks:
                         t.cancel()
                     store.write_blocks(paper_id, all_blocks)
-                    store.update(paper_id, translated=sum(1 for b in all_blocks if b.get("translated")))
+                    store.update(
+                        paper_id,
+                        translated=sum(1 for b in all_blocks if b.get("translated")),
+                        translation_lang=lang,
+                    )
+
+                # 这一页翻完，顺手抽研究目标 / 方法 / 结论；事件里带上结果，
+                # 前端立刻用不同颜色画到正文并更新「阅读重点」。
+                # 用户在设置里关掉自动阅读后，跳过这一步，避免额外模型调用。
+                if req.auto_highlights:
+                    translated_pages = sorted(
+                        {
+                            int(all_blocks[idx].get("page") or 0)
+                            for idx, _ in targets
+                            if (all_blocks[idx].get("translated") or "").strip()
+                        }
+                    )
+                    for page in translated_pages:
+                        items = await _extract_page_highlights(
+                            paper_id, page, model=req.config.model
+                        )
+                        if items is None:
+                            # 还没准备好或抽取失败：不推事件，前端会在补充接口里重试
+                            continue
+                        yield _sse(
+                            {"type": "highlights", "page": page, "highlights": items}
+                        )
 
             yield _sse({"type": "done", "translated": done})
         except asyncio.CancelledError:
@@ -1471,6 +2077,8 @@ async def _parse_task(paper_id: str) -> None:
         return
     _parsing.add(paper_id)
     store.update(paper_id, status="parsing", error="")
+    # 重新解析会换 block id 和 offset，旧的自动重点不再可用
+    store.clear_highlights(paper_id)
     assets = store.papers_dir / f"{paper_id}_assets"
     try:
         parsed = await asyncio.to_thread(parse_pdf, pdf, paper_id, assets)
@@ -1933,6 +2541,69 @@ async def zotero_import(req: ZoteroImportReq) -> dict:
     }
 
 
+class ZoteroSyncReq(BaseModel):
+    collection: str = ""
+    limit: int = Field(1000, ge=1, le=5000)
+
+
+@app.post("/api/zotero/sync")
+async def zotero_sync(req: ZoteroSyncReq) -> dict:
+    """增量同步：把 Zotero（或指定分类）里所有带 PDF 的条目一次导入。
+
+    已在库中的条目按 source_id 去重，重复执行不会产生副本；
+    导入后仍交给后台解析，和逐条导入走同一条链路。
+    """
+    imported, skipped, scanned = 0, 0, 0
+    errors: list[str] = []
+    papers: list[dict] = []
+    try:
+        async with _zotero_client(timeout=120) as c:
+            start = 0
+            while scanned < req.limit:
+                pairs, total = await _zotero_candidates(
+                    c,
+                    collection=req.collection.strip(),
+                    limit=100,
+                    start=start,
+                )
+                if not pairs:
+                    break
+                scanned += len(pairs)
+                for item, pdf in pairs:
+                    data = item.get("data") or {}
+                    key = item.get("key") or data.get("key")
+                    title = str(data.get("title") or "").strip() or "(无标题)"
+                    if not pdf:
+                        skipped += 1
+                        continue
+                    if key and store.find_by_source(f"zotero:{key}"):
+                        skipped += 1
+                        continue
+                    try:
+                        blob = await _zotero_file_bytes(c, pdf)
+                        meta = {"source": "zotero", "source_id": f"zotero:{key}"}
+                        meta.update({k: v for k, v in _zotero_meta(data).items() if v})
+                        row = store.add(_zotero_name(data), blob, meta)
+                        asyncio.create_task(_parse_task(row["id"]))
+                        papers.append(_public(row))
+                        imported += 1
+                    except Exception as e:
+                        errors.append(f"{title}: {e}"[:160])
+                start += len(pairs)
+                if start >= total:
+                    break
+    except ZoteroError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "scanned": scanned,
+        "errors": errors[:10],
+        "papers": papers,
+    }
+
+
 def _zotero_name(data: dict) -> str:
     title = str(data.get("title") or "zotero-paper")[:80]
     safe = "".join(ch for ch in title if ch not in '\\/:*?"<>|\r\n\t').strip() or "zotero"
@@ -1993,13 +2664,15 @@ def main() -> None:
     import uvicorn
 
     _setup_logging()
+    host = bind_host()
     log.info(
-        "Paperead %s 启动：http://127.0.0.1:%d（数据：%s）",
+        "Paperead %s 启动：http://%s:%d（数据：%s）",
         __version__,
+        host,
         PORT,
         DATA_DIR,
     )
-    uvicorn.run(app, host="127.0.0.1", port=PORT, log_config=None, access_log=False)
+    uvicorn.run(app, host=host, port=PORT, log_config=None, access_log=False)
 
 
 if __name__ == "__main__":

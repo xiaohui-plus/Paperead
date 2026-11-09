@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -420,4 +421,57 @@ def test_api_item_rename_move_copy_delete(
     assert deleted.json()["items"] == []
     assert client.delete(
         f"/api/research/projects/{project_id}/items/missing"
+    ).status_code == 404
+
+
+def test_api_upload_folder_keeps_tree(
+    client: TestClient, store: ResearchStore, tmp_path: Path
+):
+    project_id = client.post(
+        "/api/research/projects", json={"kind": "research", "name": "文件夹测试"}
+    ).json()["id"]
+    response = client.post(
+        f"/api/research/projects/{project_id}/folder",
+        files=[
+            ("files", ("a.pdf", b"%PDF-1.4", "application/pdf")),
+            ("files", ("b.txt", b"hello", "text/plain")),
+        ],
+        data={"paths": json.dumps(["我的资料/a.pdf", "我的资料/综述/b.txt"])},
+    )
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    assert payload["added"] == 2
+    by_path = {row["path"]: row for row in payload["items"]}
+    assert by_path["我的资料"]["kind"] == "folder"
+    assert by_path["我的资料/综述"]["kind"] == "folder"
+    assert by_path["我的资料/a.pdf"]["kind"] == "paper"
+    assert by_path["我的资料/综述/b.txt"]["kind"] == "file"
+
+    workspace = store.workspace(project_id)
+    assert (workspace / "files" / "我的资料" / "a.pdf").is_file()
+    assert (workspace / "files" / "我的资料" / "综述" / "b.txt").is_file()
+
+
+def test_api_purge_project_deletes_everything(
+    client: TestClient, store: ResearchStore
+):
+    project_id = client.post(
+        "/api/research/projects", json={"kind": "research", "name": "待删除"}
+    ).json()["id"]
+    client.post(
+        f"/api/research/projects/{project_id}/folders",
+        json={"name": "资料"},
+    )
+    store.create_session(project_id)
+    workspace = store.workspace(project_id)
+    assert workspace.exists()
+
+    response = client.delete(f"/api/research/projects/{project_id}/purge")
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert store.get_project(project_id) is None
+    assert store.list_items(project_id) == []
+    assert not workspace.exists()
+    assert client.delete(
+        f"/api/research/projects/{project_id}/purge"
     ).status_code == 404

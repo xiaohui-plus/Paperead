@@ -18,6 +18,16 @@ Copy-Item $exe (Join-Path $stage "paperead-desktop.exe") -Force
 New-Item -ItemType Directory -Force (Join-Path $stage "resources") | Out-Null
 Copy-Item -Recurse -Force (Join-Path $res "*") (Join-Path $stage "resources")
 
+# 便携版自带 pandoc，解压就能离线导出；安装包为了控制体积走首次启动自动下载。
+$pandoc = Join-Path $root ".tmp\tools\pandoc.exe"
+if (Test-Path $pandoc) {
+    $pandocDir = Join-Path $stage "resources\tools\pandoc"
+    New-Item -ItemType Directory -Force $pandocDir | Out-Null
+    Copy-Item $pandoc (Join-Path $pandocDir "pandoc.exe") -Force
+} else {
+    Write-Warning "没有 .tmp\tools\pandoc.exe，便携版首次导出时会自动下载 pandoc"
+}
+
 $launcher = @"
 @echo off
 setlocal

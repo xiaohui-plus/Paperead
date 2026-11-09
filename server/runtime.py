@@ -62,11 +62,29 @@ def new_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+# 安卓壳用内置前端时，请求来自 WebView 的本地源；iOS/Capacitor 也一并放行。
+MOBILE_ORIGINS = {
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+    "tauri://localhost",
+    "capacitor://localhost",
+}
+
+
 def allowed_origins(port: int) -> set[str]:
-    """生产同源 + Vite 开发服务器。"""
-    return {
+    """生产同源 + Vite 开发服务器 + 安卓/移动壳。"""
+    origins = {
         f"http://127.0.0.1:{port}",
         f"http://localhost:{port}",
         "http://127.0.0.1:5173",
         "http://localhost:5173",
-    }
+    } | MOBILE_ORIGINS
+    extra = read_env("PAPEREAD_ALLOW_ORIGINS")
+    if extra:
+        origins |= {item.strip().rstrip("/") for item in extra.split(",") if item.strip()}
+    return origins
+
+
+def bind_host() -> str:
+    """监听地址：桌面壳保持 127.0.0.1，独立部署时可设为 0.0.0.0。"""
+    return read_env("PAPEREAD_HOST", "127.0.0.1")

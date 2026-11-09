@@ -22,6 +22,7 @@ import {
   type SearchResponse,
 } from '../lib/scholar'
 import { readParams, readPid, writeParams } from '../lib/scholarUrl'
+import { tourBus } from '../tour/tourBus'
 
 interface Props {
   onOpenPaper: (id: string) => void
@@ -105,18 +106,24 @@ export function ScholarPage({ onOpenPaper, onNav }: Props) {
     mainRef.current?.scrollTo({ top: 0 })
   }, [])
 
-  // 数据源可用性：CORE 需要文档方自行配置 API Key
+  // 数据源可用性：CORE 需要在设置里配置 API Key
   useEffect(() => {
     let alive = true
-    getScholarSources()
-      .then((result) => {
-        if (alive) setDisabledSources(result.disabled || {})
-      })
-      .catch(() => {
-        /* 可用性只是增强信息，取不到就按全部可用处理 */
-      })
+    const load = () => {
+      getScholarSources()
+        .then((result) => {
+          if (alive) setDisabledSources(result.disabled || {})
+        })
+        .catch(() => {
+          /* 可用性只是增强信息，取不到就按全部可用处理 */
+        })
+    }
+    load()
+    // 设置页保存 CORE Key 后立即刷新，不用重开页面
+    window.addEventListener('paperead:scholar-config', load)
     return () => {
       alive = false
+      window.removeEventListener('paperead:scholar-config', load)
     }
   }, [])
 
@@ -216,6 +223,7 @@ export function ScholarPage({ onOpenPaper, onNav }: Props) {
 
   const openDetail = (paper: ScholarPaper) => {
     setDetail(paper)
+    tourBus.emit('search:result-opened', { title: paper.title })
     setPid(paper.id)
     pidRef.current = paper.id
     pushedDetail.current = true

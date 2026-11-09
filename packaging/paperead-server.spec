@@ -22,12 +22,26 @@ pymupdf_hidden = collect_submodules(
     filter=lambda name: not name.startswith(("pymupdf.layout", "pymupdf4llm")),
 )
 
+# python-pptx 自带 default.pptx 模板，必须作为 data 打进去，否则运行时会报
+# “Package not found at .../default.pptx”。
+pptx_datas = collect_data_files("pptx")
+pptx_hidden = collect_submodules("pptx")
+
+# python-docx 同样自带 default.docx 模板，缺了会报 Package not found。
+docx_datas = collect_data_files("docx")
+docx_hidden = collect_submodules("docx")
+
 a = Analysis(
     [str(ROOT / "packaging" / "server_entry.py")],
     pathex=[str(ROOT)],
     binaries=pymupdf_bins,
-    datas=[(str(ROOT / "web" / "dist"), "web/dist")] + pymupdf_datas,
+    datas=[(str(ROOT / "web" / "dist"), "web/dist")]
+    + pymupdf_datas
+    + pptx_datas
+    + docx_datas,
     hiddenimports=pymupdf_hidden
+    + pptx_hidden
+    + docx_hidden
     + [
         "uvicorn.logging",
         "uvicorn.loops.auto",
@@ -37,6 +51,7 @@ a = Analysis(
         "fastapi",
         "multipart",
         "certifi",
+        "server.research.pandoc_setup",
     ],
     excludes=[
         "tkinter",

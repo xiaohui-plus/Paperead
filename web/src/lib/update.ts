@@ -72,10 +72,24 @@ interface TauriInternals {
   invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>
 }
 
+/** 是否运行在桌面客户端里（网页端不含 Tauri 注入对象）。 */
+export function isDesktopApp(): boolean {
+  if (typeof window === 'undefined') return false
+  if (
+    import.meta.env.DEV &&
+    new URLSearchParams(window.location.search).get('desktop') === '1'
+  ) {
+    // 仅开发环境用于预览桌面端功能；生产构建会被静态替换掉。
+    return true
+  }
+  // 安卓壳也是 Tauri，但更新走应用商店/APK，不能弹桌面更新器
+  if (/Android/i.test(navigator.userAgent)) return false
+  return Boolean((window as any).__TAURI_INTERNALS__?.invoke)
+}
+
 /** 是否运行在桌面客户端里（只有桌面版才能直接安装更新）。 */
 export function canInstallInApp(): boolean {
-  if (typeof window === 'undefined') return false
-  return Boolean((window as any).__TAURI_INTERNALS__?.invoke)
+  return isDesktopApp()
 }
 
 /**

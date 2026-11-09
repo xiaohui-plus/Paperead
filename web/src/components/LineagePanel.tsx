@@ -1,5 +1,11 @@
-import { useCallback, useEffect, useState } from 'react'
-import { getLineage, makeLineage, type Lineage, type LineageNode } from '../lib/library'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  getLineage,
+  makeLineage,
+  waitForGenerated,
+  type Lineage,
+  type LineageNode,
+} from '../lib/library'
 import { loadModelSettings, readyModel, toPayload } from '../lib/settings'
 import { IconSpark } from './icons'
 
@@ -22,6 +28,14 @@ export function LineagePanel({ paperId, onOpenSettings, settingsVersion = 0 }: P
   const [error, setError] = useState('')
   const [needsConfig, setNeedsConfig] = useState(false)
   const [open, setOpen] = useState<number | null>(null)
+  const mountedRef = useRef(true)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   const generate = useCallback(
     async (refresh = false) => {
@@ -37,7 +51,19 @@ export function LineagePanel({ paperId, onOpenSettings, settingsVersion = 0 }: P
       try {
         setData(await makeLineage(paperId, toPayload(cfg), refresh))
       } catch (e) {
-        setError(e instanceof Error ? e.message : '生成失败')
+        const msg = e instanceof Error ? e.message : '生成失败'
+        // 切走再切回来会重复请求，后端以「正在生成中」拒绝；继续等上一次的结果
+        if (msg.includes('正在生成中')) {
+          const cached = await waitForGenerated(() => getLineage(paperId), () => mountedRef.current)
+          if (!mountedRef.current) return
+          if (cached) {
+            setData(cached)
+          } else {
+            setError('这次生成耗时较长，稍后重新进入「脉络」即可查看')
+          }
+          return
+        }
+        setError(msg)
       } finally {
         setLoading(false)
       }

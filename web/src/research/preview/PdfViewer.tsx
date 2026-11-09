@@ -11,13 +11,14 @@ interface Props {
   title: string
 }
 
-/** PDF 预览：pdf.js 渲染，带翻页与缩放，文本可选中复制。 */
+/** PDF 预览：所有页上下连续滚动、逐页分开，支持跳页与缩放，文本可选中复制。 */
 export function PdfViewer({ url, title }: Props) {
   const [pages, setPages] = useState(0)
   const [page, setPage] = useState(1)
   const [zoom, setZoom] = useState(1)
   const [width, setWidth] = useState(720)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const pageEls = useRef<(HTMLDivElement | null)[]>([])
 
   useEffect(() => {
     const el = scrollRef.current
@@ -32,17 +33,37 @@ export function PdfViewer({ url, title }: Props) {
 
   const pageWidth = Math.max(240, (width - 32) * zoom)
 
+  /** 滚动时更新右下角/工具栏显示的当前页。 */
+  const syncCurrentPage = () => {
+    const container = scrollRef.current
+    if (!container) return
+    const top = container.getBoundingClientRect().top + 100
+    let next = 1
+    pageEls.current.forEach((el, index) => {
+      if (el && el.getBoundingClientRect().top <= top) next = index + 1
+    })
+    setPage(next)
+  }
+
+  /** 跳页：把目标页滚到预览区顶部。 */
+  const jumpTo = (target: number) => {
+    const container = scrollRef.current
+    const el = pageEls.current[target - 1]
+    if (container && el) {
+      const offset =
+        el.getBoundingClientRect().top -
+        container.getBoundingClientRect().top +
+        container.scrollTop
+      container.scrollTo({ top: offset, behavior: 'smooth' })
+    }
+    setPage(target)
+  }
+
   return (
     <div className="pdf-preview">
       <div className="pdf-preview-toolbar">
-        <button
-          type="button"
-          disabled={page <= 1}
-          onClick={() => setPage((prev) => Math.max(1, prev - 1))}
-        >
-          上一页
-        </button>
         <span className="pdf-preview-page">
+          第
           <input
             type="number"
             min={1}
@@ -50,19 +71,12 @@ export function PdfViewer({ url, title }: Props) {
             value={page}
             onChange={(event) => {
               const next = Number(event.target.value)
-              if (!Number.isFinite(next)) return
-              setPage(Math.min(Math.max(1, next), pages || 1))
+              if (!Number.isFinite(next) || next < 1) return
+              jumpTo(Math.min(next, pages || 1))
             }}
           />
-          / {pages || '—'}
+          页 / 共 {pages || '—'} 页
         </span>
-        <button
-          type="button"
-          disabled={pages === 0 || page >= pages}
-          onClick={() => setPage((prev) => Math.min(pages, prev + 1))}
-        >
-          下一页
-        </button>
         <i className="pdf-preview-sep" />
         <button
           type="button"
@@ -86,23 +100,32 @@ export function PdfViewer({ url, title }: Props) {
         </button>
       </div>
 
-      <div className="pdf-preview-scroll" ref={scrollRef}>
+      <div className="pdf-preview-scroll" ref={scrollRef} onScroll={syncCurrentPage}>
         <Document
           file={url}
           loading={<p className="project-preview-note">正在加载 PDF…</p>}
           error={<p className="project-preview-note">PDF 加载失败，可右上角下载后查看。</p>}
           onLoadSuccess={({ numPages }) => {
             setPages(numPages)
-            setPage((prev) => Math.min(prev, numPages) || 1)
+            setPage(1)
           }}
         >
-          <Page
-            pageNumber={page}
-            width={pageWidth}
-            renderTextLayer
-            renderAnnotationLayer
-            loading={<p className="project-preview-note">正在渲染第 {page} 页…</p>}
-          />
+          {Array.from({ length: pages }, (_, index) => (
+            <div
+              key={index}
+              className="pdf-preview-sheet"
+              ref={(el) => {
+                pageEls.current[index] = el
+              }}
+            >
+              <Page
+                pageNumber={index + 1}
+                width={pageWidth}
+                renderTextLayer
+                renderAnnotationLayer
+              />
+            </div>
+          ))}
         </Document>
         <p className="pdf-preview-hint">{title}</p>
       </div>

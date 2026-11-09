@@ -178,7 +178,8 @@ def test_core_search_requires_key(monkeypatch):
     monkeypatch.delenv("PAPEREAD_CORE_API_KEY", raising=False)
     with pytest.raises(FriendlyError) as excinfo:
         run(search_mod.search(SearchInput(q="graph", source="core")))
-    assert "PAPEREAD_CORE_API_KEY" in excinfo.value.message
+    assert "API Key" in excinfo.value.message
+    assert "设置" in excinfo.value.message
 
 
 def test_core_search_sends_bearer_token(monkeypatch):

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use rand::RngCore;
 use tauri::AppHandle;
 
-use crate::{api, paths};
+use crate::desktop::{api, paths};
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 #[cfg(windows)]

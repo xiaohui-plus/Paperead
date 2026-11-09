@@ -35,14 +35,20 @@ def build_router(search: LibrarySearch, research: Any | None = None) -> APIRoute
     def search_library(
         q: str = Query(default=""),
         limit: int = Query(default=12, ge=1, le=30),
+        mode: str = Query(default="topic", pattern="^(topic|title)$"),
+        min_coverage: float | None = Query(default=None, alias="minCoverage", ge=0.0, le=1.0),
         session_id: str | None = Query(default=None, alias="sessionId"),
         x_internal_token: str | None = Header(default=None, alias="x-internal-token"),
     ) -> dict:
         _check(x_internal_token)
-        return {
-            "query": q.strip(),
-            "results": search.search(q, limit=limit, project_id=_project_of(session_id)),
-        }
+        payload = search.search_page(
+            q,
+            limit=limit,
+            project_id=_project_of(session_id),
+            mode=mode,
+            min_coverage=min_coverage,
+        )
+        return {**payload, "query": q.strip()}
 
     @router.get("/papers/{paper_id}/read")
     def read_paper(

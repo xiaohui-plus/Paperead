@@ -8,6 +8,7 @@ import {
   type ProjectSummary,
   type SessionSummary,
 } from '../lib/researchApi'
+import { tourBus } from '../tour/tourBus'
 import { SidebarProjects } from './SidebarProjects'
 
 interface Props {
@@ -62,11 +63,15 @@ export function ResearchShell({
     void load()
   }, [load])
 
-  const createProject = async (): Promise<ProjectSummary | null> => {
+  useEffect(() => {
+    if (kind === 'research') tourBus.emit('research:opened')
+  }, [kind])
+
+  const createProject = async (name?: string): Promise<ProjectSummary | null> => {
     setCreating(true)
     setError(null)
     try {
-      const project = await researchApi.createProject(kind)
+      const project = await researchApi.createProject(kind, name)
       setProjects((prev) => [project, ...prev])
       return project
     } catch (createError) {
@@ -86,15 +91,17 @@ export function ResearchShell({
     if (starting) return
     setStarting(true)
     try {
+      const sessionTitle = title || text.slice(0, 40) || '新会话'
       let target = projectId
       if (!target) {
-        const created = await createProject()
+        // 新项目直接用首条消息命名，避免侧栏里出现一排“新研究/新综述”。
+        const created = await createProject(sessionTitle)
         if (!created) return
         target = created.id
       }
       const session: SessionSummary = await researchApi.createSession(
         target,
-        title || text.slice(0, 40) || '新会话',
+        sessionTitle,
       )
       // 首条消息随导航一起带进会话页：只建会话不发消息，用户输入会被丢掉。
       onOpenProject(target, { sessionId: session.id, initialText: text })

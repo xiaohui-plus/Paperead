@@ -69,6 +69,18 @@ async def import_paper(
         else store.find_by_source(found.id)
     )
     if existing:
+        # 旧版本入库时没有存年份/期刊，重新导入时顺手补上。
+        if (not existing.get("year") or not existing.get("venue")) and (
+            found.year or found.venue
+        ):
+            try:
+                existing = store.update(
+                    existing["id"],
+                    year=found.year,
+                    venue=found.venue or existing.get("venue") or "",
+                ) or existing
+            except Exception:  # noqa: BLE001 - 补字段失败不影响导入结果
+                pass
         return {"paper": public(existing), "imported": False, "already": True}
 
     try:
@@ -106,6 +118,10 @@ async def import_paper(
         "abstract": found.abstract or "",
         "doi": found.doi or "",
         "url": found.url,
+        # 年份和期刊是 BibTeX 的必需字段，入库时就存下来，
+        # 否则导出 .bib 只有 title/doi，参考文献表无法排序和规范显示。
+        "year": found.year,
+        "venue": found.venue or "",
     }
     if project_id:
         meta["project_id"] = project_id

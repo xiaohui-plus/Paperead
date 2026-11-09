@@ -2,6 +2,7 @@
 
 import {
   EMPTY_CHAT,
+  asText,
   type AgentEvent,
   type ChatState,
   type ChatTurn,
@@ -23,6 +24,15 @@ function blankTurn(turn: number, at: number): ChatTurn {
 
 function turnIndex(state: ChatState, turn: number): number {
   return state.turns.findIndex((item) => item.turn === turn)
+}
+
+/** agent 的 turn.end 原因常是 `{kind: 'completed'}`，取 kind 才能判断是否被中止。 */
+function reasonText(value: unknown): string {
+  if (value && typeof value === 'object') {
+    const kind = (value as Record<string, unknown>).kind
+    if (typeof kind === 'string' && kind) return kind
+  }
+  return asText(value)
 }
 
 function withTurn(state: ChatState, turn: number, at: number): [ChatState, number] {
@@ -85,7 +95,7 @@ export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
 
   switch (event.type) {
     case 'message.user': {
-      const text = event.text || ''
+      const text = asText(event.text)
       const last = base.messages[base.messages.length - 1]
       if (last?.local && last.text === text) {
         const messages = base.messages.slice(0, -1)
@@ -119,7 +129,7 @@ export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
         ...patchTurn(next, index, (turn) => ({
           ...turn,
           endedAt: at,
-          reason: event.reason || 'done',
+          reason: reasonText(event.reason) || 'done',
         })),
         running: false,
       }
@@ -129,7 +139,7 @@ export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
       const [next, index] = withTurn(base, event.turn ?? 1, at)
       return patchTurn(next, index, (turn) => ({
         ...turn,
-        text: turn.text + (event.text || ''),
+        text: turn.text + asText(event.text),
       }))
     }
 
@@ -137,7 +147,7 @@ export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
       const [next, index] = withTurn(base, event.turn ?? 1, at)
       return patchTurn(next, index, (turn) => ({
         ...turn,
-        reasoning: turn.reasoning + (event.text || ''),
+        reasoning: turn.reasoning + asText(event.text),
       }))
     }
 
@@ -146,9 +156,9 @@ export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
       return patchTurn(next, index, (turn) =>
         upsertTool(turn, event.callId, at, (tool) => ({
           ...tool,
-          name: event.name || tool.name,
+          name: asText(event.name) || tool.name,
           status: tool.status === 'running' ? 'running' : 'draft',
-          argumentsText: tool.argumentsText + (event.argumentsDelta || ''),
+          argumentsText: tool.argumentsText + asText(event.argumentsDelta),
         })),
       )
     }
@@ -158,9 +168,10 @@ export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
       return patchTurn(next, index, (turn) =>
         upsertTool(turn, event.callId, at, (tool) => ({
           ...tool,
-          name: event.name || tool.name,
+          name: asText(event.name) || tool.name,
           status: 'running',
           input: event.input ?? tool.input,
+          meta: event.meta ?? tool.meta,
           startedAt: tool.startedAt ?? at,
         })),
       )
@@ -171,9 +182,11 @@ export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
       return patchTurn(next, index, (turn) =>
         upsertTool(turn, event.callId, at, (tool) => ({
           ...tool,
-          name: event.name || tool.name,
+          name: asText(event.name) || tool.name,
           status: event.isError ? 'error' : 'done',
-          error: event.error || tool.error,
+          error: asText(event.error) || tool.error,
+          result: asText(event.result) || tool.result,
+          meta: event.meta ?? tool.meta,
           endedAt: at,
         })),
       )
@@ -187,7 +200,7 @@ export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
     }
 
     case 'title.update':
-      return { ...base, title: event.title || base.title }
+      return { ...base, title: asText(event.title) || base.title }
 
     case 'notice': {
       // 离线由顶部 banner 呈现，不再重复塞进转写。
@@ -201,8 +214,8 @@ export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
           {
             id: `n-${event.seq || at}`,
             at,
-            level: event.level || 'info',
-            text: event.text || '',
+            level: asText(event.level) || 'info',
+            text: asText(event.text),
           },
         ],
       }

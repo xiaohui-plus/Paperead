@@ -39,6 +39,8 @@ export function PaperCard({
   const busy = paper.status === 'parsing'
   const hasTranslation = paper.translated > 0
   const failed = paper.status === 'failed'
+  const readPct = Math.min(100, Math.max(0, paper.read_pct ?? 0))
+  const finished = readPct >= 95
 
   return (
     <article
@@ -75,12 +77,25 @@ export function PaperCard({
           {paper.pages ? `${paper.pages} 页` : '—'}
           {paper.size ? ` · ${sizeLabel(paper.size)}` : ''}
           {hasTranslation ? ` · ${paper.translated} 段已译` : ''}
+          {readPct > 0 && (
+            <span className="paper-read-label">
+              {' · '}
+              {finished ? '已读完' : `读至 ${Math.round(readPct)}%`}
+            </span>
+          )}
+          {paper.annotation_count ? ` · ${paper.annotation_count} 条标注` : ''}
         </div>
       </div>
 
+      {readPct > 0 && (
+        <div className="paper-read" aria-hidden>
+          <i style={{ width: `${readPct}%` }} />
+        </div>
+      )}
+
       <div className="paper-actions" onClick={(e) => e.stopPropagation()}>
         <button className="mini-btn" onClick={() => onOpen(paper.id)}>
-          阅读
+          {readPct > 0 && !finished ? '继续读' : '阅读'}
         </button>
         {failed && (
           <button className="mini-btn" onClick={() => onReparse(paper)}>

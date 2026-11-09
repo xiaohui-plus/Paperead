@@ -20,9 +20,10 @@ import { SettingsDialog } from './SettingsDialog'
 import { ZoteroImportDialog } from './ZoteroImportDialog'
 import { IconBack, IconFolder, IconGrid, IconRows, IconSettings, IconUpload } from './icons'
 import { LibraryFolders } from './LibraryFolders'
+import { tourBus } from '../tour/tourBus'
 
-type Filter = 'all' | 'ready' | 'untranslated' | 'failed'
-type Sort = 'recent' | 'title' | 'pages'
+type Filter = 'all' | 'ready' | 'reading' | 'unread' | 'finished' | 'untranslated' | 'failed'
+type Sort = 'recent' | 'read' | 'title' | 'pages'
 
 interface Props {
   onOpenPaper: (id: string) => void
@@ -114,6 +115,7 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
       const res = await uploadPapers(pdfs, activeFolderId)
       await refresh()
       if (res.added.length > 0) {
+        tourBus.emit('library:uploaded', { paperId: res.added[0].id })
         notify(`已添加 ${res.added.length} 篇，正在解析…`)
         // 上传后直接进入阅读页；解析没完成时阅读页会自动重试
         onOpenPaper(res.added[0].id)
@@ -381,6 +383,12 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
         if (!hay.includes(q)) return false
       }
       if (filter === 'ready') return p.status === 'ready'
+      if (filter === 'reading') {
+        const pct = p.read_pct ?? 0
+        return pct > 0 && pct < 95
+      }
+      if (filter === 'unread') return !p.read_pct
+      if (filter === 'finished') return (p.read_pct ?? 0) >= 95
       if (filter === 'untranslated') return p.translated === 0 && p.status === 'ready'
       if (filter === 'failed') return p.status === 'failed'
       return true
@@ -388,6 +396,7 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
     rows = [...rows].sort((a, b) => {
       if (sort === 'title') return a.title.localeCompare(b.title, 'zh')
       if (sort === 'pages') return b.pages - a.pages
+      if (sort === 'read') return (b.read_at ?? 0) - (a.read_at ?? 0)
       return b.created_at - a.created_at
     })
     return rows
@@ -464,7 +473,7 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
             >
               从 Zotero 导入
             </button>
-            <button className="btn primary" onClick={() => inputRef.current?.click()} disabled={uploading}>
+            <button className="btn primary" data-tour="library-upload" onClick={() => inputRef.current?.click()} disabled={uploading}>
               <IconUpload /> {uploading ? '上传中…' : '添加文章'}
             </button>
             <input
@@ -502,6 +511,9 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
             <span>筛选</span>
             <select value={filter} onChange={(e) => setFilter(e.target.value as Filter)}>
               <option value="all">全部</option>
+              <option value="reading">在读</option>
+              <option value="unread">未读</option>
+              <option value="finished">已读完</option>
               <option value="ready">已就绪</option>
               <option value="untranslated">未翻译</option>
               <option value="failed">解析失败</option>
@@ -511,6 +523,7 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
             <span>排序</span>
             <select value={sort} onChange={(e) => setSort(e.target.value as Sort)}>
               <option value="recent">最近添加</option>
+              <option value="read">最近阅读</option>
               <option value="title">标题</option>
               <option value="pages">页数</option>
             </select>

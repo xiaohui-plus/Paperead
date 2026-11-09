@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   importZotero,
+  syncZotero,
   zoteroCollections,
   zoteroItems,
   zoteroStatus,
@@ -35,6 +36,7 @@ export function ZoteroImportDialog({ open, onClose, onImported }: Props) {
   const [loadingMore, setLoadingMore] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [importing, setImporting] = useState(false)
+  const [syncing, setSyncing] = useState(false)
   const [progress, setProgress] = useState({ done: 0, total: 0 })
   const [result, setResult] = useState<Result | null>(null)
   const reqId = useRef(0)
@@ -180,6 +182,30 @@ export function ZoteroImportDialog({ open, onClose, onImported }: Props) {
     void loadItems(0)
   }
 
+  const doSync = async () => {
+    if (syncing || importing) return
+    setSyncing(true)
+    setResult(null)
+    try {
+      const res = await syncZotero(collection)
+      setResult({
+        imported: res.imported,
+        skipped: res.skipped,
+        errors: res.errors,
+      })
+      onImported(res.imported, res.skipped)
+      await loadItems(0)
+    } catch (e) {
+      setResult({
+        imported: 0,
+        skipped: 0,
+        errors: [e instanceof Error ? e.message : '同步失败'],
+      })
+    } finally {
+      setSyncing(false)
+    }
+  }
+
   if (!open) return null
 
   const percent = progress.total ? (progress.done / progress.total) * 100 : 0
@@ -256,11 +282,24 @@ export function ZoteroImportDialog({ open, onClose, onImported }: Props) {
                   {allSelected ? '取消全选' : '全选本页'}
                 </button>
               )}
+              <button
+                className="zotero-select-all"
+                onClick={() => void doSync()}
+                disabled={syncing || importing}
+                title="把当前分类下所有带 PDF 的条目一次导入，已在库中的自动跳过"
+              >
+                {syncing ? '同步中…' : '同步全部'}
+              </button>
             </div>
 
             {importing && (
               <div className="zotero-progress" title={`${progress.done}/${progress.total}`}>
                 <span style={{ width: `${percent}%` }} />
+              </div>
+            )}
+            {syncing && (
+              <div className="zotero-progress" title="正在同步 Zotero 条目">
+                <span style={{ width: '100%', opacity: 0.5 }} />
               </div>
             )}
 
@@ -341,13 +380,13 @@ export function ZoteroImportDialog({ open, onClose, onImported }: Props) {
               <span className="zotero-count">
                 已选 {selected.size} 篇 · 本页 {items.length}/{total || items.length}
               </span>
-              <button className="btn ghost" onClick={onClose} disabled={importing}>
+              <button className="btn ghost" onClick={onClose} disabled={importing || syncing}>
                 {result ? '完成' : '取消'}
               </button>
               <button
                 className="btn primary"
                 onClick={() => void doImport()}
-                disabled={!selected.size || importing}
+                disabled={!selected.size || importing || syncing}
               >
                 {importing
                   ? `导入中 ${Math.min(progress.done + 1, progress.total)}/${progress.total}…`

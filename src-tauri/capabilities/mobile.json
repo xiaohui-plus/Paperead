@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "mobile",
+  "description": "Paperead Android capability",
+  "windows": ["main"],
+  "platforms": ["android", "iOS"],
+  "permissions": ["core:default"]
+}

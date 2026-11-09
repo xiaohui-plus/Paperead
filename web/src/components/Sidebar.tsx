@@ -6,6 +6,7 @@ import {
   IconSettings,
   IconSpark,
 } from './icons'
+import { isMobileShell } from '../lib/mobile'
 
 export type NavKey = 'library' | 'search' | 'research' | 'review'
 
@@ -44,13 +45,17 @@ export function Sidebar({
       </div>
 
       <nav className="library-nav">
-        {NAV.map((item) => {
+        {NAV.filter(
+          // 安卓端不提供研究与综述
+          (item) => !isMobileShell() || (item.key !== 'research' && item.key !== 'review'),
+        ).map((item) => {
           const Icon = item.icon
           return (
             <button
               key={item.key}
               className="library-nav-item"
               data-active={item.key === active}
+              data-tour={`nav-${item.key}`}
               title={item.label}
               aria-label={item.label}
               onClick={() => onNav(item.key)}
@@ -75,7 +80,7 @@ export function Sidebar({
         </div>
       )}
 
-      <button className="library-settings" onClick={onSettings}>
+      <button className="library-settings" data-tour="settings-entry" onClick={onSettings}>
         <IconSettings />
         模型与密钥
       </button>

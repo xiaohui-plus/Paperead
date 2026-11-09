@@ -13,14 +13,11 @@ interface Props extends PanelProps {
 }
 
 /**
- * 手机端阅读页底部工具条：
- * 平时收起，鼠标移到屏幕底部或点一下把手才升起；
+ * 手机端阅读页底部工具条：常驻在屏幕底部，
  * 点其中一项从下方展开对应面板，点遮罩或关闭按钮收起。
  */
 export function MobileDock(props: Props) {
-  const [revealed, setRevealed] = useState(false)
   const [open, setOpen] = useState<TabKey | null>(null)
-  const show = revealed || open !== null
   const active = PANEL_TABS.find((t) => t.key === open)
 
   useEffect(() => {
@@ -32,10 +29,7 @@ export function MobileDock(props: Props) {
     return () => window.removeEventListener('keydown', onKey)
   }, [open])
 
-  const close = () => {
-    setOpen(null)
-    setRevealed(false)
-  }
+  const close = () => setOpen(null)
 
   const jump = (id: string) => {
     props.onJump(id)
@@ -44,41 +38,20 @@ export function MobileDock(props: Props) {
 
   return (
     <>
-      <div
-        className="mobile-dock-wrap"
-        data-show={show}
-        data-open={open !== null}
-        onMouseEnter={() => setRevealed(true)}
-        onMouseLeave={() => {
-          if (!open) setRevealed(false)
-        }}
-      >
-        <button
-          className="mobile-dock-handle"
-          aria-label={show ? '收起阅读工具' : '展开阅读工具'}
-          aria-expanded={show}
-          onClick={() => setRevealed((value) => !value)}
-        >
-          <span />
-        </button>
-        <nav className="mobile-dock" aria-label="阅读工具">
-          {PANEL_TABS.map((t) => (
-            <button
-              key={t.key}
-              className="mobile-dock-item"
-              data-active={open === t.key}
-              aria-pressed={open === t.key}
-              onClick={() => {
-                setRevealed(true)
-                setOpen((value) => (value === t.key ? null : t.key))
-              }}
-            >
-              {t.icon}
-              <span>{t.label}</span>
-            </button>
-          ))}
-        </nav>
-      </div>
+      <nav className="mobile-dock" aria-label="阅读工具">
+        {PANEL_TABS.map((t) => (
+          <button
+            key={t.key}
+            className="mobile-dock-item"
+            data-active={open === t.key}
+            aria-pressed={open === t.key}
+            onClick={() => setOpen((value) => (value === t.key ? null : t.key))}
+          >
+            {t.icon}
+            <span>{t.label}</span>
+          </button>
+        ))}
+      </nav>
 
       {open !== null && (
         <>

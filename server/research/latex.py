@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 MAX_TEXT = 2_000_000
 COMPILE_TIMEOUT = 180
@@ -95,7 +96,7 @@ def bundled_tools_dir() -> Path | None:
 
 
 def find_pandoc() -> str | None:
-    """优先用安装包内置的 pandoc，其次才是系统 PATH。"""
+    """优先用安装包内置的 pandoc，其次是首次启动自动下载的那份，最后才是 PATH。"""
     override = os.environ.get("PAPEREAD_PANDOC")
     if override and Path(override).is_file():
         return override
@@ -104,6 +105,14 @@ def find_pandoc() -> str | None:
         bundled = tools / "pandoc" / "pandoc.exe"
         if bundled.is_file():
             return str(bundled)
+    try:
+        from server.research.pandoc_setup import installed_exe
+
+        downloaded = installed_exe()
+    except Exception:  # noqa: BLE001 - 下载模块不可用时不拖累导出
+        downloaded = None
+    if downloaded is not None:
+        return str(downloaded)
     return shutil.which("pandoc") or shutil.which("pandoc.exe")
 
 
@@ -180,7 +189,10 @@ def _markdown_to_fragment(markdown: str, natbib: bool) -> tuple[str, str]:
     if proc.returncode != 0:
         detail = proc.stderr.decode("utf-8", "replace")[:400]
         return "", f"pandoc 转换失败：{detail}"
-    return proc.stdout.decode("utf-8", "replace"), ""
+    # pandoc 在 Windows 下输出 CRLF；若原样写进 .tex，再经文本模式写入会变成
+    # ``\r\r\n``，在 ``{%`` 行后凭空多出一个空行，导致 \hypertarget 报错。
+    output = proc.stdout.decode("utf-8", "replace")
+    return output.replace("\r\n", "\n").replace("\r", "\n"), ""
 
 
 def _wrap_document(
@@ -191,6 +203,7 @@ def _wrap_document(
     abstract: str,
     style: str,
     bib_name: str | None,
+    nocite: bool = False,
 ) -> str:
     if style == "ctexart":
         document_class = r"\documentclass[UTF8,a4paper,11pt]{ctexart}"
@@ -204,8 +217,15 @@ def _wrap_document(
         )
     bibliography = ""
     if bib_name:
+        # 正文里的引用是“作者 年份, paperId, pN”这样的自然语言标注，pandoc
+        # 不会把它转成 \cite；用 \nocite{*} 把自动生成的文献条目全部列出，
+        # 至少保证 PDF 有一份完整、可核对的参考文献表。
+        # 参考文献单独起页，避免从正文末页底部挤进来又跨页。
+        cite_all = r"\nocite{*}" + "\n" if nocite else ""
         bibliography = (
+            f"\n\\clearpage"
             f"\n\\bibliographystyle{{plainnat}}"
+            f"\n{cite_all}"
             f"\n\\bibliography{{{bib_name}}}\n"
         )
 
@@ -219,10 +239,36 @@ def _wrap_document(
             r"\usepackage{float}",
             r"\usepackage{xcolor}",
             r"\usepackage{url}",
+            r"\usepackage{calc}",  # pandoc 的表格列宽用 \real{0.25}，需要 calc
+            r"\usepackage[hidelinks]{hyperref}",
+            # 部分 TeX Live 精简安装缺 pzdr.tfm，hyperref 在 XeTeX 下会因此在
+            # \begin{document} 报错；链接本身不受影响，直接跳过这段字体设置。
+            r"\makeatletter",
+            r"\renewcommand\Hy@setup@XeTeXLinkBox@dvipdfmx{}",
+            r"\makeatother",
             r"\usepackage{natbib}",
+            r"\usepackage{newunicodechar}",
+            # 正文里的 μ/α 等希腊字母在 Latin Modern 里没有字形，转成数学符号。
+            r"\newunicodechar{α}{\ensuremath{\alpha}}",
+            r"\newunicodechar{β}{\ensuremath{\beta}}",
+            r"\newunicodechar{γ}{\ensuremath{\gamma}}",
+            r"\newunicodechar{δ}{\ensuremath{\delta}}",
+            r"\newunicodechar{ε}{\ensuremath{\varepsilon}}",
+            r"\newunicodechar{θ}{\ensuremath{\theta}}",
+            r"\newunicodechar{λ}{\ensuremath{\lambda}}",
+            r"\newunicodechar{μ}{\ensuremath{\mu}}",
+            r"\newunicodechar{σ}{\ensuremath{\sigma}}",
+            r"\newunicodechar{τ}{\ensuremath{\tau}}",
+            r"\newunicodechar{φ}{\ensuremath{\varphi}}",
+            r"\newunicodechar{χ}{\ensuremath{\chi}}",
+            r"\newunicodechar{ω}{\ensuremath{\omega}}",
+            r"\newunicodechar{≥}{\ensuremath{\geq}}",
+            r"\newunicodechar{≤}{\ensuremath{\leq}}",
+            r"\setcounter{secnumdepth}{0}",
+            # 综述正文不需要运行页眉，只保留页码，避免参考文献页顶部出现章节名。
+            r"\pagestyle{plain}",
             r"\providecommand{\tightlist}{\setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}",
             r"\providecommand{\pandocbounded}[1]{#1}",
-            r"\providecommand{\real}[1]{#1}",
             f"\\title{{{escape_latex(title or 'Untitled')}}}",
             f"\\author{{{escape_latex(author)}}}",
             r"\date{\today}",
@@ -240,6 +286,79 @@ def _wrap_document(
     )
 
 
+_PAPER_ID_INLINE = re.compile(r"\bp_[0-9a-f]{10,16}\b")
+_CJK_QUOTED = re.compile(r'"([^"\n]{1,200})"')
+_LATEX_CJK_QUOTE = re.compile(r"``([^`\n]{1,200})''")
+
+
+def _normalize_cjk_quotes(text: str) -> str:
+    """导出前把中文语境里的成对 ASCII 引号换成中文引号。
+
+    pandoc 的 smart 对紧贴中文的 ``"x"`` 有时不触发，原样留下去在 PDF 里会变成
+    两个右引号，所以在 Markdown 阶段先自己配对。
+    """
+    if '"' not in text or not has_cjk(text):
+        return text
+
+    def replace(match: re.Match[str]) -> str:
+        inner = match.group(1)
+        if CJK_RE.search(inner):
+            return "“" + inner + "”"
+        return match.group(0)
+
+    return _CJK_QUOTED.sub(replace, text)
+
+
+def _restore_cjk_quotes(fragment: str) -> str:
+    """把 pandoc 输出的 ```x''`` 还原成中文引号。
+
+    pandoc 的 LaTeX writer 会把 Unicode 引号统一写成 ```x''``；在 CJK 语境里
+    渲染出来是两个右引号。这里只还原内含中文的引号，英文原样保留。
+    """
+    if "``" not in fragment:
+        return fragment
+
+    def replace(match: re.Match[str]) -> str:
+        inner = match.group(1)
+        if CJK_RE.search(inner):
+            return "“" + inner + "”"
+        return match.group(0)
+
+    return _LATEX_CJK_QUOTE.sub(replace, fragment)
+
+
+def _strip_paper_ids(
+    text: str, labels: dict[str, str] | None = None
+) -> str:
+    """去掉正文引用里的内部 paperId，并清理多余标点。
+
+    给了 ``labels``（paperId → “作者 年份”）时，把裸 paperId 换成可读的
+    作者-年份标注；若同一处已经写了作者或年份，则只删掉 paperId。
+    """
+
+    if "p_" not in text:
+        return text
+
+    def replace(match: re.Match[str]) -> str:
+        label = (labels or {}).get(match.group(0), "").strip()
+        if not label:
+            return ""
+        prefix = text[max(0, match.start() - 48) : match.start()]
+        parts = label.split()
+        surname = parts[0] if parts else ""
+        year = parts[-1] if parts else ""
+        if (surname and surname in prefix) or (
+            year.isdigit() and year in prefix
+        ):
+            return ""
+        return label
+
+    cleaned = _PAPER_ID_INLINE.sub(replace, text)
+    cleaned = re.sub(r"[,，]\s*[,，]", "，", cleaned)
+    cleaned = re.sub(r"([（(])\s*[,，]\s*", r"\1", cleaned)
+    return cleaned
+
+
 def build_tex(
     markdown: str,
     *,
@@ -248,6 +367,8 @@ def build_tex(
     abstract: str = "",
     template: str = "auto",
     bib_name: str | None = None,
+    nocite: bool = False,
+    citation_labels: dict[str, str] | None = None,
 ) -> tuple[str, str, str]:
     """把 Markdown 或完整 .tex 转成可编译的 LaTeX 文档。
 
@@ -256,6 +377,14 @@ def build_tex(
     text = (markdown or "").strip()
     if not text:
         return "", "", "没有可导出的正文：请传 content，或 source 指向项目里的文稿。"
+
+    # 正文里的“（Li 2026, p_5c0ab2865c69, p1）”只是内部审计标注，
+    # 导出时去掉 paperId，避免读者在 PDF 里看到内部主键。
+    text = _strip_paper_ids(text, citation_labels)
+    text = _normalize_cjk_quotes(text)
+    if bib_name and "\\cite" not in text:
+        # 自然语言引用不会变成 \cite，靠 \nocite{*} 把 bib 里的条目列出来。
+        nocite = True
 
     style = (template or "auto").strip().lower()
     if style not in STYLES:
@@ -270,6 +399,7 @@ def build_tex(
     fragment, error = _markdown_to_fragment(body_md, natbib=bool(bib_name))
     if error:
         return "", style, error
+    fragment = _restore_cjk_quotes(fragment)
 
     tex = _wrap_document(
         fragment,
@@ -278,6 +408,7 @@ def build_tex(
         abstract=abstract,
         style=style,
         bib_name=bib_name,
+        nocite=nocite,
     )
     return tex, style, ""
 
@@ -376,3 +507,63 @@ def bib_stem(directory: Path) -> str | None:
     for path in sorted(directory.glob("*.bib")):
         return path.stem
     return None
+
+
+def _probe_version(command: list[str], timeout: int = 8) -> str:
+    try:
+        proc = subprocess.run(command, capture_output=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    raw = (proc.stdout or proc.stderr).decode("utf-8", "replace").strip()
+    return raw.splitlines()[0] if raw else ""
+
+
+def find_winget() -> str | None:
+    found = shutil.which("winget") or shutil.which("winget.exe")
+    if found:
+        return found
+    # WindowsApps 下的应用执行别名不在部分进程的 PATH 里，单独找一次。
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        candidate = Path(local) / "Microsoft" / "WindowsApps" / "winget.exe"
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def toolchain_status() -> dict[str, Any]:
+    """设置页用的写作工具自检：pandoc + TeX 引擎 + bibtex。"""
+    pandoc = find_pandoc()
+    engines = []
+    seen: set[str] = set()
+    for path in find_engines():
+        name = Path(path).stem.lower()
+        if name in seen:
+            continue
+        seen.add(name)
+        engines.append(
+            {"name": name, "path": path, "version": _probe_version([path, "--version"])}
+        )
+    bibtex = find_bibtex()
+    winget = find_winget()
+    missing = []
+    if not pandoc:
+        missing.append("pandoc")
+    if not engines:
+        missing.append("latex")
+    return {
+        "pandoc": {
+            "found": bool(pandoc),
+            "path": pandoc or "",
+            "version": _probe_version([pandoc, "--version"]) if pandoc else "",
+        },
+        "engines": engines,
+        "bibtex": {
+            "found": bool(bibtex),
+            "path": bibtex or "",
+            "version": _probe_version([bibtex, "--version"]) if bibtex else "",
+        },
+        "installer": {"winget": bool(winget), "package": "MiKTeX.MiKTeX"},
+        "ready": bool(pandoc and engines),
+        "missing": missing,
+    }

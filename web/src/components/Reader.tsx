@@ -1,6 +1,8 @@
 import { useMemo, type CSSProperties, type RefObject } from 'react'
-import type { Paper, ViewMode } from '../types'
+import type { Paper, ReaderContextItem, ViewMode } from '../types'
 import { isFlowBlock, prepareBlocks } from '../lib/blocks'
+import type { Annotation, ReadingHighlight } from '../lib/library'
+import type { AnnotationActions } from './Annotations'
 import { BlockView } from './BlockView'
 
 interface Props {
@@ -13,6 +15,12 @@ interface Props {
   /** 是否配置了回答模型：没配置时不要显示"等待翻译"的骨架条 */
   canTranslate?: boolean
   onOpenSettings?: () => void
+  annotations?: Annotation[]
+  annotationActions?: AnnotationActions
+  highlights?: ReadingHighlight[]
+  /** 已加入问答附录的块 */
+  contextIds?: Set<string>
+  onAttachContext?: (item: ReaderContextItem) => void
 }
 
 export function Reader({
@@ -23,6 +31,11 @@ export function Reader({
   hint,
   canTranslate = true,
   onOpenSettings,
+  annotations = [],
+  annotationActions,
+  highlights = [],
+  contextIds,
+  onAttachContext,
 }: Props) {
   const prepared = useMemo(() => prepareBlocks(paper.blocks), [paper.blocks])
   const flow = prepared.filter((r) => isFlowBlock(r.block))
@@ -87,6 +100,11 @@ export function Reader({
             terms={terms}
             hasTranslation={hasTranslation && canTranslate}
             paperId={paper.paper_id}
+            annotations={annotations}
+            annotationActions={annotationActions}
+            highlights={highlights}
+            attachedIds={contextIds}
+            onAttachContext={onAttachContext}
           />
         ))}
 

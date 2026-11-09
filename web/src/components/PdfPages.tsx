@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react'
+import { mediaUrl } from '../lib/mobile'
 
 interface Props {
   paperId: string
@@ -90,7 +91,9 @@ export function PdfPages({
                 style={{ width: `min(${width}px, 100%)`, aspectRatio: ratio }}
               >
                 <img
-                  src={`/api/papers/${encodeURIComponent(paperId)}/page/${page}.png?width=${RENDER_WIDTH}`}
+                  src={mediaUrl(
+                    `/api/papers/${encodeURIComponent(paperId)}/page/${page}.png?width=${RENDER_WIDTH}`,
+                  )}
                   alt={`第 ${page} 页`}
                   loading={Math.abs(page - initialPage) <= 1 ? 'eager' : 'lazy'}
                   onLoad={() => {

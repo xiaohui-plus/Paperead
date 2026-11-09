@@ -1,6 +1,6 @@
 import { IconChevron } from '../components/icons'
-import { toolTitle, type ToolCall } from '../lib/researchTypes'
-import { ToolCard } from './ToolCard'
+import { toolSubtitle, toolTitle, type ToolCall } from '../lib/researchTypes'
+import { ToolCard, toolIcon } from './ToolCard'
 
 export interface ToolGroupData {
   name: string
@@ -20,7 +20,7 @@ export function groupTools(tools: ToolCall[]): ToolGroupData[] {
 
 function groupStatus(tools: ToolCall[]): string {
   if (tools.some((tool) => tool.status === 'running' || tool.status === 'draft')) {
-    return '执行中'
+    return '运行中'
   }
   if (tools.some((tool) => tool.status === 'error')) return '部分失败'
   return '已完成'
@@ -32,14 +32,21 @@ export function ToolGroup({ group }: { group: ToolGroupData }) {
   const running = group.tools.some(
     (tool) => tool.status === 'running' || tool.status === 'draft',
   )
+  const summary = toolSubtitle(group.tools[0])
   return (
     <details className="tool-group" data-running={running}>
       <summary>
-        <span className="tool-dot" />
-        <strong>
+        <span className="tool-leading">{toolIcon(group.name)}</span>
+        <strong className="tool-title">
           {toolTitle(group.name)} ×{group.tools.length}
         </strong>
-        <em className="tool-status">{groupStatus(group.tools)}</em>
+        {summary && (
+          <>
+            <span className="tool-sep" aria-hidden="true" />
+            <span className="tool-summary">{summary}</span>
+          </>
+        )}
+        <em className="tool-suffix">{groupStatus(group.tools)}</em>
         <span className="tool-chevron">
           <IconChevron />
         </span>

@@ -3,11 +3,13 @@ import { LibraryPage } from './components/LibraryPage'
 import { ReaderView } from './components/ReaderView'
 import { ScholarPage } from './components/ScholarPage'
 import type { NavKey } from './components/Sidebar'
+import { MobileSetupScreen } from './components/MobileSetup'
 import { SpikePage } from './research/SpikePage'
 import { ResearchShell } from './research/ResearchShell'
 import { ResearchHome } from './research/ResearchHome'
 import { ProjectPage } from './research/ProjectPage'
 import type { ProjectKind } from './lib/researchApi'
+import { hasMobileServer, isMobileShell } from './lib/mobile'
 
 /**
  * 极简路由：用 query 参数而不是 hash，把 hash 留给 `#b0013` 这种块级深链。
@@ -35,10 +37,11 @@ function readRoute(): Route {
   const projectId = params.get('id')
   const sessionId = params.get('sid')
   const rename = params.get('rename') === '1'
-  if (raw === 'project' && projectId) {
+  const mobile = isMobileShell()
+  if (raw === 'project' && projectId && !mobile) {
     return { view: 'project', projectId, sessionId, rename }
   }
-  if (raw === 'research' || raw === 'review') {
+  if ((raw === 'research' || raw === 'review') && !mobile) {
     return { view: raw, projectId: null, sessionId: null, rename: false }
   }
   if (params.get('v') === 'search') {
@@ -92,6 +95,8 @@ export default function App() {
   }
 
   const goView = (view: Exclude<View, 'project'>) => {
+    // 安卓端已裁掉研究与综述，误入时统一回到文献库
+    if (isMobileShell() && (view === 'research' || view === 'review')) view = 'library'
     const url = new URL(window.location.href)
     url.searchParams.delete('p')
     url.searchParams.delete('id')
@@ -149,6 +154,10 @@ export default function App() {
     if (key === 'library') goView('library')
     else if (key === 'search') goView('search')
     else goView(key)
+  }
+
+  if (isMobileShell() && !hasMobileServer()) {
+    return <MobileSetupScreen />
   }
 
   if (paperId) {
