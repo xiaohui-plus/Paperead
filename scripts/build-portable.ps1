@@ -3,9 +3,10 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
 $exe = Join-Path $root "src-tauri\target\release\paperead-desktop.exe"
-$res = Join-Path $root "src-tauri\resources\paperead-server"
+$res = Join-Path $root "src-tauri\resources"
 if (-not (Test-Path $exe)) { throw "缺少 release exe，先运行 npm run build:installer" }
-if (-not (Test-Path (Join-Path $res "paperead-server.exe"))) { throw "缺少 sidecar resources" }
+if (-not (Test-Path (Join-Path $res "paperead-server\paperead-server.exe"))) { throw "缺少 sidecar resources" }
+if (-not (Test-Path (Join-Path $res "agent\src\bin.mjs"))) { throw "缺少 agent resources，先运行 scripts\stage-agent.ps1" }
 
 $config = Get-Content (Join-Path $root "src-tauri\tauri.conf.json") -Raw | ConvertFrom-Json
 $version = $config.version
@@ -15,7 +16,7 @@ New-Item -ItemType Directory -Force $stage | Out-Null
 
 Copy-Item $exe (Join-Path $stage "paperead-desktop.exe") -Force
 New-Item -ItemType Directory -Force (Join-Path $stage "resources") | Out-Null
-Copy-Item -Recurse -Force $res (Join-Path $stage "resources\paperead-server")
+Copy-Item -Recurse -Force (Join-Path $res "*") (Join-Path $stage "resources")
 
 $launcher = @"
 @echo off

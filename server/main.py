@@ -90,6 +90,15 @@ MOCK = env("PAPEREAD_MOCK") == "1"
 # 公式识别的整体时间预算：超时就先让论文可读，剩余公式保留裁图
 FORMULA_TIMEOUT = float(env("PAPEREAD_FORMULA_TIMEOUT", "180"))
 
+# 版本更新：优先读 Tauri 的 latest.json；国内镜像作为回退。
+UPDATE_ENDPOINTS = (
+    "https://github.com/xiaohui-plus/Paperead/releases/latest/download/latest.json",
+    "https://ghproxy.net/https://github.com/xiaohui-plus/Paperead/releases/latest/download/latest.json",
+)
+UPDATE_RELEASE_PAGE = "https://github.com/xiaohui-plus/Paperead/releases/latest"
+UPDATE_TTL = 24 * 3600
+_update_cache: dict = {"checked_at": 0.0, "payload": None}
+
 store = LibraryStore(DATA_DIR)
 research_store = ResearchStore(DATA_DIR / "research")
 
@@ -204,6 +213,101 @@ async def health() -> dict:
         "frozen": is_frozen(),
         "data": str(DATA_DIR),
     }
+
+
+def _version_key(value: str) -> tuple[int, ...]:
+    """0.1.10 > 0.1.9；忽略 v 前缀和 beta 之类的后缀。"""
+    nums = re.findall(r"\d+", str(value or ""))
+    return tuple(int(n) for n in nums[:4]) or (0,)
+
+
+def _update_payload(raw: dict, source: str) -> dict:
+    version = str(raw.get("version") or "").strip()
+    platforms = raw.get("platforms")
+    if not isinstance(platforms, dict):
+        platforms = {}
+    win = platforms.get("windows-x86_64")
+    if not isinstance(win, dict):
+        win = next(
+            (v for k, v in platforms.items() if "windows" in k and isinstance(v, dict)),
+            {},
+        )
+    return {
+        "current": __version__,
+        "latest": version,
+        "has_update": bool(version) and _version_key(version) > _version_key(__version__),
+        "notes": str(raw.get("notes") or "")[:2000],
+        "pub_date": str(raw.get("pub_date") or ""),
+        "url": str(win.get("url") or ""),
+        "release_url": UPDATE_RELEASE_PAGE,
+        "source": source,
+    }
+
+
+async def _fetch_update() -> dict:
+    endpoints: list[str] = []
+    override = env("PAPEREAD_UPDATE_ENDPOINT", "")
+    if override:
+        endpoints.append(override)
+    endpoints.extend(UPDATE_ENDPOINTS)
+    last_error = ""
+    async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+        for url in endpoints:
+            try:
+                res = await client.get(
+                    url,
+                    headers={
+                        "Accept": "application/json",
+                        "User-Agent": f"Paperead/{__version__}",
+                    },
+                )
+            except Exception as e:  # 网络不通/超时：换下一个源
+                last_error = str(e)[:160]
+                continue
+            if res.status_code != 200:
+                last_error = f"HTTP {res.status_code}"
+                continue
+            try:
+                raw = res.json()
+            except Exception:
+                last_error = "更新清单不是 JSON"
+                continue
+            if not isinstance(raw, dict) or not raw.get("version"):
+                last_error = "更新清单格式不正确"
+                continue
+            return _update_payload(raw, url)
+    raise RuntimeError(last_error or "无法连接更新服务")
+
+
+@app.get("/api/update")
+async def check_update(force: bool = False) -> dict:
+    """检查新版本；同一天内默认复用结果，force=true 时重新拉取。"""
+    now = time.time()
+    cached = _update_cache.get("payload")
+    if (
+        isinstance(cached, dict)
+        and not force
+        and now - float(_update_cache.get("checked_at") or 0) < UPDATE_TTL
+    ):
+        return {**cached, "cached": True, "checked_at": _update_cache["checked_at"]}
+    try:
+        payload = await _fetch_update()
+    except Exception as e:
+        return {
+            "current": __version__,
+            "latest": "",
+            "has_update": False,
+            "notes": "",
+            "pub_date": "",
+            "url": "",
+            "release_url": UPDATE_RELEASE_PAGE,
+            "error": str(e)[:200],
+            "cached": False,
+            "checked_at": 0,
+        }
+    _update_cache["payload"] = payload
+    _update_cache["checked_at"] = now
+    return {**payload, "cached": False, "checked_at": now}
 
 
 def _agent_target() -> tuple[str, str]:

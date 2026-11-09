@@ -31,6 +31,7 @@ Python 3.12、uv。
 ```powershell
 npm ci
 npm ci --prefix web
+pnpm --dir agent install
 uv venv .venv-build --python 3.12
 uv pip install --python .venv-build\Scripts\python.exe -e ".[server]" "pyinstaller>=6.10"
 npm run build:installer
@@ -51,10 +52,12 @@ release\Paperead_0.1.0_source.zip        # AGPL 对应源码
 1. 构建 `web/dist`；
 2. 用 PyInstaller 产出 `dist-sidecar\paperead-server`（onedir，约 80MB）；
 3. 复制到 `src-tauri\resources\paperead-server`；
-4. 编译 Tauri release 并生成 NSIS 安装包。
+4. 把 `agent/`（含 `node_modules` 和内置 `node.exe`）打包到 `src-tauri\resources\agent`；
+5. 编译 Tauri release 并生成 NSIS 安装包。
 
 只改前端时也要重新打包 sidecar，因为 sidecar 托管的是打包时的 `web/dist`。
-`npm run build:installer` 会按顺序处理。
+`npm run build:installer` 会按顺序处理。研究功能依赖第 4 步，缺了 agent 资源时
+安装版的研究页会提示离线。
 
 开发调试：
 

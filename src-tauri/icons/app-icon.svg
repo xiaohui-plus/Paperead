@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- 与 web/src/styles.css 的 .brand-mark 保持一致：#2563eb 圆角方块 + 白色 P -->
+  <rect width="1024" height="1024" rx="280" ry="280" fill="#2563eb"/>
+  <path
+    fill="#ffffff"
+    fill-rule="evenodd"
+    d="M331 262 H552 C640 262 696 300 696 404 C696 508 640 546 552 546 H441 V762 H331 Z
+       M441 356 H560 C604 356 612 376 612 404 C612 432 604 452 560 452 H441 Z"
+  />
+</svg>

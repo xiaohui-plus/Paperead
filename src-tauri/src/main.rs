@@ -38,6 +38,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![install_update])
         .setup(|app| {
             let handle = app.handle().clone();
             let data_dir = paths::ensure_data_dir(&handle);
@@ -271,18 +272,18 @@ fn maybe_onboard(app: &AppHandle, port: u16, data_dir: &std::path::Path) {
         });
 }
 
-async fn check_updates(app: AppHandle, interactive: bool) {
+fn updater_for(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
     let endpoint = paths::var("PAPEREAD_UPDATE_ENDPOINT")
         .and_then(|value| Url::parse(&value).ok());
     if paths::var("PAPEREAD_UPDATE_ENDPOINT").is_some() && endpoint.is_none() {
-        paths::log_line(&app, "invalid PAPEREAD_UPDATE_ENDPOINT, using config endpoint");
+        paths::log_line(app, "invalid PAPEREAD_UPDATE_ENDPOINT, using config endpoint");
     }
 
     let builder = if let Some(url) = endpoint {
         match app.updater_builder().endpoints(vec![url]) {
             Ok(builder) => builder,
             Err(error) => {
-                paths::log_line(&app, &format!("invalid update endpoint: {error}"));
+                paths::log_line(app, &format!("invalid update endpoint: {error}"));
                 app.updater_builder()
             }
         }
@@ -290,7 +291,33 @@ async fn check_updates(app: AppHandle, interactive: bool) {
         app.updater_builder()
     };
 
-    let updater = match builder.build() {
+    builder
+        .build()
+        .map_err(|error| format!("更新检查不可用：{error}"))
+}
+
+/// 设置页「立即更新」：检查 → 下载 → 交给安装器，随后应用退出。
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<String, String> {
+    let updater = updater_for(&app)?;
+    match updater.check().await {
+        Ok(Some(update)) => {
+            let version = update.version.clone();
+            paths::log_line(&app, &format!("manual update download started: {version}"));
+            let bytes = update
+                .download(|_, _| {}, || {})
+                .await
+                .map_err(|error| format!("下载更新失败：{error}"))?;
+            install_downloaded_update(&app, &version, &bytes)?;
+            Ok(version)
+        }
+        Ok(None) => Err("当前已是最新版本".into()),
+        Err(error) => Err(format!("检查更新失败：{error}")),
+    }
+}
+
+async fn check_updates(app: AppHandle, interactive: bool) {
+    let updater = match updater_for(&app) {
         Ok(updater) => updater,
         Err(error) => {
             paths::log_line(&app, &format!("updater init failed: {error}"));

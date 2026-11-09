@@ -1,4 +1,13 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  canInstallInApp,
+  checkUpdate,
+  formatCheckTime,
+  installUpdateInApp,
+  loadUpdateCache,
+  UPDATE_DAY_MS,
+  type UpdateInfo,
+} from '../lib/update'
 import {
   activeModel,
   BASE_URL_OPTIONS,
@@ -23,7 +32,7 @@ import {
   type ProviderPreset,
 } from '../lib/settings'
 import { Katex } from './Katex'
-import { IconBack, IconCheck, IconClose, IconPlus } from './icons'
+import { IconBack, IconCheck, IconClose, IconPlus, IconRefresh, IconSettings } from './icons'
 
 interface Props {
   open: boolean
@@ -163,25 +172,81 @@ export function SettingsDialog({
 }: Props) {
   const [settings, setSettings] = useState<ModelSettings>(loadModelSettings)
   const [kind, setKind] = useState<ModelKind>(initialKind)
+  const [tab, setTab] = useState<'models' | 'update'>('models')
   const [editor, setEditor] = useState<EditorState | null>(null)
   const [showKey, setShowKey] = useState(false)
   const [test, setTest] = useState<TestState>({ kind: 'idle' })
   const [selections, setSelections] = useState<Record<string, string>>({})
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(
+    () => loadUpdateCache()?.data ?? null,
+  )
+  const [updateCheckedAt, setUpdateCheckedAt] = useState(
+    () => loadUpdateCache()?.checkedAt ?? 0,
+  )
+  const [updateChecking, setUpdateChecking] = useState(false)
+  const [updateError, setUpdateError] = useState('')
+  const [installing, setInstalling] = useState(false)
+  const [installError, setInstallError] = useState('')
   const bodyRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     bodyRef.current?.scrollTo({ top: 0 })
-  }, [open, kind, editor?.mode, editor?.id])
+  }, [open, tab, kind, editor?.mode, editor?.id])
 
   useEffect(() => {
     if (!open) return
     setSettings(loadModelSettings())
     setKind(initialKind)
+    setTab('models')
     setEditor(null)
     setShowKey(false)
     setTest({ kind: 'idle' })
     setSelections({})
+    setUpdateError('')
+    setInstalling(false)
+    setInstallError('')
   }, [open, initialKind])
+
+  const runUpdateCheck = useCallback(async (force = false) => {
+    setUpdateChecking(true)
+    setUpdateError('')
+    try {
+      const data = await checkUpdate(force)
+      setUpdateInfo(data)
+      setUpdateCheckedAt(Number(data.checked_at) || Date.now())
+      return data
+    } catch (e) {
+      setUpdateError(e instanceof Error ? e.message : '检查更新失败')
+      return null
+    } finally {
+      setUpdateChecking(false)
+    }
+  }, [])
+
+  // 打开设置时：本地缓存超过一天就自动检查一次，手动检查不受这个限制
+  useEffect(() => {
+    if (!open) return
+    const cached = loadUpdateCache()
+    if (cached) {
+      setUpdateInfo(cached.data)
+      setUpdateCheckedAt(cached.checkedAt)
+    }
+    if (!cached || Date.now() - cached.checkedAt >= UPDATE_DAY_MS) {
+      void runUpdateCheck(false)
+    }
+  }, [open, runUpdateCheck])
+
+  const installUpdate = async () => {
+    setInstalling(true)
+    setInstallError('')
+    try {
+      await installUpdateInApp()
+    } catch (e) {
+      setInstallError(e instanceof Error ? e.message : '自动更新失败，请下载安装包')
+    } finally {
+      setInstalling(false)
+    }
+  }
 
   useEffect(() => {
     if (!open) return
@@ -503,14 +568,15 @@ export function SettingsDialog({
         onMouseDown={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal
-        aria-label="模型与密钥"
+        aria-label="设置"
       >
         <header className="modal-head">
           <div>
-            <h2>模型与密钥</h2>
+            <h2>设置</h2>
             <p>
-              回答模型负责问答与翻译，识图模型负责论文里的图片识别；推荐已按 2026-11
-              最新模型更新，两者可以分开配置。
+              {tab === 'models'
+                ? '回答模型负责问答与翻译，识图模型负责论文里的图片识别；两者可以分开配置。'
+                : '检查是否有新版本。应用每天自动检查一次，也可以在这里随时手动检查。'}
             </p>
           </div>
           <button className="icon-btn" onClick={onClose} title="关闭">
@@ -518,7 +584,34 @@ export function SettingsDialog({
           </button>
         </header>
 
-        <div className="model-tabs" role="tablist" aria-label="模型类型">
+        <div className="settings-layout">
+          <nav className="settings-nav" aria-label="设置分类">
+            <button
+              className="settings-nav-item"
+              data-active={tab === 'models'}
+              onClick={() => setTab('models')}
+            >
+              <IconSettings />
+              <span>配置模型</span>
+            </button>
+            <button
+              className="settings-nav-item"
+              data-active={tab === 'update'}
+              onClick={() => setTab('update')}
+            >
+              <IconRefresh />
+              <span>检查版本更新</span>
+              {updateInfo?.has_update && (
+                <i className="settings-nav-dot" title="发现新版本" />
+              )}
+            </button>
+            <span className="settings-nav-version">v{updateInfo?.current || '—'}</span>
+          </nav>
+
+          <div className="settings-main">
+            {tab === 'models' ? (
+              <>
+                <div className="model-tabs" role="tablist" aria-label="模型类型">
           {(['answer', 'vision'] as const).map((k) => (
             <button
               key={k}
@@ -874,9 +967,129 @@ export function SettingsDialog({
             </>
           )}
         </div>
+      </>
+    ) : (
+              <div className="modal-body update-panel" ref={bodyRef}>
+                <div className="update-panel-head">
+                  <div>
+                    <span>当前版本</span>
+                    <b>v{updateInfo?.current || '—'}</b>
+                  </div>
+                  {updateInfo && !updateError && (
+                    <span
+                      className={`update-badge ${updateInfo.has_update ? 'is-new' : 'is-latest'}`}
+                    >
+                      {updateInfo.has_update
+                        ? `发现新版本 v${updateInfo.latest}`
+                        : '已是最新版本'}
+                    </span>
+                  )}
+                </div>
+
+                <div className="update-actions">
+                  <button
+                    className="btn primary"
+                    onClick={() => void runUpdateCheck(true)}
+                    disabled={updateChecking}
+                  >
+                    {updateChecking ? '检查中…' : '检查更新'}
+                  </button>
+                  <span className="update-time">
+                    上次检查：{formatCheckTime(updateCheckedAt)}
+                    {updateInfo?.cached ? '（当天缓存）' : ''}
+                  </span>
+                </div>
+
+                {updateError ? (
+                  <div className="update-error">
+                    检查失败：{updateError}
+                    <br />
+                    可以稍后重试，或直接打开发布页查看。
+                  </div>
+                ) : updateInfo?.has_update ? (
+                  <div className="update-result">
+                    <div className="update-result-head">
+                      <b>v{updateInfo.latest}</b>
+                      {updateInfo.pub_date && (
+                        <span>{updateInfo.pub_date.slice(0, 10)}</span>
+                      )}
+                    </div>
+                    {updateInfo.notes && (
+                      <pre className="update-notes">{updateInfo.notes}</pre>
+                    )}
+                    {canInstallInApp() ? (
+                      <button
+                        className="btn primary update-download"
+                        onClick={() => void installUpdate()}
+                        disabled={installing}
+                      >
+                        {installing
+                          ? '正在下载并安装…'
+                          : `立即更新到 v${updateInfo.latest}`}
+                      </button>
+                    ) : (
+                      <a
+                        className="btn primary update-download"
+                        href={updateInfo.url || updateInfo.release_url}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        下载安装包 ↗
+                      </a>
+                    )}
+                    {installing && (
+                      <p className="update-install-hint">
+                        正在下载更新，完成后应用会自动关闭并启动安装程序，请勿关闭窗口。
+                      </p>
+                    )}
+                    {installError && (
+                      <div className="update-error">自动更新失败：{installError}</div>
+                    )}
+                    {canInstallInApp() && !installing && (
+                      <a
+                        className="update-alt-link"
+                        href={updateInfo.url || updateInfo.release_url}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        下载安装包（手动）↗
+                      </a>
+                    )}
+                  </div>
+                ) : updateInfo ? (
+                  <div className="update-latest">
+                    <IconCheck /> 当前已是最新版本，不需要更新。
+                  </div>
+                ) : null}
+
+                <p className="update-tip">
+                  桌面版可以直接在应用内更新；浏览器打开时需要手动下载安装包。
+                  应用每天自动检查一次，手动检查不受限制。
+                  <a
+                    href={
+                      updateInfo?.release_url ||
+                      'https://github.com/xiaohui-plus/Paperead/releases/latest'
+                    }
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    打开发布页 ↗
+                  </a>
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
 
         <footer className="modal-foot">
-          {editor ? (
+          {tab === 'update' ? (
+            <>
+              <span className="autosave-hint">版本检查不会上传论文或密钥</span>
+              <button className="btn primary" onClick={onClose}>
+                完成
+              </button>
+            </>
+          ) : editor ? (
             <>
               <button className="btn" onClick={closeEditor}>
                 取消

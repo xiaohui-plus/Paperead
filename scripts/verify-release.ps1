@@ -15,6 +15,12 @@ if (-not (Test-Path $portable)) { $errors += "缺少便携包：$portable" }
 if (-not (Test-Path "src-tauri\resources\paperead-server\paperead-server.exe")) {
     $errors += "缺少已 stage 的 sidecar"
 }
+if (-not (Test-Path "src-tauri\resources\agent\src\bin.mjs")) {
+    $errors += "缺少已 stage 的 agent 资源"
+}
+if (-not (Test-Path "src-tauri\resources\agent\node.exe")) {
+    $errors += "agent 缺少内置 node.exe"
+}
 
 if (Test-Path $installer) {
     $actual = (Get-Item $installer).VersionInfo.FileVersion

@@ -15,6 +15,9 @@ if (-not $env:TAURI_SIGNING_PRIVATE_KEY -and (Test-Path (Join-Path $root ".tauri
 & (Join-Path $PSScriptRoot "build-sidecar.ps1")
 if ($LASTEXITCODE -ne 0) { throw "sidecar 构建失败" }
 
+& (Join-Path $PSScriptRoot "stage-agent.ps1")
+if ($LASTEXITCODE -ne 0) { throw "agent 打包失败" }
+
 npm run tauri -- build
 if ($LASTEXITCODE -ne 0) { throw "Tauri 安装包构建失败" }
 

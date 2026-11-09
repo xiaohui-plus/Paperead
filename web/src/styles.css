@@ -3601,6 +3601,273 @@ body.col-resizing * {
   padding-top: 12px;
 }
 
+/* 设置左侧竖栏：配置模型 / 检查版本更新 */
+.settings-layout {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.settings-nav {
+  width: 136px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 12px 8px;
+  border-right: 1px solid var(--line);
+  background: var(--bg-soft);
+}
+
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 9px;
+  border-radius: 7px;
+  font-size: 12px;
+  color: var(--muted);
+  text-align: left;
+}
+
+.settings-nav-item:hover {
+  background: var(--bg-hover);
+  color: var(--ink);
+}
+
+.settings-nav-item[data-active='true'] {
+  background: #fff;
+  color: var(--blue-ink);
+  font-weight: 650;
+  box-shadow: var(--shadow-1);
+}
+
+.settings-nav-item span {
+  flex: 1;
+}
+
+.settings-nav-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #f59e0b;
+  flex: none;
+}
+
+.settings-nav-version {
+  margin-top: auto;
+  padding: 4px 9px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--faint);
+}
+
+.settings-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-main > .modal-body {
+  flex: 1;
+  min-height: 0;
+}
+
+.settings-main .model-tabs {
+  flex: none;
+}
+
+/* 版本更新 */
+.update-panel {
+  padding-top: 18px;
+  gap: 14px;
+}
+
+.update-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: #fff;
+}
+
+.update-panel-head > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.update-panel-head span {
+  font-size: 10.5px;
+  letter-spacing: 0.4px;
+  color: var(--faint);
+}
+
+.update-panel-head b {
+  font-family: var(--mono);
+  font-size: 20px;
+  font-weight: 650;
+}
+
+.update-badge {
+  flex: none;
+  padding: 2px 9px;
+  border-radius: 99px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.update-badge.is-new {
+  border: 1px solid #fde68a;
+  background: #fffbeb;
+  color: #b45309;
+}
+
+.update-badge.is-latest {
+  border: 1px solid #a7f3d0;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.update-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.update-actions .btn {
+  width: auto;
+  padding: 7px 16px;
+}
+
+.update-time {
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.update-error {
+  padding: 10px 12px;
+  border: 1px solid #fde68a;
+  border-radius: 9px;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 11.5px;
+  line-height: 1.65;
+}
+
+.update-result {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--blue-line);
+  border-radius: 11px;
+  background: var(--blue-soft);
+}
+
+.update-result-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.update-result-head b {
+  font-size: 14px;
+}
+
+.update-result-head span {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.update-notes {
+  width: 100%;
+  max-height: 200px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--ink-2);
+  font-family: var(--sans);
+  font-size: 11.5px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.update-download {
+  width: auto;
+  padding: 7px 14px;
+  text-decoration: none;
+}
+
+.update-download:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
+.update-install-hint {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--muted);
+}
+
+.update-alt-link {
+  font-size: 11px;
+  color: var(--blue);
+}
+
+.update-latest {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: #ecfdf5;
+  color: #047857;
+  font-size: 12px;
+}
+
+.update-tip {
+  margin: auto 0 0;
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--faint);
+}
+
+.update-tip a {
+  margin-left: 4px;
+  color: var(--blue);
+}
+
+@media (max-width: 640px) {
+  .settings-layout {
+    flex-direction: column;
+  }
+
+  .settings-nav {
+    flex-direction: row;
+    width: auto;
+    padding: 8px 12px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .settings-nav-version {
+    display: none;
+  }
+}
+
 .model-tabs {
   display: flex;
   gap: 2px;
