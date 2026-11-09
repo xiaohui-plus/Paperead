@@ -5,8 +5,8 @@
 Paperead 是一个本地论文工作台：重排双栏 PDF、按页流式翻译成中文，再把导读、问答、引用溯源和思路脉络放进同一个阅读页。需要找论文、做研究或写综述时，可以新建项目，让 agent 在文献库、学术检索和项目文件之间连续工作。
 
 > **Windows 桌面版**：[GitHub Releases](https://github.com/xiaohui-plus/Paperead/releases/latest)
-> · [Gitee 安装包](https://gitee.com/deng_xiaohui/paperead/releases/download/v0.1.1/Paperead_0.1.1_x64-setup.exe)
-> · [Gitee 便携版](https://gitee.com/deng_xiaohui/paperead/releases/download/v0.1.1/Paperead_0.1.1_portable_x64.zip)
+> · [Gitee 安装包](https://gitee.com/deng_xiaohui/paperead/releases/download/v0.1.3/Paperead_0.1.3_x64-setup.exe)
+> · [Gitee 便携版](https://gitee.com/deng_xiaohui/paperead/releases/download/v0.1.3/Paperead_0.1.3_portable_x64.zip)
 > · 源码启动见下文「安装与启动」。
 
 ## 核心能力

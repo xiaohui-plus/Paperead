@@ -93,6 +93,7 @@ def test_chinese_markdown_uses_ctexart():
     assert "\\title{免疫治疗综述}" in tex
 
 
+@pytest.mark.skipif(not HAS_PANDOC, reason="需要 pandoc")
 def test_export_latex_writes_tex_file(workspace):
     client, store, project, session = workspace
 
