@@ -16,6 +16,14 @@ export interface PaperRow {
   blocks: number
   thumb_url: string | null
   file_url: string
+  folder_id?: string | null
+}
+
+export interface Folder {
+  id: string
+  name: string
+  created_at: number
+  paper_count: number
 }
 
 export interface LLMConfigPayload {
@@ -36,11 +44,51 @@ export async function listPapers(): Promise<PaperRow[]> {
   return data.papers
 }
 
+export async function listFolders(): Promise<Folder[]> {
+  const data = await jsonFetch<{ folders: Folder[] }>('/api/folders')
+  return data.folders
+}
+
+export async function createFolder(name: string): Promise<Folder> {
+  return jsonFetch('/api/folders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+}
+
+export async function renameFolder(id: string, name: string): Promise<Folder> {
+  return jsonFetch(`/api/folders/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+}
+
+export async function deleteFolder(
+  id: string,
+): Promise<{ ok: boolean; moved: number }> {
+  return jsonFetch(`/api/folders/${id}`, { method: 'DELETE' })
+}
+
+export async function movePaperToFolder(
+  paperId: string,
+  folderId: string | null,
+): Promise<PaperRow> {
+  return jsonFetch(`/api/papers/${paperId}/folder`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ folder_id: folderId }),
+  })
+}
+
 export async function uploadPapers(
   files: File[],
+  folderId: string | null = null,
 ): Promise<{ added: PaperRow[]; failed: { filename: string; error: string }[] }> {
   const fd = new FormData()
   files.forEach((f) => fd.append('files', f))
+  if (folderId) fd.append('folder_id', folderId)
   return jsonFetch('/api/papers/upload', { method: 'POST', body: fd })
 }
 
@@ -122,8 +170,77 @@ export async function translateStream(
   await readSSE<TranslateEvent>(res, onEvent)
 }
 
-export async function probeZotero(): Promise<{ ok: boolean; error?: string }> {
-  return jsonFetch('/api/zotero/probe')
+// ── Zotero 导入 ─────────────────────────────────────────
+
+export interface ZoteroStatus {
+  ok: boolean
+  status?: number
+  version?: string
+  data_dir?: string
+  error?: string
+}
+
+export interface ZoteroCollection {
+  key: string
+  name: string
+  items: number
+}
+
+export interface ZoteroItem {
+  key: string
+  title: string
+  authors: string
+  year: number | null
+  item_type: string
+  publication: string
+  doi: string
+  url: string
+  date_added: string
+  pdf: { key: string; filename: string } | null
+  imported: boolean
+}
+
+export interface ZoteroPage {
+  items: ZoteroItem[]
+  total: number
+  start: number
+  limit: number
+  has_more: boolean
+}
+
+export async function zoteroStatus(): Promise<ZoteroStatus> {
+  return jsonFetch('/api/zotero/status')
+}
+
+export async function zoteroCollections(): Promise<ZoteroCollection[]> {
+  const data = await jsonFetch<{ collections: ZoteroCollection[] }>(
+    '/api/zotero/collections',
+  )
+  return data.collections
+}
+
+export async function zoteroItems(params: {
+  collection?: string
+  q?: string
+  limit?: number
+  start?: number
+}): Promise<ZoteroPage> {
+  const search = new URLSearchParams()
+  if (params.collection) search.set('collection', params.collection)
+  if (params.q) search.set('q', params.q)
+  search.set('limit', String(params.limit ?? 50))
+  search.set('start', String(params.start ?? 0))
+  return jsonFetch<ZoteroPage>(`/api/zotero/items?${search.toString()}`)
+}
+
+export async function importZotero(
+  keys: string[],
+): Promise<{ imported: number; skipped: number; errors: string[]; papers: PaperRow[] }> {
+  return jsonFetch('/api/zotero/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ keys }),
+  })
 }
 
 // ── 导读 ────────────────────────────────────────────────
@@ -146,15 +263,46 @@ export interface GuideStep {
   kind: 'ref' | 'paper'
   title: string
   year?: number | null
+  concept?: string
   minutes: number
+  why?: string
+  order?: string
   gain: string
 }
 
+export interface GuideGlossary {
+  en: string
+  zh: string
+  kind: string
+  explain: string
+  where: string
+}
+
+export interface GuideOutline {
+  section: string
+  what: string
+  focus: string
+}
+
+export interface GuideOverview {
+  problem?: string
+  approach?: string
+  contributions?: string[]
+  findings?: string[]
+  limitations?: string[]
+}
+
 export interface Guide {
+  version?: number
   status: string
   summary: string
+  oneliner?: string
   domains: string[]
   difficulty: { stars?: number; minutes?: number; math?: string; terms?: string }
+  overview?: GuideOverview
+  glossary?: GuideGlossary[]
+  outline?: GuideOutline[]
+  questions?: string[]
   prereqs: GuidePrereq[]
   path: GuideStep[]
   concepts?: { name: string; en: string; kind: string }[]
@@ -294,15 +442,24 @@ export interface LineageNode {
   borrow: string
   improve: string
   evidence: string
+  confidence?: 'high' | 'medium' | 'low' | string
   cites: number
   marker: string
 }
 
 export interface Lineage {
+  version?: number
   self: { title: string; year: number | null }
   nodes: LineageNode[]
   edges: { from: number; to: string; relation: string; weight: number }[]
   yearRange: [number, number]
+  stats?: {
+    references: number
+    uniqueCitations: number
+    candidates: number
+    kept?: number
+    source: 'text' | 'superscript' | 'paren'
+  }
 }
 
 export async function getLineage(id: string): Promise<Lineage | null> {
@@ -343,16 +500,6 @@ export async function getProvenance(
     `/api/papers/${paperId}/block/${blockId}/provenance`,
   )
   return data.citations ?? []
-}
-
-export async function importZotero(
-  limit = 20,
-): Promise<{ imported: number; skipped: number; errors: string[] }> {
-  return jsonFetch('/api/zotero/import', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ limit }),
-  })
 }
 
 /** 后端不可用时的示例条目。 */

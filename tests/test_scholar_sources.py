@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from urllib.parse import unquote
+from urllib.parse import unquote, unquote_plus
 
 import pytest
 
@@ -19,13 +19,19 @@ from paperead.scholar.models import (
 )
 from paperead.scholar.sources import (
     build_arxiv_query,
+    core_doi_url,
+    core_url,
     encode_phrase,
     europe_pmc_url,
     parse_arxiv_entries,
+    parse_core,
     parse_europe_pmc,
     parse_openalex_works,
     parse_pubmed_abstract_xml,
+    parse_pubmed_abstracts,
     parse_pubmed_summary,
+    parse_semantic_scholar,
+    semantic_scholar_url,
 )
 
 ARXIV_XML = r"""<?xml version="1.0" encoding="UTF-8"?>
@@ -214,6 +220,131 @@ def test_parse_openalex_falls_back_to_openalex_url():
     assert paper.authors == []
 
 
+S2_PAYLOAD = {
+    "total": 12,
+    "data": [
+        {
+            "paperId": "abc123",
+            "title": "Graph \\cite{x} Networks",
+            "abstract": "We study graphs.",
+            "year": 2023,
+            "publicationDate": "2023-05-01",
+            "venue": "NeurIPS",
+            "authors": [{"name": "Ann Lee"}, {"name": "Bob Chen"}],
+            "citationCount": 17,
+            "externalIds": {"DOI": "https://doi.org/10.1/s2", "ArXiv": "2301.00001"},
+            "openAccessPdf": {"url": "https://s2/pdf", "status": "GREEN"},
+            "fieldsOfStudy": ["Computer Science", "Mathematics"],
+            "url": "https://www.semanticscholar.org/paper/abc123",
+        }
+    ],
+}
+
+
+def test_parse_semantic_scholar_maps_fields():
+    papers = parse_semantic_scholar(S2_PAYLOAD)
+    assert len(papers) == 1
+    paper = papers[0]
+    assert paper.id == "semanticscholar:abc123"
+    assert paper.source == "semanticscholar"
+    assert paper.title == "Graph Networks"
+    assert paper.abstract == "We study graphs."
+    assert paper.authors == ["Ann Lee", "Bob Chen"]
+    assert paper.venue == "NeurIPS"
+    assert paper.year == 2023
+    assert paper.category == "Computer Science"
+    assert paper.keywords == ["Computer Science", "Mathematics"]
+    assert paper.doi == "10.1/s2"
+    assert paper.pdf_url == "https://s2/pdf"
+    assert paper.citations == 17
+
+
+def test_parse_semantic_scholar_skips_items_without_id():
+    assert parse_semantic_scholar({"data": [{"title": "No ID"}]}) == []
+    assert parse_semantic_scholar(None) == []
+
+
+CORE_PAYLOAD = {
+    "totalHits": 42,
+    "results": [
+        {
+            "id": 12345,
+            "title": "A CORE Paper",
+            "abstract": "<p>Hello <b>world</b></p>",
+            "authors": [{"name": "Ann Lee"}, "Bob Chen"],
+            "yearPublished": 2019,
+            "publishedDate": "2019-03-01",
+            "doi": "https://doi.org/10.1/core",
+            "downloadUrl": "https://core/download/12345.pdf",
+            "publisher": "Uni Press",
+            "journals": [{"title": "Journal of CORE"}],
+            "topics": [{"name": "Machine Learning"}, {"name": "NLP"}],
+            "fieldOfStudy": "Computer Science",
+            "citationCount": 5,
+        }
+    ],
+}
+
+
+def test_parse_core_maps_fields():
+    papers = parse_core(CORE_PAYLOAD)
+    assert len(papers) == 1
+    paper = papers[0]
+    assert paper.id == "core:12345"
+    assert paper.source == "core"
+    assert paper.title == "A CORE Paper"
+    assert paper.abstract == "Hello world"
+    assert paper.authors == ["Ann Lee", "Bob Chen"]
+    assert paper.venue == "Journal of CORE"
+    assert paper.year == 2019
+    assert paper.category == "Computer Science"
+    assert paper.keywords == ["Machine Learning", "NLP"]
+    assert paper.doi == "10.1/core"
+    assert paper.pdf_url == "https://core/download/12345.pdf"
+    assert paper.url == "https://core.ac.uk/works/12345"
+    assert paper.citations == 5
+
+
+def test_parse_core_handles_missing_fields():
+    paper = parse_core({"results": [{"id": 1, "title": "Bare"}]})[0]
+    assert paper.authors == []
+    assert paper.venue == "CORE"
+    assert paper.category == "CORE"
+    assert paper.pdf_url is None
+    assert parse_core(None) == []
+
+
+def test_semantic_scholar_url_has_year_and_paging():
+    url = semantic_scholar_url(
+        "graph", phrase=False, from_year=2015, to_year=2020, page=1, per_page=20
+    )
+    decoded = unquote(url)
+    assert "query=graph" in decoded
+    assert "offset=20" in decoded
+    assert "limit=20" in decoded
+    assert "year=2015-2020" in decoded
+    assert "fields=" in decoded
+
+
+def test_core_url_field_phrase_and_year_range():
+    url = core_url(
+        "graph neural", field="title", phrase=True, from_year=2010, to_year=2020,
+        page=2, per_page=10,
+    )
+    decoded = unquote_plus(url)
+    assert 'title:("graph neural")' in decoded
+    assert "yearPublished:[2010 TO 2020]" in decoded
+    assert "offset=20" in decoded
+    assert "limit=10" in decoded
+
+
+def test_core_doi_url_escapes_quotes_and_limits_one():
+    url = core_doi_url('10.1/a"b')
+    decoded = unquote_plus(url)
+    assert 'doi:"10.1/a b"' in decoded
+    assert "limit=1" in decoded
+
+
 EPMC_PAYLOAD = {
     "hitCount": 3,
     "resultList": {
@@ -321,6 +452,26 @@ def test_parse_pubmed_abstract_xml_sections_and_keywords():
     abstract, keywords = parse_pubmed_abstract_xml(PUBMED_XML)
     assert abstract == "BACKGROUND: We did X.\n\nRESULTS: We found Y."
     assert keywords == ["crispr"]
+
+
+def test_parse_pubmed_abstracts_maps_by_pmid():
+    xml = """<PubmedArticleSet>
+      <PubmedArticle><MedlineCitation><PMID Version="1">111</PMID><Article>
+        <Abstract>
+          <AbstractText Label="BACKGROUND">We did X.</AbstractText>
+          <AbstractText Label="RESULTS">We found Y.</AbstractText>
+        </Abstract>
+        <KeywordList><Keyword>crispr</Keyword></KeywordList>
+      </Article></MedlineCitation></PubmedArticle>
+      <PubmedArticle><MedlineCitation><PMID Version="1">222</PMID><Article>
+        <Abstract><AbstractText>Only one section.</AbstractText></Abstract>
+      </Article></MedlineCitation></PubmedArticle>
+    </PubmedArticleSet>"""
+    found = parse_pubmed_abstracts(xml)
+    assert set(found) == {"111", "222"}
+    assert found["111"] == ("BACKGROUND: We did X.\n\nRESULTS: We found Y.", ["crispr"])
+    assert found["222"] == ("Only one section.", [])
+    assert parse_pubmed_abstracts("") == {}
 
 
 def test_paper_to_dict_is_api_shape():

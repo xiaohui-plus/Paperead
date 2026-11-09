@@ -82,7 +82,7 @@ def test_fetch_raw_retries_retryable_status(monkeypatch):
     responses = [httpx.Response(503), httpx.Response(429), httpx.Response(200, text="ok")]
     calls = {"n": 0}
 
-    async def fake_once(url, timeout=http.TIMEOUT_S):
+    async def fake_once(url, timeout=http.TIMEOUT_S, headers=None):
         calls["n"] += 1
         return responses.pop(0)
 
@@ -95,7 +95,7 @@ def test_fetch_raw_gives_up_after_retries(monkeypatch):
     monkeypatch.setattr(http, "_backoff", lambda attempt: 0)
     calls = {"n": 0}
 
-    async def fake_once(url, timeout=http.TIMEOUT_S):
+    async def fake_once(url, timeout=http.TIMEOUT_S, headers=None):
         calls["n"] += 1
         return httpx.Response(503)
 
@@ -109,7 +109,7 @@ def test_fetch_raw_gives_up_after_retries(monkeypatch):
 def test_fetch_raw_does_not_retry_client_errors(monkeypatch):
     calls = {"n": 0}
 
-    async def fake_once(url, timeout=http.TIMEOUT_S):
+    async def fake_once(url, timeout=http.TIMEOUT_S, headers=None):
         calls["n"] += 1
         return httpx.Response(400)
 
@@ -119,10 +119,24 @@ def test_fetch_raw_does_not_retry_client_errors(monkeypatch):
     assert calls["n"] == 1
 
 
+def test_fetch_raw_auth_error_is_not_retried(monkeypatch):
+    calls = {"n": 0}
+
+    async def fake_once(url, timeout=http.TIMEOUT_S, headers=None):
+        calls["n"] += 1
+        return httpx.Response(401)
+
+    monkeypatch.setattr(http, "fetch_once", fake_once)
+    with pytest.raises(http.FriendlyError) as excinfo:
+        run(http.fetch_raw("https://example.org/x", 1, 2))
+    assert calls["n"] == 1
+    assert "API Key" in excinfo.value.message
+
+
 def test_fetch_raw_timeout_is_not_retried(monkeypatch):
     calls = {"n": 0}
 
-    async def fake_once(url, timeout=http.TIMEOUT_S):
+    async def fake_once(url, timeout=http.TIMEOUT_S, headers=None):
         calls["n"] += 1
         raise httpx.ReadTimeout("slow")
 
@@ -137,7 +151,7 @@ def test_fetch_raw_network_error_retried(monkeypatch):
     monkeypatch.setattr(http, "_backoff", lambda attempt: 0)
     calls = {"n": 0}
 
-    async def fake_once(url, timeout=http.TIMEOUT_S):
+    async def fake_once(url, timeout=http.TIMEOUT_S, headers=None):
         calls["n"] += 1
         if calls["n"] < 3:
             raise httpx.ConnectError("down")

@@ -6,6 +6,7 @@
   "description": "Paperead research agent host (DeepSeek Harness runtime)",
   "scripts": {
     "start": "node ./src/bin.mjs",
+    "test:full": "node ./test/full-regression.mjs",
     "dump": "node ./node_modules/@deepseek-ai/dsh/lib/bin.js --profile research --dump-config"
   },
   "dependencies": {

@@ -1,4 +1,4 @@
-"""问答记忆：对话流、论文记忆卡、研究者画像、概念台账。
+"""问答记忆：对话流、论文记忆卡、人物背景、概念台账。
 
 设计见 docs/superpowers/specs/2026-11-08-qa-memory-design.md。
 读路径不调用模型；写路径在回答返回后异步跑一次小调用。
@@ -24,7 +24,8 @@ log = logging.getLogger(__name__)
 
 VERSION = 1
 
-TRAIT_KEYS = (
+BACKGROUND_LIMIT = 400
+LEGACY_TRAIT_ORDER = (
     "domain_background",
     "depth",
     "answer_style",
@@ -32,14 +33,6 @@ TRAIT_KEYS = (
     "goal",
     "math_comfort",
 )
-TRAIT_LABELS = {
-    "domain_background": "背景",
-    "depth": "理解深度",
-    "answer_style": "答法偏好",
-    "language": "语言习惯",
-    "goal": "目标",
-    "math_comfort": "数学耐受",
-}
 STATE_RANK = {"confused": 0, "learning": 1, "understood": 2}
 STATE_LABELS = {"understood": "已懂", "learning": "在学", "confused": "困惑"}
 FACT_KINDS = {"user_stance", "conclusion", "open_question"}
@@ -127,7 +120,7 @@ def _load(path: Path, default: dict) -> dict:
 
 
 def _empty_profile() -> dict:
-    return {"version": VERSION, "updated_at": 0.0, "turn_count": 0, "traits": {}}
+    return {"version": VERSION, "updated_at": 0.0, "turn_count": 0, "background": ""}
 
 
 def _empty_concepts() -> dict:
@@ -236,41 +229,30 @@ def _concept_key(name: str) -> str:
     return re.sub(r"[\s。，、！？!?.,;；:：]+", " ", (name or "").strip().lower()).strip()
 
 
-def _clean_traits(value: Any) -> dict:
-    if not isinstance(value, dict):
-        return {}
-    out: dict[str, dict] = {}
-    for key, raw in value.items():
-        if key not in TRAIT_KEYS or not isinstance(raw, dict):
+def _clean_background(value: Any) -> str:
+    """人物背景是自由文本：压成单行、去掉控制字符，并限制在 400 字以内。"""
+    if not isinstance(value, str):
+        return ""
+    text = _CONTROL_RE.sub("", value)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return ""
+    return text if len(text) <= BACKGROUND_LIMIT else text[: BACKGROUND_LIMIT - 1] + "…"
+
+
+def _legacy_background(raw_traits: Any) -> str:
+    """把旧版结构化 traits 拼成一段文字，只用于读取时的无感迁移。"""
+    if not isinstance(raw_traits, dict):
+        return ""
+    values = []
+    for key in LEGACY_TRAIT_ORDER:
+        item = raw_traits.get(key)
+        if not isinstance(item, dict):
             continue
-        text = raw.get("value")
-        if not isinstance(text, str):
-            continue
-        text = text.strip()
-        if not 2 <= len(text) <= 40:
-            continue
-        try:
-            confidence = float(raw.get("confidence", 0.5))
-        except (TypeError, ValueError, OverflowError):
-            confidence = 0.5
-        confidence = min(0.9, max(0.3, confidence))
-        evidence: list[str] = []
-        raw_evidence = raw.get("evidence")
-        if isinstance(raw_evidence, list):
-            for item in raw_evidence:
-                if isinstance(item, str) and item.strip():
-                    evidence.append(item.strip()[:60])
-        try:
-            updated_at = float(raw.get("updated_at", 0) or 0)
-        except (TypeError, ValueError, OverflowError):
-            updated_at = 0.0
-        out[key] = {
-            "value": text,
-            "confidence": round(confidence, 3),
-            "evidence": evidence[-3:],
-            "updated_at": updated_at,
-        }
-    return out
+        text = item.get("value")
+        if isinstance(text, str) and text.strip():
+            values.append(text.strip())
+    return _clean_background("；".join(values))
 
 
 def _clean_concepts(value: Any) -> list[dict]:
@@ -414,7 +396,11 @@ class MemoryStore:
 
     def profile(self) -> dict:
         data = _load(self.profile_path, _empty_profile())
-        data["traits"] = _clean_traits(data.get("traits"))
+        background = _clean_background(data.get("background"))
+        if not background:
+            background = _legacy_background(data.get("traits"))
+        data.pop("traits", None)
+        data["background"] = background
         try:
             turn_count = int(data.get("turn_count", 0))
         except (TypeError, ValueError, OverflowError):
@@ -588,7 +574,7 @@ class MemoryStore:
         start = max(0, end - max(1, min(limit, 200)))
         return {"turns": turns[start:end], "hasMore": start > 0}
 
-    # ── 合并（画像 / 概念 / 记忆卡）──────────────────
+    # ── 合并（人物背景 / 概念 / 记忆卡）──────────────
     def apply_patch(self, paper_id: str, patch: dict, touched: list[str] | None = None) -> None:
         if not enabled() or not isinstance(patch, dict):
             return
@@ -597,7 +583,9 @@ class MemoryStore:
             if paper_id in self._forgotten:
                 return
             profile = self.profile()
-            self._merge_traits(profile, patch.get("traits") or [], now)
+            background = _clean_background(patch.get("background"))
+            if background:
+                profile["background"] = background
 
             concepts = self.concepts()
             self._merge_concepts(concepts, patch.get("concepts") or [], paper_id, now)
@@ -610,47 +598,6 @@ class MemoryStore:
             _atomic_write(self.profile_path, profile)
             _atomic_write(self.concepts_path, concepts)
             self._save_chat(paper_id, chat)
-
-    def _merge_traits(self, profile: dict, items: list, now: float) -> None:
-        if not isinstance(items, list):
-            return
-        traits = profile.setdefault("traits", {})
-        for item in (items or [])[:3]:
-            if not isinstance(item, dict):
-                continue
-            key = _patch_text(item.get("key"))
-            value = _patch_text(item.get("value"))
-            evidence = _patch_text(item.get("evidence"))
-            if key not in TRAIT_KEYS or not (2 <= len(value) <= 40) or not evidence:
-                continue
-            try:
-                confidence = float(item.get("confidence", 0.5))
-            except (TypeError, ValueError, OverflowError):
-                confidence = 0.5
-            confidence = min(0.9, max(0.3, confidence))
-
-            old = traits.get(key)
-            if old is not None and not isinstance(old, dict):
-                continue
-            if old:
-                base = float(old.get("confidence", 0.5))
-                merged = 0.6 * base + 0.4 * confidence
-                merged = max(base - 0.2, min(base + 0.2, merged))
-                merged = min(0.9, max(0.3, merged))
-                evidence_list = list(old.get("evidence") or [])[-2:] + [evidence[:60]]
-                old.update(
-                    value=value,
-                    confidence=round(merged, 3),
-                    evidence=evidence_list[-3:],
-                    updated_at=now,
-                )
-            else:
-                traits[key] = {
-                    "value": value,
-                    "confidence": round(confidence, 3),
-                    "evidence": [evidence[:60]],
-                    "updated_at": now,
-                }
 
     def _merge_concepts(self, bucket: dict, items: list, paper_id: str, now: float) -> None:
         if not isinstance(items, list):
@@ -795,8 +742,8 @@ class MemoryStore:
         return patch
 
     # ── 注入块 ──────────────────────────────────────────
-    BRIEF_TOTAL_LIMIT = 1300
-    BRIEF_PROFILE_LIMIT = 200
+    BRIEF_TOTAL_LIMIT = 1500
+    BRIEF_PROFILE_LIMIT = 400
     BRIEF_CONCEPT_LIMIT = 160
     BRIEF_CARD_LIMIT = 300
     BRIEF_OLD_LIMIT = 450
@@ -807,17 +754,13 @@ class MemoryStore:
     ) -> str:
         if not enabled():
             return ""
-        now = _now()
         chat = self.chat(paper_id)
         blocks: list[str] = []
 
-        profile_lines = self._profile_lines(now)
-        if profile_lines:
+        background = _sanitize_memory_text(self.profile().get("background", ""))
+        if background:
             blocks.append(
-                _clip_block(
-                    "【关于读者】\n" + "\n".join(profile_lines),
-                    self.BRIEF_PROFILE_LIMIT,
-                )
+                _clip_block("【关于读者】\n" + background, self.BRIEF_PROFILE_LIMIT)
             )
 
         concept_lines = self._concept_lines(question)
@@ -867,27 +810,12 @@ class MemoryStore:
             return ""
         brief = "\n\n".join(blocks)
         if len(brief) > self.BRIEF_TOTAL_LIMIT:
-            # 画像/概念/卡片的上限之和远小于总预算，这里只做最后兜底
+            # 背景/概念/卡片的上限之和远小于总预算，这里只做最后兜底
             blocks[-1] = _clip_block(
                 blocks[-1], max(0, len(blocks[-1]) - (len(brief) - self.BRIEF_TOTAL_LIMIT))
             )
             brief = "\n\n".join(blocks)
         return brief
-
-    def _profile_lines(self, now: float) -> list[str]:
-        profile = self.profile()
-        lines = []
-        for key in TRAIT_KEYS:
-            trait = (profile.get("traits") or {}).get(key)
-            if not trait:
-                continue
-            days = max(0.0, (now - float(trait.get("updated_at", 0))) / 86400)
-            effective = float(trait.get("confidence", 0)) * (0.5 ** (days / 180))
-            if effective >= 0.55:
-                lines.append(
-                    f"- {TRAIT_LABELS[key]}：{_sanitize_memory_text(trait.get('value', ''))}"
-                )
-        return lines
 
     def _concept_lines(self, question: str) -> list[str]:
         items = self.match_concepts(question)[:4]
@@ -1150,13 +1078,14 @@ WRITER_SYS = """你是论文问答的记忆整理器。根据本轮问答和现�
 规则：
 1. 只记录用户透露的、稳定的信息；论文内容本身不要写进记忆。
 2. 不确定的不写；不要为了填满字段而编造。
-3. traits 的 key 只能是：domain_background, depth, answer_style, language, goal, math_comfort。
-4. concepts 的 state 只能是 understood / learning / confused；用户明确说"不懂"时把 explicit 设为 true。
-5. summary 40-400 字，覆盖：聊了什么、已确认的结论、未解决疑问、用户的判断。
-6. facts 只记用户明确表达过的立场（user_stance）、已确认结论（conclusion）、未解决问题（open_question）。
-7. 只输出 JSON，不要解释：
+3. background 是用户的人物背景，写成一段连贯的中文，不是条目、不是键值对：只写研究方向与学科背景、熟悉或薄弱的概念、使用论文的目的、提问与阅读偏好、语言与数学耐受。不写姓名、单位、联系方式。
+4. background 在现有背景上增量补充，每次只加 1-3 句新信息；保留仍有效的旧内容，删掉已过时或不确定的；总长控制在 400 字以内，接近上限时合并压缩，宁短勿长。
+5. concepts 的 state 只能是 understood / learning / confused；用户明确说"不懂"时把 explicit 设为 true。
+6. summary 40-400 字，覆盖：聊了什么、已确认的结论、未解决疑问、用户的判断。
+7. facts 只记用户明确表达过的立场（user_stance）、已确认结论（conclusion）、未解决问题（open_question）。
+8. 只输出 JSON，不要解释：
 
-{"traits": [{"key": "depth", "value": "…", "confidence": 0.6, "evidence": "…"}],
+{"background": "…",
  "concepts": [{"name": "…", "state": "learning", "evidence": "…", "explicit": false}],
  "summary": "…",
  "facts": [{"kind": "user_stance", "text": "…"}],
@@ -1183,29 +1112,12 @@ async def write_memory(
         chat_data = store.chat(paper_id)
         card = chat_data.get("card") or {}
         profile = store.profile()
-        now = _now()
-        traits = {}
-        for key, value in (profile.get("traits") or {}).items():
-            try:
-                confidence = float(value.get("confidence", 0) or 0)
-            except (TypeError, ValueError, OverflowError):
-                confidence = 0.0
-            try:
-                updated_at = float(value.get("updated_at", 0) or 0)
-            except (TypeError, ValueError, OverflowError):
-                updated_at = 0.0
-            days = max(0.0, (now - updated_at) / 86400)
-            # 给写手看的是时效衰减后的置信度，避免把半年前的画像当现状
-            traits[key] = {
-                "value": value.get("value", ""),
-                "confidence": round(confidence * (0.5 ** (days / 180)), 3),
-            }
         payload = {
             "本轮问题": _clip(standalone or question, 1200),
             "本轮回答": _clip(answer, 1200),
             "现有小结": card.get("summary", ""),
             "现有事实": [f.get("text", "") for f in (card.get("facts") or [])[-3:]],
-            "现有画像": traits,
+            "现有背景": profile.get("background", ""),
             "涉及概念": touched or [],
         }
         raw = await llm_chat(
@@ -1214,7 +1126,7 @@ async def write_memory(
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
             temperature=0.1,
-            max_tokens=700,
+            max_tokens=900,
         )
         parsed = _parse_json(raw)
         patch = parsed if isinstance(parsed, dict) else store.fallback_patch(question, touched)

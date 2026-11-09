@@ -1190,9 +1190,40 @@ def _extract_tables(
 
 # ── 图片 / 表格裁剪 ────────────────────────────────────────────────────
 
-def _crop(page: pymupdf.Page, rect: pymupdf.Rect, path: Path, dpi: int = 170) -> str | None:
+# 裁图分辨率：阅读区正文宽约 700 CSS px，界面整体 120% 缩放后约 840 设备像素，
+# 高分屏再乘 2。按「目标像素宽度」反算 DPI，比固定 170dpi 清晰得多，
+# 也不会让整页大图无谓地放大到几十兆。
+CROP_TARGET_PX = 1400
+CROP_DPI_MIN = 200
+CROP_DPI_MAX = 520
+EQUATION_TARGET_PX = 1200
+EQUATION_DPI_MAX = 600
+
+
+def _dpi_for(
+    rect: pymupdf.Rect,
+    target_px: int = CROP_TARGET_PX,
+    hi: int = CROP_DPI_MAX,
+    lo: int = CROP_DPI_MIN,
+) -> int:
+    """按目标像素宽度反算渲染 DPI（PDF 1pt = 1/72 英寸）。"""
+    if rect.width <= 0:
+        return lo
+    return int(min(hi, max(lo, round(target_px * 72 / rect.width))))
+
+
+def _crop(
+    page: pymupdf.Page,
+    rect: pymupdf.Rect,
+    path: Path,
+    dpi: int | None = None,
+    target_px: int = CROP_TARGET_PX,
+    dpi_max: int = CROP_DPI_MAX,
+) -> str | None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        if dpi is None:
+            dpi = _dpi_for(rect, target_px, dpi_max)
         pix = page.get_pixmap(clip=rect, dpi=dpi, alpha=False)
         pix.save(str(path))
         return str(path)
@@ -1340,9 +1371,13 @@ def _crop_equations(
     doc: pymupdf.Document,
     blocks: list[Block],
     out_dir: Path,
-    dpi: int = 200,
+    dpi: int | None = None,
 ) -> list[Block]:
-    """把显示公式裁成图片：前端展示原式，避免把 `ˆD−1/2` 这类乱码直接给用户。"""
+    """把显示公式裁成图片：前端展示原式，避免把 `ˆD−1/2` 这类乱码直接给用户。
+
+    公式图还会送给识图模型转 LaTeX，所以分辨率比正文图表更高（默认按
+    1200px 目标宽度反算，上限 600dpi）。公式区域很小，多出来的体积可以忽略。
+    """
     for b in blocks:
         if b.kind != "equation" or b.image_path:
             continue
@@ -1351,7 +1386,14 @@ def _crop_equations(
             continue
         page = doc[b.page - 1]
         ink = _ink_rect(page, rect)
-        b.image_path = _crop(page, ink, out_dir / f"eq_{b.order:04d}.png", dpi=dpi)
+        b.image_path = _crop(
+            page,
+            ink,
+            out_dir / f"eq_{b.order:04d}.png",
+            dpi=dpi,
+            target_px=EQUATION_TARGET_PX,
+            dpi_max=EQUATION_DPI_MAX,
+        )
     return blocks
 
 
@@ -1395,7 +1437,7 @@ def _collapse_vector_figure_pages(
 
         out_dir.mkdir(parents=True, exist_ok=True)
         img = out_dir / f"page_{page_no:03d}.png"
-        page.get_pixmap(dpi=150).save(str(img))
+        page.get_pixmap(dpi=_dpi_for(page.rect, CROP_TARGET_PX, 300)).save(str(img))
         first = min(i for i, _ in texts)
         replacements[page_no] = (
             first,

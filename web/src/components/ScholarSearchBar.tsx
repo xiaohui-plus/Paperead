@@ -1,6 +1,6 @@
 import { IconClose, IconSearch } from './icons'
 import { ScholarFilters } from './ScholarFilters'
-import { SOURCE_META, type SearchParams } from '../lib/scholar'
+import { SOURCE_META, type ScholarSource, type SearchParams } from '../lib/scholar'
 
 interface Props {
   input: string
@@ -13,6 +13,7 @@ interface Props {
   onToggleAdvanced: () => void
   loading: boolean
   translatedQuery: string | null
+  disabledSources: Partial<Record<ScholarSource, string>>
 }
 
 /** 检索页顶部：数据源切换、搜索框、高级检索。 */
@@ -27,7 +28,9 @@ export function ScholarSearchBar({
   onToggleAdvanced,
   loading,
   translatedQuery,
+  disabledSources,
 }: Props) {
+  const disabledHints = Object.values(disabledSources).filter(Boolean)
   const placeholder =
     params.source === 'pubmed' || params.source === 'europepmc'
       ? '例如：CRISPR cancer therapy'
@@ -39,7 +42,7 @@ export function ScholarSearchBar({
         <div>
           <h1>文献检索</h1>
           <p className="scholar-sub">
-            arXiv · PubMed · OpenAlex · Europe PMC 实时检索；中文会自动译成英文再检索
+            arXiv · PubMed · OpenAlex · Europe PMC · Semantic Scholar · CORE 实时检索；中文会自动译成英文再检索
           </p>
         </div>
         <button
@@ -53,28 +56,36 @@ export function ScholarSearchBar({
       </header>
 
       <div className="scholar-sources" role="tablist" aria-label="数据源">
-        {SOURCE_META.map((s) => (
-          <button
-            key={s.k}
-            role="tab"
-            aria-selected={params.source === s.k}
-            data-active={params.source === s.k}
-            title={s.d}
-            onClick={() =>
-              onChange({
-                source: s.k,
-                field: 'all',
-                phrase: false,
-                category: '',
-                fromYear: null,
-                toYear: null,
-              })
-            }
-          >
-            {s.l}
-          </button>
-        ))}
+        {SOURCE_META.map((s) => {
+          const disabledReason = disabledSources[s.k]
+          return (
+            <button
+              key={s.k}
+              role="tab"
+              aria-selected={params.source === s.k}
+              data-active={params.source === s.k}
+              disabled={!!disabledReason}
+              title={disabledReason || s.d}
+              onClick={() =>
+                onChange({
+                  source: s.k,
+                  field: 'all',
+                  phrase: false,
+                  category: '',
+                  fromYear: null,
+                  toYear: null,
+                })
+              }
+            >
+              {s.l}
+            </button>
+          )
+        })}
       </div>
+
+      {disabledHints.length > 0 && (
+        <p className="scholar-hint">{disabledHints.join(' ')}</p>
+      )}
 
       <form
         className="scholar-search"

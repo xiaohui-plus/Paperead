@@ -110,9 +110,9 @@ flowchart LR
 - `agent/bundle/lib/tools.js`（echo）
 - `agent/test/mock-llm.mjs`、`agent/test/spike-client.mjs`
 - `src-tauri/src/agent_sidecar.rs`
-- `src-tauri/src/main.rs`（启动/停止、写 `agent.json` 握手）
+- `src-tauri/src/main.rs`（启动/停止；在 Python 启动前预分配 agent 端口/token）
 - `web/src/research/SpikePage.tsx`、`web/src/App.tsx`（`?research=spike`）
-- `server/main.py`（`GET /api/research/agent` 读握手文件）
+- `server/main.py`（`/api/research/*` 代理；agent 地址来自环境变量）
 
 **验收（更新）**
 
@@ -137,15 +137,16 @@ npm run tauri -- dev          # 验证 Tauri 拉起 agent
 
 - [ ] 在干净 Windows 上实测安装包体积、启动时间、首 token 延迟。
 - [ ] 处理 Windows 旧数据目录 ACL 异常：本机 `%LOCALAPPDATA%\paperead-data` 属于另一个 SID，当前用户只读；已加 `prepare` 失败回退，但还需要在真实安装包上验证。
-- [ ] 给完整组合补工具/权限/技能回归测试（`hmr` 之外是否还有会拖慢启动的 watcher）。
-- [ ] 把 `agent.json` 直连彻底删掉，前端只走 Python 代理（现在 SpikePage 已走代理，Tauri 仍写 `agent.json` 供代理读）。
+- [x] 完整组合回归：`npm run test:full` 覆盖 tools/todo/title/meta/resume，并断言 shell/fs/subagent 不可见。
+- [ ] skills 发现与 compaction 深触发回归（compaction 需要真实上下文阈值）。
+- [x] 删掉 `agent.json` 直连：agent 端口/token 由 Tauri 预分配并注入 Python 环境变量，前端只走代理。
 
 
 ---
 
 ### A1：研究数据层（3–4 天）
 
-**目标**：项目、项目文件、会话索引、产物、来源、用量落 SQLite；不依赖 agent。
+**目标**：项目、项目文件、会话索引、产物、来源落 SQLite；不依赖 agent。
 
 **文件**
 
@@ -159,14 +160,14 @@ npm run tauri -- dev          # 验证 Tauri 拉起 agent
 
 **表**
 
-按设计 §9.2：`projects`、`project_items`、`sessions`、`session_sources`、`artifacts`、`usage`、`search_cache`（先建空表）。
+按设计 §9.2 与 §22.5：`projects`（含 `kind`）、`project_items`（含 `parent_id`/`size`/`mime`，kind 支持 `folder`）、`sessions`、`session_sources`、`artifacts`、`search_cache`（先建空表）。
 
 **步骤**
 
 - [ ] `db.py`：`sqlite3.connect(path, check_same_thread=False)`，`PRAGMA journal_mode=WAL`，`PRAGMA foreign_keys=ON`；版本表 `schema_meta(version)`。
-- [ ] `store.py`：`create_project` / `get_project` / `list_projects` / `update_project` / `archive_project`。
+- [ ] `store.py`：`create_project(kind, name?)` / `get_project` / `list_projects(kind)` / `update_project` / `archive_project`。
 - [ ] `store.py`：`create_session` / `list_sessions` / `update_session_title` / `touch_session`。
-- [ ] `store.py`：`add_project_item` / `list_project_items` / `remove_project_item`。
+- [ ] `store.py`：`add_project_item` / `list_project_items`（含 `parent_id`）/ `create_folder` / `remove_project_item`。
 - [ ] `store.py`：`add_artifact` / `list_artifacts` / `get_artifact`；版本号按同 path 递增。
 - [ ] `files.py`：上传到 `projects/<id>/files/`；`realpath` 必须在项目根内；拒绝 `..` 和符号链接逃逸。
 - [ ] `main.py`：`PAPEREAD_DATA/research/research.db` 初始化；测试用 `tmp_path`。
@@ -217,44 +218,53 @@ pytest tests/test_research_store.py -q
 
 ---
 
-### A3：研究 UI 壳与路由（2–3 天）
+### A3：研究 UI 壳与项目导航（2–3 天）
 
-**目标**：不改变现有首页，新增研究入口与三张页面骨架。
+**目标**：不改变现有首页，新增研究与写综述两个一级入口；侧栏按功能只列项目；项目页提供“文件 / 会话”双栏。
 
 **文件**
 
 - 新增 `web/src/research/ResearchShell.tsx`
+- 新增 `web/src/research/SidebarProjects.tsx`
 - 新增 `web/src/research/ResearchHome.tsx`
+- 新增 `web/src/research/ReviewHome.tsx`
 - 新增 `web/src/research/ProjectPage.tsx`
+- 新增 `web/src/research/ProjectRail.tsx`
+- 新增 `web/src/research/ProjectFileTree.tsx`
 - 新增 `web/src/research/ResearchEmpty.tsx`
 - 新增 `web/src/lib/researchApi.ts`
 - 新增 `web/src/research/research.css`（或并入 `styles.css`）
 - 修改 `web/src/App.tsx`（`view` 路由）
-- 修改 `web/src/components/Sidebar.tsx`（“研究”入口）
+- 修改 `web/src/components/Sidebar.tsx`（研究 / 写综述入口 + 项目分区）
 
 **路由**
 
-- `/`、`/?p=` 不变。
+- `/`、`/?p=` 不变，且 `p` 优先于 `view`。
 - `/?view=research` → 研究首页。
-- `/?view=project&id=...` → 项目页。
-- `?p=` 优先于 `view`。
+- `/?view=review` → 写综述报告首页。
+- `/?view=project&id=...` → 项目页；返回目标由 `kind` 决定。
 
 **步骤**
 
-- [ ] `App.tsx` 解析 `view`/`p`；`p` 存在时仍渲染 `ReaderView`。
-- [ ] `Sidebar` 加“研究”入口，保留现有文献库导航。
-- [ ] `ResearchShell`：左侧二级导航（研究 / 写综述 / 引用助手 / 项目），顶部返回。
-- [ ] `ResearchHome`：标题、分段“在项目 / 新项目 / 继续”、composer 占位、六个快捷动作、热门问题、最近项目。
-- [ ] `ProjectPage`：顶栏、左栏 `文件 / 会话` 占位、主区空状态。
-- [ ] `researchApi.ts`：`listProjects` / `createProject` / `listSessions` / `createSession`，统一错误处理。
+- [ ] `App.tsx` 解析 `view`/`id`/`sid`/`rename`；`p` 存在时仍渲染 `ReaderView`。
+- [ ] `Sidebar` 加“研究 / 写综述报告”入口，保留文献库；激活时下方渲染 `SidebarProjects`。
+- [ ] `SidebarProjects`：按 `kind` 拉取项目、倒序、`+` 新建、空态；**不渲染任何会话**。
+- [ ] `ResearchShell`：承载全局侧栏与功能页切换，不再做“研究 / 写综述 / 项目”二级导航。
+- [ ] `ResearchHome`：标题、分段“在项目 / 新项目 / 继续”、composer 占位、六个快捷动作、热门问题。
+- [ ] `ReviewHome`：标题“今天想研究点什么？”、composer 占位、综述报告示例。
+- [ ] `ProjectPage`：顶栏（返回 / 行内改名 / 更多）、`ProjectRail`、主区空状态；新建后进入改名态。
+- [ ] `ProjectRail`：`文件 / 会话` tab + `+`；会话按时间倒序；`+` 只打开空 composer，首条消息懒创建会话。
+- [ ] `ProjectFileTree`：扁平列表建树、文件夹展开/折叠、文件点击预览。
+- [ ] `researchApi.ts`：`listProjects(kind)` / `createProject(kind)` / `renameProject` / `listFiles` / `listSessions` / `createSession`，统一错误处理。
 - [ ] 视觉：复用现有 CSS 变量，新增卡片/状态色；不引入 UI 框架。
 
 **验收**
 
 - `/?p=demo` 完全不变。
-- `/?view=research` 可进入；刷新不丢。
-- 没有项目时显示空状态 + “新建项目”。
-- 侧边栏切换不整页刷新。
+- 研究页侧栏只有 `research` 项目，写综述页只有 `review` 项目，侧栏无会话行。
+- `+` 新建后落到项目页，标题可编辑；刷新后名称、顺序、tab 保持。
+- 项目页 `文件` 可展开文件夹并预览；`会话` 显示相对时间，首条消息后出现在顶部。
+- 返回按 `kind` 回到对应首页，侧栏高亮正确。
 
 ---
 
@@ -539,18 +549,15 @@ pytest tests/test_research_store.py -q
 
 ---
 
-## 8. 下一步
-
 ## 8. 下一步顺序（A0 之后）
 
 A0 已经跑通，下一步不再按 A1→A2→A3 顺序硬走，而是先补两个“接入前提”：
 
-1. **P0 修 Tauri 端到端**：当前 `cargo run` 在 Python sidecar `/api/health` 超时处失败，
-   不是 agent 的问题。先让壳、Python、Node 三者同时起来，再继续。
-2. **P0.5 读 DSH 源码（1 天，限时）**：只读接入相关的 6 个 seam，不做 fork。
-3. **P1 完整组合回归**：`hmr` 已禁用，完整 `dsh-base` 能启动；接着验证 tools/skills/compaction/title。
-4. **P2 A2 Python SSE 代理**：去掉 `agent.json` 直连。
-5. **P3 A1 数据层 + A3 UI 壳**：这两块不依赖搜索，可并行。
+1. **P0 修 Tauri 端到端**：✅ 用可写 `PAPEREAD_DATA` 验证，日志 `sidecar ready` / `agent ready`。
+2. **P0.5 读 DSH 源码（1 天，限时）**：✅ 交付 `agent/docs/dsh-integration-notes.md`（6 个 seam + 映射表 + 升级清单）。
+3. **P1 完整组合回归**：✅ `npm run test:full` 覆盖 tools/todo/title/meta/resume；skills/compaction 深触发待补。
+4. **P2 A2 Python SSE 代理**：✅ 去掉 `agent.json`；agent 端口/token 启动期注入 Python 环境变量。
+5. **P3 A1 数据层 + A3 UI 壳**：下一步；这两块不依赖搜索，可并行。
 
 ### 源码阅读清单（按优先级）
 

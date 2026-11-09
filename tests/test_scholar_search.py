@@ -13,6 +13,7 @@ from paperead.scholar import search as search_mod
 from paperead.scholar.http import FriendlyError
 from paperead.scholar.models import Paper
 from paperead.scholar.search import SearchInput, parse_google_translation
+from paperead.scholar.sources import build_arxiv_query
 
 ARXIV_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom"
@@ -39,6 +40,17 @@ def empty_cache():
 
 def run(coro):
     return asyncio.run(coro)
+
+
+def test_arxiv_query_uses_or_for_long_queries():
+    short = build_arxiv_query("graph neural network")
+    assert "+AND+" in short
+    long = build_arxiv_query(
+        "protein flexibility conformational ensemble generative structure-based design"
+    )
+    assert "+OR+" in long
+    assert long.startswith("(")
+    assert build_arxiv_query("graph") == "all:graph"
 
 
 def test_search_arxiv_dispatch_and_total(monkeypatch):
@@ -140,10 +152,99 @@ def test_europe_pmc_slices_window_and_reports_page_limit(monkeypatch):
     assert [p.title for p in result.papers] == [f"T{i}" for i in range(10, 20)]
 
 
+def test_semantic_scholar_search_uses_total(monkeypatch):
+    payload = {"total": 7, "data": [{"paperId": "p1", "title": "T"}]}
+    seen = {}
+
+    async def fake_fetch_text(url, **kwargs):
+        seen["url"] = url
+        seen["headers"] = kwargs.get("headers")
+        return json.dumps(payload)
+
+    monkeypatch.delenv("PAPEREAD_S2_API_KEY", raising=False)
+    monkeypatch.setattr(search_mod, "fetch_text", fake_fetch_text)
+    result, _, _ = run(
+        search_mod.search(
+            SearchInput(q="graph", source="semanticscholar", page=1, per_page=10)
+        )
+    )
+    assert result.total == 7
+    assert result.papers[0].id == "semanticscholar:p1"
+    assert "offset=10" in seen["url"]
+    assert seen["headers"] is None
+
+
+def test_core_search_requires_key(monkeypatch):
+    monkeypatch.delenv("PAPEREAD_CORE_API_KEY", raising=False)
+    with pytest.raises(FriendlyError) as excinfo:
+        run(search_mod.search(SearchInput(q="graph", source="core")))
+    assert "PAPEREAD_CORE_API_KEY" in excinfo.value.message
+
+
+def test_core_search_sends_bearer_token(monkeypatch):
+    payload = {"totalHits": 3, "results": [{"id": 9, "title": "T"}]}
+    seen = {}
+
+    async def fake_fetch_text(url, **kwargs):
+        seen["url"] = url
+        seen["headers"] = kwargs.get("headers")
+        return json.dumps(payload)
+
+    monkeypatch.setenv("PAPEREAD_CORE_API_KEY", "secret")
+    monkeypatch.setattr(search_mod, "fetch_text", fake_fetch_text)
+    result, _, _ = run(search_mod.search(SearchInput(q="graph", source="core")))
+    assert result.total == 3
+    assert result.papers[0].id == "core:9"
+    assert seen["headers"] == {"Authorization": "Bearer secret"}
+
+
+def test_unavailable_sources_flags_core_without_key(monkeypatch):
+    monkeypatch.delenv("PAPEREAD_CORE_API_KEY", raising=False)
+    assert "core" in search_mod.unavailable_sources()
+    monkeypatch.setenv("PAPEREAD_CORE_API_KEY", "secret")
+    assert search_mod.unavailable_sources() == {}
+
+
+def test_semantic_scholar_detail(monkeypatch):
+    payload = {"paperId": "p1", "title": "Detail", "year": 2024}
+
+    async def fake_fetch_text(url, **kwargs):
+        assert "/paper/p1" in url
+        return json.dumps(payload)
+
+    monkeypatch.delenv("PAPEREAD_S2_API_KEY", raising=False)
+    monkeypatch.setattr(search_mod, "fetch_text", fake_fetch_text)
+    paper = run(search_mod.get_paper("semanticscholar:p1"))
+    assert paper is not None
+    assert paper.title == "Detail"
+
+
+PUBMED_EFETCH_XML = """<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">11</PMID>
+      <Article><Abstract><AbstractText>First abstract.</AbstractText></Abstract></Article>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">22</PMID>
+      <Article><Abstract><AbstractText>Second abstract.</AbstractText></Abstract></Article>
+    </MedlineCitation>
+  </PubmedArticle>
+</PubmedArticleSet>
+"""
+
+
 def test_pubmed_search_fetches_esearch_then_esummary(monkeypatch):
+    efetch_urls: list[str] = []
+
     async def fake_fetch_text(url, **kwargs):
         if "esearch" in url:
             return json.dumps({"esearchresult": {"count": "2", "idlist": ["11", "22"]}})
+        if "efetch" in url:
+            efetch_urls.append(url)
+            return PUBMED_EFETCH_XML
         return json.dumps(
             {
                 "result": {
@@ -157,6 +258,24 @@ def test_pubmed_search_fetches_esearch_then_esummary(monkeypatch):
     result, _, _ = run(search_mod.search(SearchInput(q="cancer", source="pubmed")))
     assert result.total == 2
     assert [p.id for p in result.papers] == ["pubmed:11", "pubmed:22"]
+    # 摘要必须来自一次批量 efetch，而不是每篇单发
+    assert len(efetch_urls) == 1
+    assert "id=11,22" in efetch_urls[0]
+    assert [p.abstract for p in result.papers] == ["First abstract.", "Second abstract."]
+
+
+def test_pubmed_search_degrades_when_efetch_fails(monkeypatch):
+    async def fake_fetch_text(url, **kwargs):
+        if "esearch" in url:
+            return json.dumps({"esearchresult": {"count": "1", "idlist": ["11"]}})
+        if "efetch" in url:
+            raise FriendlyError("摘要服务超时", True)
+        return json.dumps({"result": {"11": {"uid": "11", "title": "First"}}})
+
+    monkeypatch.setattr(search_mod, "fetch_text", fake_fetch_text)
+    result, _, _ = run(search_mod.search(SearchInput(q="cancer", source="pubmed")))
+    assert [p.id for p in result.papers] == ["pubmed:11"]
+    assert result.papers[0].abstract == ""
 
 
 def test_search_empty_query_raises_friendly():
@@ -253,9 +372,31 @@ def test_resolve_pdf_urls_appends_unpaywall_candidates(monkeypatch):
             "error": None,
         }
 
+    async def no_pdf(doi):
+        return None
+
     monkeypatch.setattr(search_mod, "find_free_full_text", fake_lookup)
+    monkeypatch.setattr(search_mod, "find_s2_open_pdf", no_pdf)
+    monkeypatch.setattr(search_mod, "find_core_pdf", no_pdf)
     paper = Paper(id="openalex:W1", source="openalex", title="T", doi="10.1/x")
     assert run(search_mod.resolve_pdf_urls(paper)) == ["https://pub/pdf", "https://pmc/pdf"]
+
+
+def test_resolve_pdf_urls_appends_s2_and_core(monkeypatch):
+    async def no_unpaywall(doi):
+        return {"pdf_url": None, "pdf_urls": [], "landing_url": None, "oa_status": None, "error": None}
+
+    async def s2(doi):
+        return "https://s2/pdf"
+
+    async def core(doi):
+        return "https://core/pdf"
+
+    monkeypatch.setattr(search_mod, "find_free_full_text", no_unpaywall)
+    monkeypatch.setattr(search_mod, "find_s2_open_pdf", s2)
+    monkeypatch.setattr(search_mod, "find_core_pdf", core)
+    paper = Paper(id="openalex:W1", source="openalex", title="T", doi="10.1/x")
+    assert run(search_mod.resolve_pdf_urls(paper)) == ["https://s2/pdf", "https://core/pdf"]
 
 
 def test_resolve_pdf_urls_empty_without_doi():

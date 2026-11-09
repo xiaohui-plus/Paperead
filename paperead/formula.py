@@ -125,11 +125,13 @@ async def recognize_equations(
     blocks: list[Block],
     concurrency: int = 4,
     force: bool = False,
+    backend=None,
 ) -> dict:
     """给所有 equation 块补 `latex` 字段。
 
     Args:
         force: 忽略缓存重新识别。
+        backend: 可传入独立的视觉模型后端；默认用全局后端。
 
     Returns:
         {"total": n, "ok": n, "failed": n, "cached": n}
@@ -162,7 +164,7 @@ async def recognize_equations(
         async with sem:
             for attempt in range(2):
                 try:
-                    tex = await recognize_latex(image)
+                    tex = await recognize_latex(image, backend=backend)
                     if tex:
                         b.latex = tex
                         cpath.write_text(tex, encoding="utf-8")

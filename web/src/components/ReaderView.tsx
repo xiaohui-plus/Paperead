@@ -15,11 +15,13 @@ import { translateStream } from '../lib/library'
 import {
   loadModelSettings,
   readyModel,
+  syncVisionConfig,
   toPayload,
   type ModelKind,
 } from '../lib/settings'
 import { TopBar } from './TopBar'
 import { LeftPanel } from './LeftPanel'
+import { MobileDock } from './MobileDock'
 import { PdfPages } from './PdfPages'
 import { Reader } from './Reader'
 import { SettingsDialog } from './SettingsDialog'
@@ -229,8 +231,8 @@ export function ReaderView({ paperId, onBack }: Props) {
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
         if (!alive) return
-        // 409：还在解析中，等一会儿再试（最多约 90s）
-        if (msg.includes('解析') && n < 60) {
+        // 409：还在解析中（版面 + 图表 + 公式识别），等一会儿再试（最多约 4 分钟）
+        if (msg.includes('解析') && n < 160) {
           setParsing(true)
           timer = window.setTimeout(() => void attempt(n + 1), 1500)
           return
@@ -583,6 +585,22 @@ export function ReaderView({ paperId, onBack }: Props) {
         )}
       </div>
 
+      {!(pdfMode && pdfExpanded) && (
+        <MobileDock
+          paperId={paperId}
+          paper={paper}
+          outline={outline}
+          points={points}
+          activeId={activeId}
+          onJump={jump}
+          onOpenSettings={(kind) => {
+            setSettingsKind(kind ?? 'answer')
+            setSettingsOpen(true)
+          }}
+          settingsVersion={settingsVersion}
+        />
+      )}
+
       <SettingsDialog
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
@@ -592,6 +610,7 @@ export function ReaderView({ paperId, onBack }: Props) {
           setConfigured(Boolean(readyModel(next, 'answer')))
           setSettingsVersion((v) => v + 1)
           requested.current.clear() // 换模型后允许重翻
+          void syncVisionConfig() // 识图模型变了：同步给服务端，重新解析时生效
         }}
       />
     </div>

@@ -2,7 +2,13 @@
 
 import type { PaperRow } from './library'
 
-export type ScholarSource = 'arxiv' | 'pubmed' | 'openalex' | 'europepmc'
+export type ScholarSource =
+  | 'arxiv'
+  | 'pubmed'
+  | 'openalex'
+  | 'europepmc'
+  | 'semanticscholar'
+  | 'core'
 
 export interface ScholarPaper {
   id: string
@@ -63,6 +69,12 @@ export const SOURCE_META: { k: ScholarSource; l: string; d: string }[] = [
   { k: 'pubmed', l: 'PubMed', d: '生物医学与生命科学文献' },
   { k: 'openalex', l: 'OpenAlex', d: '全学科开放学术图谱，附带被引量' },
   { k: 'europepmc', l: 'Europe PMC', d: '生物医学全文、预印本与被引量' },
+  {
+    k: 'semanticscholar',
+    l: 'Semantic Scholar',
+    d: '全学科检索，自带开放获取 PDF 与引用量；建议配置 PAPEREAD_S2_API_KEY 避免限流',
+  },
+  { k: 'core', l: 'CORE', d: '开放获取全文聚合，需配置 API Key' },
 ]
 
 export const SOURCE_LABELS: Record<ScholarSource, string> = {
@@ -70,6 +82,8 @@ export const SOURCE_LABELS: Record<ScholarSource, string> = {
   pubmed: 'PubMed',
   openalex: 'OpenAlex',
   europepmc: 'Europe PMC',
+  semanticscholar: 'Semantic Scholar',
+  core: 'CORE',
 }
 
 export const SORT_META = [
@@ -127,6 +141,10 @@ export async function searchPapers(params: SearchParams): Promise<SearchResponse
   if (params.fromYear) query.set('from_year', String(params.fromYear))
   if (params.toYear) query.set('to_year', String(params.toYear))
   return jsonFetch<SearchResponse>(`/api/scholar/search?${query}`)
+}
+
+export function getScholarSources(): Promise<{ disabled: Partial<Record<ScholarSource, string>> }> {
+  return jsonFetch<{ disabled: Partial<Record<ScholarSource, string>> }>('/api/scholar/sources')
 }
 
 export function getDaily(round: number): Promise<DailyResponse> {

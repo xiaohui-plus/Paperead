@@ -10,9 +10,9 @@ import { GuidePanel } from './GuidePanel'
 import { LineagePanel } from './LineagePanel'
 import { IconChat, IconImage, IconKey, IconList, IconSpark } from './icons'
 
-type TabKey = 'guide' | 'chat' | 'outline' | 'key' | 'lineage' | 'figures'
+export type TabKey = 'guide' | 'chat' | 'outline' | 'key' | 'lineage' | 'figures'
 
-interface Props {
+export interface PanelProps {
   paperId: string
   paper: Paper
   outline: Block[]
@@ -23,7 +23,7 @@ interface Props {
   settingsVersion?: number
 }
 
-const TABS: { key: TabKey; label: string; icon: ReactNode }[] = [
+export const PANEL_TABS: { key: TabKey; label: string; icon: ReactNode }[] = [
   { key: 'guide', label: '导读', icon: <IconSpark /> },
   { key: 'chat', label: '问答', icon: <IconChat /> },
   { key: 'outline', label: '目录', icon: <IconList /> },
@@ -34,10 +34,12 @@ const TABS: { key: TabKey; label: string; icon: ReactNode }[] = [
 
 function initialTab(): TabKey {
   const q = new URLSearchParams(window.location.search).get('tab')
-  return (TABS.some((t) => t.key === q) ? q : 'guide') as TabKey
+  return (PANEL_TABS.some((t) => t.key === q) ? q : 'guide') as TabKey
 }
 
-export function LeftPanel({
+/** 左侧栏与手机端底部面板共用的内容区。 */
+export function PanelBody({
+  tab,
   paperId,
   paper,
   outline,
@@ -46,7 +48,45 @@ export function LeftPanel({
   onJump,
   onOpenSettings,
   settingsVersion = 0,
-}: Props) {
+}: PanelProps & { tab: TabKey }) {
+  if (tab === 'chat') {
+    return (
+      <ChatPanel
+        paper={paper}
+        paperId={paperId}
+        onJump={onJump}
+        onOpenSettings={() => onOpenSettings('answer')}
+        settingsVersion={settingsVersion}
+      />
+    )
+  }
+
+  return (
+    <div className="tab-body">
+      {tab === 'guide' && (
+        <GuidePanel
+          paperId={paperId}
+          onOpenSettings={() => onOpenSettings('answer')}
+          settingsVersion={settingsVersion}
+        />
+      )}
+      {tab === 'lineage' && (
+        <LineagePanel
+          paperId={paperId}
+          onOpenSettings={() => onOpenSettings('answer')}
+          settingsVersion={settingsVersion}
+        />
+      )}
+      {tab === 'outline' && (
+        <OutlinePanel items={outline} activeId={activeId} onJump={onJump} />
+      )}
+      {tab === 'key' && <KeyPointsPanel points={points} onJump={onJump} />}
+      {tab === 'figures' && <FiguresPanel blocks={paper.blocks} onJump={onJump} />}
+    </div>
+  )
+}
+
+export function LeftPanel(props: PanelProps) {
   const [tab, setTab] = useState<TabKey>(initialTab)
 
   return (
@@ -59,7 +99,7 @@ export function LeftPanel({
       </div>
 
       <nav className="tabs" role="tablist">
-        {TABS.map((t) => (
+        {PANEL_TABS.map((t) => (
           <button
             key={t.key}
             className="tab"
@@ -74,37 +114,7 @@ export function LeftPanel({
         ))}
       </nav>
 
-      {tab === 'chat' ? (
-        <ChatPanel
-          paper={paper}
-          paperId={paperId}
-          onJump={onJump}
-          onOpenSettings={() => onOpenSettings('answer')}
-          settingsVersion={settingsVersion}
-        />
-      ) : (
-        <div className="tab-body">
-          {tab === 'guide' && (
-            <GuidePanel
-              paperId={paperId}
-              onOpenSettings={() => onOpenSettings('answer')}
-              settingsVersion={settingsVersion}
-            />
-          )}
-          {tab === 'lineage' && (
-            <LineagePanel
-              paperId={paperId}
-              onOpenSettings={() => onOpenSettings('answer')}
-              settingsVersion={settingsVersion}
-            />
-          )}
-          {tab === 'outline' && (
-            <OutlinePanel items={outline} activeId={activeId} onJump={onJump} />
-          )}
-          {tab === 'key' && <KeyPointsPanel points={points} onJump={onJump} />}
-          {tab === 'figures' && <FiguresPanel blocks={paper.blocks} onJump={onJump} />}
-        </div>
-      )}
+      <PanelBody {...props} tab={tab} />
     </aside>
   )
 }

@@ -1,24 +1,41 @@
-import type { ReactElement } from 'react'
-import { IconBook, IconList, IconSearch, IconSettings, IconSpark } from './icons'
+import type { ReactElement, ReactNode } from 'react'
+import {
+  IconBook,
+  IconList,
+  IconSearch,
+  IconSettings,
+  IconSpark,
+} from './icons'
 
-type NavKey = 'library' | 'search' | 'research' | 'review'
+export type NavKey = 'library' | 'search' | 'research' | 'review'
 
 interface Props {
-  active: 'library' | 'search'
+  active: NavKey
   /** 文献库条数；检索页不传就不显示角标 */
   count?: number
-  onNav: (key: 'library' | 'search') => void
+  onNav: (key: NavKey) => void
   onSettings: () => void
+  /** 研究/写综述时用它替换“文件夹”分区 */
+  projectSection?: ReactNode
+  /** 文献库用它渲染文件夹分区 */
+  folderSection?: ReactNode
 }
 
-const NAV: { key: NavKey; label: string; enabled: boolean; icon: () => ReactElement }[] = [
-  { key: 'library', label: '文献库', enabled: true, icon: IconBook },
-  { key: 'search', label: '文献检索', enabled: true, icon: IconSearch },
-  { key: 'research', label: '研究', enabled: false, icon: IconSpark },
-  { key: 'review', label: '写综述报告', enabled: false, icon: IconList },
+const NAV: { key: NavKey; label: string; icon: () => ReactElement }[] = [
+  { key: 'library', label: '文献库', icon: IconBook },
+  { key: 'search', label: '文献检索', icon: IconSearch },
+  { key: 'research', label: '研究', icon: IconSpark },
+  { key: 'review', label: '写综述报告', icon: IconList },
 ]
 
-export function Sidebar({ active, count, onNav, onSettings }: Props) {
+export function Sidebar({
+  active,
+  count,
+  onNav,
+  onSettings,
+  projectSection,
+  folderSection,
+}: Props) {
   return (
     <aside className="library-side">
       <div className="library-brand">
@@ -34,11 +51,9 @@ export function Sidebar({ active, count, onNav, onSettings }: Props) {
               key={item.key}
               className="library-nav-item"
               data-active={item.key === active}
-              disabled={!item.enabled}
-              title={item.enabled ? '' : '即将上线'}
-              onClick={() => {
-                if (item.key === 'library' || item.key === 'search') onNav(item.key)
-              }}
+              title={item.label}
+              aria-label={item.label}
+              onClick={() => onNav(item.key)}
             >
               <Icon />
               <span>{item.label}</span>
@@ -48,15 +63,17 @@ export function Sidebar({ active, count, onNav, onSettings }: Props) {
         })}
       </nav>
 
-      <div className="library-folders">
-        <div className="folders-head">
-          <span>文件夹</span>
-          <button className="icon-btn" title="新建文件夹（即将上线）" disabled>
-            <IconSpark />
-          </button>
+      {projectSection ?? folderSection ?? (
+        <div className="library-folders">
+          <div className="folders-head">
+            <span>文件夹</span>
+            <button className="icon-btn" title="新建文件夹（即将上线）" disabled>
+              <IconSpark />
+            </button>
+          </div>
+          <p className="folders-empty">还没有文件夹</p>
         </div>
-        <p className="folders-empty">还没有文件夹</p>
-      </div>
+      )}
 
       <button className="library-settings" onClick={onSettings}>
         <IconSettings />

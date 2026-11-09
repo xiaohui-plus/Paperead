@@ -10,7 +10,7 @@ import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from .models import (
     ARXIV_EPOCH_YEAR,
@@ -35,6 +35,8 @@ PUBMED_EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 OPENALEX_API = "https://api.openalex.org/works"
 EPMC_API = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 UNPAYWALL_API = "https://api.unpaywall.org/v2"
+SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1"
+CORE_API = "https://api.core.ac.uk/v3"
 
 # 只取渲染需要的字段，避免 OpenAlex 返回数十个无关字段。
 OPENALEX_SELECT = ",".join(
@@ -52,6 +54,24 @@ OPENALEX_SELECT = ",".join(
         "primary_topic",
         "keywords",
         "best_oa_location",
+    ]
+)
+
+# Semantic Scholar Graph API 返回字段很多，只取渲染与入库需要的。
+S2_FIELDS = ",".join(
+    [
+        "paperId",
+        "title",
+        "abstract",
+        "year",
+        "publicationDate",
+        "venue",
+        "authors",
+        "citationCount",
+        "externalIds",
+        "openAccessPdf",
+        "fieldsOfStudy",
+        "url",
     ]
 )
 
@@ -83,9 +103,18 @@ def build_arxiv_query(
     text = (q or "").strip()
     if text:
         if phrase:
-            clauses.append(f"{prefix}:{encode_phrase(text)}")
+            terms = [f"{prefix}:{encode_phrase(text)}"]
         else:
-            clauses.extend(f"{prefix}:{quote(term, safe='')}" for term in text.split())
+            terms = [f"{prefix}:{quote(term, safe='')}" for term in text.split()]
+        # 长查询逐词 AND 在 arXiv 上几乎总是 0 命中；超过 3 个词时改用 OR，
+        # 由 arXiv 的相关度排序挑回最贴近的结果。
+        if len(terms) == 1:
+            clauses.append(terms[0])
+        elif len(terms) > 3:
+            # OR 需要括号限定优先级；AND 保持原有不带括号的格式。
+            clauses.append("(" + "+OR+".join(terms) + ")")
+        else:
+            clauses.append("+AND+".join(terms))
 
     cat = (category or "").strip()
     if cat:
@@ -217,6 +246,105 @@ def parse_openalex_works(payload: dict[str, Any] | None) -> list[Paper]:
     return papers
 
 
+# ── Semantic Scholar ────────────────────────────────────────
+
+
+def parse_semantic_scholar(payload: dict[str, Any] | None) -> list[Paper]:
+    results = (payload or {}).get("data") or []
+    papers: list[Paper] = []
+    for item in results:
+        if not item:
+            continue
+        paper_id = item.get("paperId") or ""
+        if not paper_id:
+            continue
+        external = item.get("externalIds") or {}
+        fields = [f for f in (item.get("fieldsOfStudy") or []) if f]
+        open_access = item.get("openAccessPdf") or {}
+        papers.append(
+            Paper(
+                id=f"semanticscholar:{paper_id}",
+                source="semanticscholar",
+                title=strip_latex_pointers(item.get("title") or "(无标题)"),
+                authors=[
+                    a.get("name") or ""
+                    for a in (item.get("authors") or [])
+                    if a.get("name")
+                ],
+                venue=item.get("venue") or "Semantic Scholar",
+                year=normalize_year(item.get("year")),
+                category=fields[0] if fields else "Semantic Scholar",
+                keywords=fields[:8],
+                abstract=strip_latex_pointers((item.get("abstract") or "").strip()),
+                url=item.get("url")
+                or f"https://www.semanticscholar.org/paper/{paper_id}",
+                pdf_url=open_access.get("url") or None,
+                html_url=None,
+                published_at=item.get("publicationDate"),
+                doi=strip_doi(external.get("DOI")),
+                citations=item.get("citationCount"),
+            )
+        )
+    return papers
+
+
+# ── CORE ────────────────────────────────────────────────────
+
+
+def _core_topics(item: dict[str, Any]) -> list[str]:
+    return [
+        t.get("name") or ""
+        for t in (item.get("topics") or [])
+        if isinstance(t, dict) and t.get("name")
+    ]
+
+
+def _core_venue(item: dict[str, Any]) -> str:
+    for journal in item.get("journals") or []:
+        if isinstance(journal, dict) and journal.get("title"):
+            return str(journal["title"])
+    return str(item.get("publisher") or "CORE")
+
+
+def parse_core(payload: dict[str, Any] | None) -> list[Paper]:
+    results = (payload or {}).get("results") or []
+    papers: list[Paper] = []
+    for item in results:
+        if not item:
+            continue
+        raw_id = item.get("id")
+        if raw_id is None:
+            continue
+        authors = [
+            a.get("name") if isinstance(a, dict) else str(a)
+            for a in (item.get("authors") or [])
+        ]
+        topics = _core_topics(item)
+        field_of_study = item.get("fieldOfStudy")
+        if isinstance(field_of_study, list):
+            field_of_study = field_of_study[0] if field_of_study else None
+        papers.append(
+            Paper(
+                id=f"core:{raw_id}",
+                source="core",
+                title=strip_latex_pointers(item.get("title") or "(无标题)"),
+                authors=[a for a in authors if a],
+                venue=_core_venue(item),
+                year=normalize_year(item.get("yearPublished") or item.get("publishedDate")),
+                category=field_of_study or (topics[0] if topics else "CORE"),
+                keywords=topics[:8],
+                abstract=clean_html_text(item.get("abstract") or ""),
+                url=f"https://core.ac.uk/works/{raw_id}",
+                pdf_url=item.get("downloadUrl") or None,
+                html_url=None,
+                published_at=item.get("publishedDate"),
+                doi=strip_doi(item.get("doi")),
+                citations=item.get("citationCount"),
+            )
+        )
+    return papers
+
+
 # ── Europe PMC ──────────────────────────────────────────────
 
 
@@ -318,6 +446,25 @@ def parse_pubmed_abstract_xml(xml_text: str) -> tuple[str, list[str]]:
 def _label(attrs: str) -> str:
     match = re.search(r'Label="([^"]+)"', attrs or "")
     return match.group(1) if match else ""
+
+
+# efetch 一次返回多条记录，按文章块切开才能把摘要对回各自的 PMID。
+_PUBMED_ARTICLE_RE = re.compile(
+    r"<(PubmedArticle|PubmedBookArticle)\b[\s\S]*?</\1>"
+)
+
+
+def parse_pubmed_abstracts(xml_text: str) -> dict[str, tuple[str, list[str]]]:
+    """efetch 批量 XML → {PMID: (摘要, 关键词)}，供列表页按 PMID 回填。"""
+    if not xml_text:
+        return {}
+    found: dict[str, tuple[str, list[str]]] = {}
+    for match in _PUBMED_ARTICLE_RE.finditer(xml_text):
+        block = match.group(0)
+        pmid = re.search(r"<PMID[^>]*>(\d+)</PMID>", block)
+        if pmid:
+            found[pmid.group(1)] = parse_pubmed_abstract_xml(block)
+    return found
 
 
 # ── 查询参数拼装 ────────────────────────────────────────────
@@ -468,6 +615,69 @@ def pubmed_urls(
         f"&retmax={size}&retstart={page * size}&sort={sort_param}"
         f"&term={quote(term, safe='')}"
     )
+
+
+def semantic_scholar_url(
+    q: str,
+    *,
+    phrase: bool,
+    from_year: int | None,
+    to_year: int | None,
+    page: int,
+    per_page: int,
+    now_year: int | None = None,
+) -> str:
+    """Semantic Scholar 的关键词检索只支持相关度排序，没有字段限定与自定义排序。"""
+    params: list[tuple[str, str]] = [
+        ("query", f'"{q}"' if phrase else q),
+        ("offset", str(page * per_page)),
+        ("limit", str(min(per_page, 100))),
+        ("fields", S2_FIELDS),
+    ]
+    if from_year is not None or to_year is not None:
+        start = from_year or ARXIV_EPOCH_YEAR
+        end = to_year or now_year or datetime.now().year
+        params.append(("year", f"{start}-{end}"))
+    return f"{SEMANTIC_SCHOLAR_API}/paper/search?{urlencode(params)}"
+
+
+def core_url(
+    q: str,
+    *,
+    field: str,
+    phrase: bool,
+    from_year: int | None,
+    to_year: int | None,
+    page: int,
+    per_page: int,
+) -> str:
+    """CORE v3 使用 Elasticsearch 查询串；年份用 range 语法收窄。"""
+    term = re.sub(r'"', " ", q or "").strip()
+    text = f'"{term}"' if phrase else term
+    key = {"title": "title", "abstract": "abstract", "author": "authors"}.get(field)
+    clauses = [f"{key}:({text})" if key else text]
+
+    if from_year is not None or to_year is not None:
+        start = str(from_year) if from_year is not None else "*"
+        end = str(to_year) if to_year is not None else "*"
+        clauses.append(f"yearPublished:[{start} TO {end}]")
+
+    params = [
+        ("q", " AND ".join(clauses)),
+        ("limit", str(min(per_page, 100))),
+        ("offset", str(page * per_page)),
+    ]
+    return f"{CORE_API}/search/works?{urlencode(params)}"
+
+
+def core_doi_query(doi: str) -> str:
+    """CORE 的自定义检索串里，冒号与引号会破坏语法，先清洗序号。"""
+    safe = re.sub(r'["\\]', " ", doi or "").strip()
+    return f'doi:"{safe}"'
+
+
+def core_doi_url(doi: str) -> str:
+    return f"{CORE_API}/search/works?{urlencode([('q', core_doi_query(doi)), ('limit', '1')])}"
 
 
 def unpaywall_url(doi: str, mailto: str) -> str:

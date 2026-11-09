@@ -174,19 +174,23 @@ def _proxy_for(url: str) -> str | None:
     return proxies.get(parsed.scheme or "https") or proxies.get("all")
 
 
-async def fetch_once(url: str, timeout: float = TIMEOUT_S) -> httpx.Response:
+async def fetch_once(
+    url: str, timeout: float = TIMEOUT_S, headers: dict[str, str] | None = None
+) -> httpx.Response:
     async with _client(url, timeout) as client:
-        return await client.get(url)
+        return await client.get(url, headers=headers)
 
 
-async def fetch_raw(url: str, timeout: float, retries: int) -> str:
+async def fetch_raw(
+    url: str, timeout: float, retries: int, headers: dict[str, str] | None = None
+) -> str:
     """纯网络请求：超时 + 重试退避，不碰缓存。"""
     last: FriendlyError | None = None
     for attempt in range(retries + 1):
         if attempt:
             await asyncio.sleep(_backoff(attempt))
         try:
-            response = await fetch_once(url, timeout)
+            response = await fetch_once(url, timeout, headers)
         except httpx.TimeoutException:
             # 超时不重试，避免用户等待过久
             raise FriendlyError("检索请求超时，请检查网络后重试。", False) from None
@@ -198,6 +202,10 @@ async def fetch_raw(url: str, timeout: float, retries: int) -> str:
             return response.text
         if response.status_code == 404:
             raise FriendlyError("没有找到这条记录。", False)
+        if response.status_code in {401, 403}:
+            raise FriendlyError(
+                f"服务鉴权失败（{response.status_code}），请检查 API Key 配置。", False
+            )
         retryable = response.status_code in RETRYABLE_STATUS
         message = (
             "请求过于频繁，检索服务正在限流，请稍后重试。"
@@ -217,8 +225,9 @@ async def fetch_text(
     timeout: float = TIMEOUT_S,
     retries: int = MAX_RETRIES,
     ttl: float = TTL_SEARCH,
+    headers: dict[str, str] | None = None,
 ) -> str:
-    return await cache.get(url, ttl, lambda: fetch_raw(url, timeout, retries))
+    return await cache.get(url, ttl, lambda: fetch_raw(url, timeout, retries, headers))
 
 
 # ── arXiv 节流闸门 ──────────────────────────────────────────

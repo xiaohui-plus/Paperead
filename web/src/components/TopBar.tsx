@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react'
 import type { Paper, ViewMode } from '../types'
 import { downloadMarkdown } from '../lib/markdown'
 import { IconBack, IconCollapse, IconDownload, IconExpand, IconMinus, IconPdf, IconPlus, IconPrint, IconSettings } from './icons'
@@ -55,6 +56,75 @@ export function TopBar({
   onTogglePdfExpand,
 }: Props) {
   const pct = total ? Math.round((translated / total) * 100) : 0
+
+  const [busy, setBusy] = useState<'print' | 'download' | null>(null)
+  const [progress, setProgress] = useState('')
+  const [toast, setToast] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null)
+  const toastTimer = useRef<number | null>(null)
+  const downloadRef = useRef<HTMLDetailsElement>(null)
+
+  const notify = (text: string, kind: 'ok' | 'err' = 'ok') => {
+    if (toastTimer.current) window.clearTimeout(toastTimer.current)
+    setToast({ text, kind })
+    toastTimer.current = window.setTimeout(() => setToast(null), 3200)
+  }
+
+  const closeDownloadMenu = () => {
+    if (downloadRef.current) downloadRef.current.open = false
+  }
+
+  // 点下拉菜单以外的区域时收起
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => {
+      const el = downloadRef.current
+      if (el?.open && !el.contains(event.target as Node)) el.open = false
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => document.removeEventListener('pointerdown', onPointerDown)
+  }, [])
+
+  // 示例数据没有 PDF，退回原来的 Markdown 导出
+  const handleDownload = async () => {
+    closeDownloadMenu()
+    if (!canShowPdf) {
+      downloadMarkdown(paper)
+      return
+    }
+    if (busy) return
+    setBusy('download')
+    try {
+      const { downloadPdf } = await import('../lib/pdfFile')
+      await downloadPdf(pdfHref, paper.title)
+      notify('原版 PDF 已保存')
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'PDF 下载失败', 'err')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  // 打印整份原版 PDF；没有 PDF 时仍按重排内容打印
+  const handlePrint = async () => {
+    if (!canShowPdf) {
+      window.print()
+      return
+    }
+    if (busy) return
+    setBusy('print')
+    setProgress('正在准备打印…')
+    try {
+      const { printPdf } = await import('../lib/pdfFile')
+      await printPdf(pdfHref, (done, all) =>
+        setProgress(done < all ? `正在准备打印 ${done}/${all}` : '正在打开打印对话框…'),
+      )
+      notify('已打开打印对话框')
+    } catch (err) {
+      notify(err instanceof Error ? err.message : '打印准备失败', 'err')
+    } finally {
+      setBusy(null)
+      setProgress('')
+    }
+  }
 
   return (
     <header className="topbar">
@@ -161,15 +231,39 @@ export function TopBar({
           {translating && <i className="spin-dot" />}
         </span>
 
+        {progress && <span className="pill">{progress}</span>}
+
+        <details className="topbar-download" ref={downloadRef}>
+          <summary
+            className="icon-btn"
+            title={canShowPdf ? '下载原版 PDF / 导出 Markdown' : '导出 Markdown'}
+          >
+            {busy === 'download' ? <i className="spin-dot" /> : <IconDownload />}
+          </summary>
+          <div className="topbar-download-menu">
+            {canShowPdf && (
+              <button type="button" onClick={handleDownload} disabled={busy !== null}>
+                下载原版 PDF
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                closeDownloadMenu()
+                downloadMarkdown(paper)
+              }}
+            >
+              导出 Markdown
+            </button>
+          </div>
+        </details>
         <button
           className="icon-btn"
-          title="导出 Markdown"
-          onClick={() => downloadMarkdown(paper)}
+          title={canShowPdf ? '打印原版 PDF' : '打印 / 存为 PDF'}
+          disabled={busy !== null}
+          onClick={handlePrint}
         >
-          <IconDownload />
-        </button>
-        <button className="icon-btn" title="打印 / 存为 PDF" onClick={() => window.print()}>
-          <IconPrint />
+          {busy === 'print' ? <i className="spin-dot" /> : <IconPrint />}
         </button>
 
         <button
@@ -185,6 +279,12 @@ export function TopBar({
       <div className="topbar-progress">
         <i style={{ width: `${pct}%` }} />
       </div>
+
+      {toast && (
+        <div className={`toast ${toast.kind}`} onClick={() => setToast(null)}>
+          {toast.text}
+        </div>
+      )}
     </header>
   )
 }

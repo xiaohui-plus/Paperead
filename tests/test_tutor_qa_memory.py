@@ -40,14 +40,7 @@ def test_write_memory_applies_writer_patch(tmp_path, monkeypatch):
             {
                 "version": 1,
                 "turn_count": 1,
-                "traits": {
-                    "depth": {
-                        "value": "需要类比",
-                        "confidence": 0.8,
-                        "evidence": ["旧证据"],
-                        "updated_at": memlib._now(),
-                    }
-                },
+                "background": "生物信息背景，需要类比，习惯先看结论",
             },
             ensure_ascii=False,
         ),
@@ -55,9 +48,7 @@ def test_write_memory_applies_writer_patch(tmp_path, monkeypatch):
     )
     reply = json.dumps(
         {
-            "traits": [
-                {"key": "answer_style", "value": "先结论后分点", "confidence": 0.7, "evidence": "要求直接给结论"}
-            ],
+            "background": "生物信息背景，图学习基础薄弱，需要类比；习惯先看结论再补细节",
             "concepts": [{"name": "消息传递", "state": "learning", "evidence": "在追问聚合方式"}],
             "summary": "用户已经理解消息传递的基本直觉，正在追问 BST 如何编码成对结构，尚未确认与 SEAL 的对比是否公平。",
             "facts": [{"kind": "user_stance", "text": "用户认为本文的 ablation 不够"}],
@@ -68,23 +59,23 @@ def test_write_memory_applies_writer_patch(tmp_path, monkeypatch):
     set_backend(fake)
     asyncio.run(memlib.write_memory(store, "p1", "BST 怎么编码成对结构", "答案", "BST 怎么编码成对结构？", ["消息传递"]))
 
-    assert store.profile()["traits"]["answer_style"]["value"] == "先结论后分点"
+    assert "习惯先看结论" in store.profile()["background"]
     assert store.concepts()["concepts"][0]["state"] == "learning"
     assert "BST" in store.chat("p1")["card"]["summary"]
     assert fake.kwargs[0]["temperature"] == 0.1
-    assert fake.kwargs[0]["max_tokens"] == 700
+    assert fake.kwargs[0]["max_tokens"] == 900
     payload = json.loads(fake.seen[0][1]["content"])
     assert payload["本轮问题"] == "BST 怎么编码成对结构？"
     assert payload["本轮回答"] == "答案"
     assert payload["涉及概念"] == ["消息传递"]
-    # 画像给写手看的是时效衰减后的置信度，不是文件里的原值
-    assert 0.75 <= payload["现有画像"]["depth"]["confidence"] <= 0.8
+    # 写手看到的是当前的人物背景原文
+    assert payload["现有背景"] == "生物信息背景，需要类比，习惯先看结论"
     assert set(payload) >= {
         "本轮问题",
         "本轮回答",
         "现有小结",
         "现有事实",
-        "现有画像",
+        "现有背景",
         "涉及概念",
     }
 
@@ -156,14 +147,14 @@ def test_write_memory_applies_fallback_only_once_when_chat_write_fails(tmp_path,
 def test_write_memory_keeps_invalid_model_fields_without_fallback(tmp_path, monkeypatch):
     monkeypatch.setenv("PAPEREAD_MEMORY", "1")
     store = memlib.MemoryStore(tmp_path)
-    set_backend(FakeBackend(json.dumps({"traits": [{"key": "bogus", "value": "值"}]}, ensure_ascii=False)))
+    set_backend(FakeBackend(json.dumps({"background": 123}, ensure_ascii=False)))
 
     asyncio.run(
         memlib.write_memory(store, "p1", "还是不懂", "答案", "还是不懂", ["消息传递"])
     )
 
     assert store.concepts()["concepts"] == []
-    assert store.profile()["traits"] == {}
+    assert store.profile()["background"] == ""
     assert store.profile()["turn_count"] == 1
 
 

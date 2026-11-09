@@ -49,7 +49,7 @@ export function ScholarDetail({ paper, loading, error, onBack, onImport, importi
     try {
       const result = await findFreeFullText(paper.doi)
       if (result.error) setNotice(result.error)
-      else if (!result.pdf_url && !result.landing_url) setNotice('Unpaywall 未收录该论文的开放获取版本。')
+      else if (!result.pdf_url && !result.landing_url) setNotice('未找到该论文的开放获取版本。')
       else {
         setOa(result)
         setNotice(result.pdf_url ? '已找到开放获取 PDF。' : '未找到可直接下载的 PDF，可打开开放获取页面。')

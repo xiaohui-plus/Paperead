@@ -45,6 +45,74 @@ def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+async def import_paper(
+    store: Any,
+    add_pdf: Callable[[str, bytes, dict[str, Any]], dict[str, Any]],
+    public: Callable[[dict[str, Any]], dict[str, Any]],
+    paper_id: str,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    """按题录 id 下载 PDF 并入库；HTTP 路由与 agent 内部工具共用这一条路径。
+
+    ``project_id`` 非空时 PDF 存在该研究项目自己名下（不进全局文献库）。
+    """
+    try:
+        found = await scholar_search.get_paper(paper_id)
+    except FriendlyError as exc:
+        raise HTTPException(status_code=502, detail=exc.message) from exc
+    if not found:
+        raise HTTPException(status_code=404, detail="没有找到这篇文献。")
+
+    existing = (
+        store.find_by_source(found.id, project_id=project_id)
+        if project_id
+        else store.find_by_source(found.id)
+    )
+    if existing:
+        return {"paper": public(existing), "imported": False, "already": True}
+
+    try:
+        candidates = await scholar_search.resolve_pdf_urls(found)
+    except FriendlyError as exc:
+        raise HTTPException(status_code=502, detail=exc.message) from exc
+    if not candidates:
+        raise HTTPException(
+            status_code=400,
+            detail="这篇文献没有可下载的公开 PDF，请到原文页面获取。",
+        )
+
+    # 出版商的 PDF 链接经常挡爬虫（403），按候选顺序逐个试，任一成功即止。
+    data: bytes | None = None
+    last_error: FriendlyError | None = None
+    for url in candidates[:4]:
+        try:
+            data = await scholar_search.fetch_pdf(url)
+            break
+        except FriendlyError as exc:
+            last_error = exc
+            log.info("全文下载失败，尝试下一个地址：%s（%s）", url, exc.message)
+    if data is None:
+        detail = last_error.message if last_error else "没有可下载的公开 PDF，请到原文页面获取。"
+        raise HTTPException(
+            status_code=502 if (last_error and last_error.retryable) else 400,
+            detail=detail,
+        )
+
+    meta = {
+        "source": found.source,
+        "source_id": found.id,
+        "title": found.title,
+        "authors": ", ".join(found.authors[:8]),
+        "abstract": found.abstract or "",
+        "doi": found.doi or "",
+        "url": found.url,
+    }
+    if project_id:
+        meta["project_id"] = project_id
+    row = add_pdf(scholar_search.pdf_filename(found), data, meta)
+    return {"paper": public(row), "imported": True, "already": False}
+
+
 def build_router(
     store: Any,
     add_pdf: Callable[[str, bytes, dict[str, Any]], dict[str, Any]],
@@ -109,6 +177,11 @@ def build_router(
             "error": None,
         }
 
+    @router.get("/sources")
+    async def sources() -> dict:
+        """当前配置下哪些数据源不可用（例如 CORE 未配置 API Key）。"""
+        return {"disabled": scholar_search.unavailable_sources()}
+
     @router.get("/daily")
     async def daily(round: int = Query(0, ge=0, le=1_000_000)) -> dict:
         try:
@@ -134,12 +207,23 @@ def build_router(
             raise HTTPException(status_code=404, detail="没有找到这篇文献。")
         return found.to_dict()
 
+    async def _fallback_pdf(doi: str) -> str | None:
+        """Unpaywall 没登记时的补充来源：Semantic Scholar / CORE。"""
+        for lookup in (scholar_search.find_s2_open_pdf, scholar_search.find_core_pdf):
+            try:
+                found = await lookup(doi)
+            except Exception:  # 兜底源失败不影响 Unpaywall 的结论
+                continue
+            if found:
+                return found
+        return None
+
     @router.get("/fulltext")
     async def fulltext(doi: str = Query(..., min_length=3, max_length=200)) -> dict:
         try:
-            return await scholar_search.find_free_full_text(doi)
+            result = await scholar_search.find_free_full_text(doi)
         except FriendlyError as exc:
-            return {
+            result = {
                 "pdf_url": None,
                 "landing_url": None,
                 "oa_status": None,
@@ -147,66 +231,22 @@ def build_router(
             }
         except Exception as exc:
             log.exception("Unpaywall 查询失败：%s", exc)
-            return {
+            result = {
                 "pdf_url": None,
                 "landing_url": None,
                 "oa_status": None,
                 "error": "免费全文查询失败，请稍后重试。",
             }
 
+        if not result.get("pdf_url"):
+            extra = await _fallback_pdf(doi)
+            if extra:
+                result = {**result, "pdf_url": extra, "error": None}
+        return result
+
     @router.post("/import")
-    async def import_paper(req: ImportIn) -> dict:
-        try:
-            found = await scholar_search.get_paper(req.id)
-        except FriendlyError as exc:
-            raise HTTPException(status_code=502, detail=exc.message) from exc
-        if not found:
-            raise HTTPException(status_code=404, detail="没有找到这篇文献。")
-
-        existing = store.find_by_source(found.id)
-        if existing:
-            return {"paper": public(existing), "imported": False, "already": True}
-
-        try:
-            candidates = await scholar_search.resolve_pdf_urls(found)
-        except FriendlyError as exc:
-            raise HTTPException(status_code=502, detail=exc.message) from exc
-        if not candidates:
-            raise HTTPException(
-                status_code=400,
-                detail="这篇文献没有可下载的公开 PDF，请到原文页面获取。",
-            )
-
-        # 出版商的 PDF 链接经常挡爬虫（403），按候选顺序逐个试，任一成功即止。
-        data: bytes | None = None
-        last_error: FriendlyError | None = None
-        for url in candidates[:4]:
-            try:
-                data = await scholar_search.fetch_pdf(url)
-                break
-            except FriendlyError as exc:
-                last_error = exc
-                log.info("全文下载失败，尝试下一个地址：%s（%s）", url, exc.message)
-        if data is None:
-            detail = last_error.message if last_error else "没有可下载的公开 PDF，请到原文页面获取。"
-            raise HTTPException(
-                status_code=502 if (last_error and last_error.retryable) else 400,
-                detail=detail,
-            )
-
-        row = add_pdf(
-            scholar_search.pdf_filename(found),
-            data,
-            {
-                "source": found.source,
-                "source_id": found.id,
-                "title": found.title,
-                "authors": ", ".join(found.authors[:8]),
-                "doi": found.doi or "",
-                "url": found.url,
-            },
-        )
-        return {"paper": public(row), "imported": True, "already": False}
+    async def import_route(req: ImportIn) -> dict:
+        return await import_paper(store, add_pdf, public, req.id)
 
     @router.post("/cite")
     async def cite(req: CiteIn) -> dict:

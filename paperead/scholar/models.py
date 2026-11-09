@@ -14,13 +14,15 @@ import re
 from dataclasses import dataclass, field, fields
 from typing import Any, Literal
 
-Source = Literal["arxiv", "pubmed", "openalex", "europepmc"]
+Source = Literal["arxiv", "pubmed", "openalex", "europepmc", "semanticscholar", "core"]
 
 SOURCE_LABELS: dict[str, str] = {
     "arxiv": "arXiv",
     "pubmed": "PubMed",
     "openalex": "OpenAlex",
     "europepmc": "Europe PMC",
+    "semanticscholar": "Semantic Scholar",
+    "core": "CORE",
 }
 
 # 界面上的数据源顺序与说明（详情见前端 SOURCE_META）
@@ -29,6 +31,8 @@ SOURCES: list[tuple[str, str]] = [
     ("pubmed", "生物医学与生命科学文献"),
     ("openalex", "全学科开放学术图谱，附带被引量"),
     ("europepmc", "生物医学全文、预印本与被引量"),
+    ("semanticscholar", "全学科检索，自带开放获取 PDF 与引用量；建议配置 API Key 避免限流"),
+    ("core", "开放获取全文聚合，需配置 API Key"),
 ]
 
 ARXIV_FIELDS: list[tuple[str, str]] = [

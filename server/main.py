@@ -18,10 +18,13 @@ import asyncio
 import base64
 import json
 import logging
+import mimetypes
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 import httpx
 from fastapi import (
@@ -30,6 +33,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     Request,
     UploadFile,
 )
@@ -41,15 +45,16 @@ from starlette.background import BackgroundTask
 
 from paperead import __version__
 from paperead.env import env
-from paperead.formula import recognize_latex
+from paperead.formula import recognize_equations, recognize_latex
 from paperead.layout import Block, parse_pdf
 from paperead.llm import LLMConfig, OpenAICompatBackend
 from paperead.tutor import build_guide
+from paperead.tutor.guide import GUIDE_VERSION
 from paperead.tutor import memory as memory_engine
 from paperead.tutor import qa as qa_engine
 from paperead.tutor import web as web_search
 from paperead.tutor.citations import find as find_citations, resolve as resolve_citations
-from paperead.tutor.lineage import build_lineage
+from paperead.tutor.lineage import LINEAGE_VERSION, build_lineage
 from paperead.tutor.provenance import enrich as enrich_provenance
 from paperead.tutor.references import Reference, parse as parse_references
 from paperead.translate import (
@@ -60,6 +65,12 @@ from paperead.translate import (
 )
 from server.store import FolderExistsError, FolderNameError, LibraryStore
 from server.scholar_api import build_router as build_scholar_router
+from server.research import ResearchStore
+from server.research import build_router as build_research_router
+from server.research.abstracts import fill_one as fill_abstract
+from server.research.search import LibrarySearch
+from server.research.search_api import build_router as build_internal_router
+from server.research.tools_api import build_router as build_tools_router
 from server.runtime import (
     allowed_origins,
     default_data_dir,
@@ -76,11 +87,29 @@ PORT = int(env("PAPEREAD_PORT", "8010"))
 TOKEN = env("PAPEREAD_TOKEN", "")
 ORIGINS = allowed_origins(PORT)
 MOCK = env("PAPEREAD_MOCK") == "1"
+# 公式识别的整体时间预算：超时就先让论文可读，剩余公式保留裁图
+FORMULA_TIMEOUT = float(env("PAPEREAD_FORMULA_TIMEOUT", "180"))
 
 store = LibraryStore(DATA_DIR)
+research_store = ResearchStore(DATA_DIR / "research")
 
 app = FastAPI(title="Paperead", version=__version__)
 
+# 项目/文件/会话等具体路由必须先于下面的 /api/research/{path:path} 代理注册，
+# 否则会被通配代理拦截，误报“研究 agent 尚未启动”。
+def _schedule_parse(paper_id: str) -> None:
+    """加入文献库后立刻后台解析（_parse_task 在模块末尾定义，调用时已就绪）。"""
+    asyncio.create_task(_parse_task(paper_id))
+
+
+app.include_router(build_research_router(research_store, store, _schedule_parse))
+
+# 研究 agent 的工具接口：本机调用，自带 token，不走 /api 的 cookie 鉴权。
+app.include_router(
+    build_internal_router(
+        LibrarySearch(store, DATA_DIR / "research" / "search.db"), research_store
+    )
+)
 
 @app.middleware("http")
 async def guard(request: Request, call_next):
@@ -177,33 +206,21 @@ async def health() -> dict:
     }
 
 
-@app.get("/api/research/agent")
-async def research_agent() -> dict:
-    """A0 spike handshake: the desktop shell writes agent.json after the Node
-    agent is healthy. A2 replaces this direct endpoint with a Python proxy."""
-    path = DATA_DIR / "agent.json"
-    if not path.exists():
-        raise HTTPException(status_code=503, detail="研究 agent 尚未启动")
-    try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"agent.json 无效：{e}") from e
-    if not isinstance(data, dict) or not data.get("port"):
-        raise HTTPException(status_code=503, detail="agent.json 缺少 port")
-    return data
-
-
 def _agent_target() -> tuple[str, str]:
-    path = DATA_DIR / "agent.json"
-    if not path.exists():
+    """Resolve the local research agent from the environment.
+
+    The desktop shell reserves the agent port/token before spawning this
+    process, so there is no on-disk handshake file and no token exposure to
+    the frontend.
+    """
+    port = os.environ.get("PAPEREAD_AGENT_PORT")
+    if not port:
         raise HTTPException(status_code=503, detail="研究 agent 尚未启动")
     try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"agent.json 无效：{e}") from e
-    if not isinstance(data, dict) or not data.get("port"):
-        raise HTTPException(status_code=503, detail="agent.json 缺少 port")
-    return f"http://127.0.0.1:{int(data['port'])}", str(data.get("token") or "")
+        port_number = int(port)
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=f"PAPEREAD_AGENT_PORT 无效：{port}") from e
+    return f"http://127.0.0.1:{port_number}", os.environ.get("PAPEREAD_AGENT_TOKEN", "")
 
 
 @app.api_route(
@@ -213,8 +230,8 @@ def _agent_target() -> tuple[str, str]:
 async def research_proxy(path: str, request: Request):
     """Thin SSE/JSON proxy from the product API to the local Node agent.
 
-    The frontend never sees the agent port or token. A2 keeps this route and
-    replaces the agent.json lookup with the project/session store.
+    The frontend never sees the agent port or token; both come from the
+    environment injected by the desktop shell.
     """
     base, token = _agent_target()
     url = f"{base}/v1/{path}"
@@ -298,6 +315,40 @@ async def formula(req: FormulaReq) -> dict:
 
     ms = int((time.time() - started) * 1000)
     return {"ok": bool(latex), "latex": latex, "ms": ms, "mock": False}
+
+
+# 解析阶段要把公式裁图转成 LaTeX，需要一个视觉模型配置。密钥仍然只存在浏览器
+# localStorage 里，前端启动/保存设置时推给本服务；只在内存里放一份，不落盘。
+_vision_config: LLMConfig | None = None
+
+
+class VisionConfigReq(BaseModel):
+    config: LLMConfigIn | None = None
+
+
+@app.post("/api/config/vision")
+async def set_vision_config(req: VisionConfigReq) -> dict:
+    global _vision_config
+    if not req.config:
+        _vision_config = None
+        return {"ok": True, "configured": False}
+    _vision_config = LLMConfig(
+        api_key=req.config.api_key,
+        base_url=req.config.base_url.rstrip("/"),
+        model=req.config.model,
+        timeout=req.config.timeout,
+    )
+    return {"ok": True, "configured": True, "model": _vision_config.model}
+
+
+@app.get("/api/config/vision")
+async def get_vision_config() -> dict:
+    cfg = _vision_config
+    return {
+        "configured": cfg is not None,
+        "model": cfg.model if cfg else "",
+        "base_url": cfg.base_url if cfg else "",
+    }
 
 
 @app.post("/api/ping")
@@ -535,7 +586,11 @@ async def get_guide(paper_id: str) -> dict:
     path = store.papers_dir / f"{paper_id}.guide.json"
     if not path.exists():
         raise HTTPException(status_code=404, detail="导读还没生成")
-    return json.loads(path.read_text(encoding="utf-8-sig"))
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    # 旧版导读（内容结构已升级）直接作废，让前端重新生成
+    if data.get("version") != GUIDE_VERSION:
+        raise HTTPException(status_code=404, detail="导读需要重新生成")
+    return data
 
 
 _guiding: set[str] = set()
@@ -559,7 +614,9 @@ async def make_guide(paper_id: str, req: GuideReq | None = None) -> dict:
     path = store.papers_dir / f"{paper_id}.guide.json"
     refresh = bool(req and req.refresh)
     if path.exists() and not refresh:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+        cached = json.loads(path.read_text(encoding="utf-8-sig"))
+        if cached.get("version") == GUIDE_VERSION:
+            return cached
 
     if paper_id in _guiding:
         raise HTTPException(status_code=429, detail="导读正在生成中")
@@ -653,7 +710,11 @@ async def get_lineage(paper_id: str) -> dict:
     path = store.papers_dir / f"{paper_id}.lineage.json"
     if not path.exists():
         raise HTTPException(status_code=404, detail="脉络还没生成")
-    return json.loads(path.read_text(encoding="utf-8-sig"))
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    # 旧版结果（引用/文献解析或推断方式已升级）直接作废，让前端重新生成
+    if data.get("version") != LINEAGE_VERSION:
+        raise HTTPException(status_code=404, detail="脉络需要重新生成")
+    return data
 
 
 _lineaging: set[str] = set()
@@ -672,7 +733,9 @@ async def make_lineage(paper_id: str, req: GuideReq | None = None) -> dict:
     path = store.papers_dir / f"{paper_id}.lineage.json"
     refresh = bool(req and req.refresh)
     if path.exists() and not refresh:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+        cached = json.loads(path.read_text(encoding="utf-8-sig"))
+        if cached.get("version") == LINEAGE_VERSION:
+            return cached
     if paper_id in _lineaging:
         raise HTTPException(status_code=429, detail="脉络正在生成中")
 
@@ -695,7 +758,7 @@ async def make_lineage(paper_id: str, req: GuideReq | None = None) -> dict:
     _lineaging.add(paper_id)
     try:
         objs = [Block(**{**b, "bbox": tuple(b["bbox"])}) for b in blocks]
-        data = await build_lineage(objs)
+        data = await build_lineage(objs, pdf_path=store.pdf_path(paper_id))
         path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
         return data
     finally:
@@ -1307,6 +1370,23 @@ async def _parse_task(paper_id: str) -> None:
     assets = store.papers_dir / f"{paper_id}_assets"
     try:
         parsed = await asyncio.to_thread(parse_pdf, pdf, paper_id, assets)
+        # 配了识图模型就把显示公式转成 LaTeX；阅读页优先用 KaTeX 矢量渲染，
+        # 识别失败或没配置时自动回落到裁图，不影响阅读。
+        if _vision_config is not None:
+            try:
+                stats = await asyncio.wait_for(
+                    recognize_equations(
+                        parsed.blocks,
+                        concurrency=6,
+                        backend=OpenAICompatBackend(_vision_config),
+                    ),
+                    timeout=FORMULA_TIMEOUT,
+                )
+                log.info("公式识别 %s：%s", paper_id, stats)
+            except asyncio.TimeoutError:
+                log.warning("公式识别超时（%ss），剩余公式保留裁图", FORMULA_TIMEOUT)
+            except Exception:
+                log.exception("公式识别失败 %s", paper_id)
         blocks: list[dict] = []
         for b in parsed.blocks:
             d = b.to_dict()
@@ -1325,6 +1405,8 @@ async def _parse_task(paper_id: str) -> None:
             translated=0,
         )
         log.info("解析完成 %s：%d 块", paper_id, len(blocks))
+        # 手动上传的 PDF 只有正文；解析完再按 DOI/标题补题录摘要，检索时才能按摘要筛选。
+        asyncio.create_task(_abstract_task(paper_id))
     except Exception as e:
         log.exception("解析失败 %s", paper_id)
         store.update(paper_id, status="failed", error=str(e)[:300])
@@ -1332,84 +1414,424 @@ async def _parse_task(paper_id: str) -> None:
         _parsing.discard(paper_id)
 
 
-# ── Zotero（实验性） ────────────────────────────────────────────────────
+async def _abstract_task(paper_id: str) -> None:
+    try:
+        if await fill_abstract(store, paper_id):
+            log.info("已回填摘要 %s", paper_id)
+    except Exception:
+        log.exception("回填摘要失败 %s", paper_id)
 
-ZOTERO_BASE = env("PAPEREAD_ZOTERO", "http://127.0.0.1:23119/api/users/0")
+
+# ── Zotero（本机 Zotero 7+ 本地 API） ──────────────────────────────────
+
+ZOTERO_BASE = env("PAPEREAD_ZOTERO", "http://127.0.0.1:23119/api/users/0").rstrip("/")
+# 留空时自动探测（Windows 下先读 Zotero 的 prefs.js，取不到再用 ~/Zotero）
+ZOTERO_DATA_DIR = env("PAPEREAD_ZOTERO_DATA", "")
+_ZOTERO_HINT = (
+    "请打开 Zotero 设置 → 高级，在最上方的「杂项」里勾选"
+    "“允许此计算机上的其他应用程序与 Zotero 通讯”，然后重试。"
+)
+
+
+class ZoteroError(Exception):
+    """本地 API 连不上，或用户关闭了本地 API。"""
+
+
+def _zotero_client(timeout: float = 15) -> httpx.AsyncClient:
+    # trust_env=False：避免系统代理把 127.0.0.1 的请求也转发出去
+    return httpx.AsyncClient(timeout=timeout, trust_env=False, follow_redirects=False)
+
+
+async def _zotero_get(
+    client: httpx.AsyncClient, path: str, params: dict | None = None
+) -> httpx.Response:
+    try:
+        r = await client.get(f"{ZOTERO_BASE}{path}", params=params)
+    except Exception as e:
+        raise ZoteroError(f"连不上 Zotero 本地 API（{e}）。{_ZOTERO_HINT}") from e
+    if r.status_code == 403:
+        raise ZoteroError(f"Zotero 本地 API 未开启。{_ZOTERO_HINT}")
+    if r.status_code >= 400:
+        raise ZoteroError(f"Zotero 返回 HTTP {r.status_code}：{path}")
+    return r
+
+
+def _zotero_data_dir() -> Path:
+    """Zotero 数据目录：默认 ~/Zotero，自定义目录从 prefs.js 里读。"""
+    if ZOTERO_DATA_DIR:
+        return Path(ZOTERO_DATA_DIR).expanduser()
+    appdata = os.getenv("APPDATA")
+    if appdata:
+        profiles = Path(appdata) / "Zotero" / "Zotero" / "Profiles"
+        for prefs in profiles.glob("*/prefs.js"):
+            try:
+                text = prefs.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            match = re.search(
+                r'user_pref\("extensions\.zotero\.dataDir",\s*"([^"]+)"\)', text
+            )
+            if match:
+                return Path(match.group(1).replace("\\\\", "\\"))
+    return Path.home() / "Zotero"
+
+
+def _zotero_local_path(url: str) -> Path | None:
+    """file:// URL → 本地路径（Windows 的 /C:/... 要剥掉开头斜杠）。"""
+    if not url.lower().startswith("file:"):
+        return None
+    parsed = urlparse(url)
+    path = unquote(parsed.path)
+    if os.name == "nt":
+        path = path.lstrip("/")
+    if parsed.netloc and parsed.netloc not in ("", "localhost"):
+        # UNC 路径：file://server/share/file.pdf
+        path = f"//{parsed.netloc}{unquote(parsed.path)}"
+    return Path(path)
+
+
+def _zotero_year(data: dict) -> int | None:
+    match = re.search(r"(?:^|\D)(1[89]\d{2}|20\d{2})", str(data.get("date") or ""))
+    return int(match.group(1)) if match else None
+
+
+def _zotero_authors(data: dict) -> str:
+    names: list[str] = []
+    for creator in data.get("creators") or []:
+        if creator.get("creatorType") not in (None, "", "author"):
+            continue
+        if creator.get("name"):
+            names.append(str(creator["name"]))
+            continue
+        last = str(creator.get("lastName") or "").strip()
+        first = str(creator.get("firstName") or "").strip()
+        if last or first:
+            names.append(" ".join(part for part in (first, last) if part))
+    return ", ".join(names[:8])
+
+
+def _zotero_venue(data: dict) -> str:
+    for field in ("publicationTitle", "proceedingsTitle", "bookTitle", "repository"):
+        value = str(data.get(field) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _zotero_meta(data: dict) -> dict:
+    return {
+        "title": str(data.get("title") or "").strip(),
+        "authors": _zotero_authors(data),
+        "year": _zotero_year(data) or "",
+        "doi": str(data.get("DOI") or ""),
+        "url": str(data.get("url") or ""),
+        "venue": _zotero_venue(data),
+    }
+
+
+def _zotero_pdf_attachment(children: list[dict]) -> dict | None:
+    for node in children:
+        data = node.get("data") or {}
+        if data.get("itemType") != "attachment":
+            continue
+        name = str(data.get("filename") or data.get("path") or "")
+        if data.get("contentType") == "application/pdf" or name.lower().endswith(".pdf"):
+            return node
+    return None
+
+
+def _zotero_is_regular(item: dict) -> bool:
+    data = item.get("data") or {}
+    return data.get("itemType") not in ("attachment", "note", "annotation") and bool(
+        item.get("key") or data.get("key")
+    )
+
+
+def _normalize_title(title: object) -> str:
+    return re.sub(r"[\s\W_]+", "", str(title or "")).lower()
+
+
+async def _zotero_children(client: httpx.AsyncClient, key: str) -> list[dict]:
+    try:
+        r = await client.get(f"{ZOTERO_BASE}/items/{key}/children")
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return []
+
+
+async def _zotero_candidates(
+    client: httpx.AsyncClient,
+    *,
+    collection: str = "",
+    q: str = "",
+    limit: int = 50,
+    start: int = 0,
+    keys: list[str] | None = None,
+) -> tuple[list[tuple[dict, dict | None]], int]:
+    """取条目及其 PDF 附件；返回 ([(item, pdf_attachment|None)], total)。"""
+    if keys:
+        targets: list[dict] = []
+        for key in keys:
+            try:
+                r = await client.get(f"{ZOTERO_BASE}/items/{key}")
+                if r.status_code == 200:
+                    targets.append(r.json())
+            except Exception:
+                continue
+        total = len(targets)
+    else:
+        params: dict = {
+            "limit": limit,
+            "start": start,
+            # 排除附件；笔记/标注在本地再过滤（多值 NOT 的语法各版本不一致）
+            "itemType": "-attachment",
+            "sort": "dateAdded",
+            "direction": "desc",
+        }
+        if q.strip():
+            params["q"] = q.strip()
+            params["qmode"] = "everything"
+        path = f"/collections/{collection}/items" if collection else "/items"
+        r = await _zotero_get(client, path, params)
+        targets = r.json()
+        total = int(r.headers.get("Total-Results") or len(targets))
+
+    targets = [item for item in targets if _zotero_is_regular(item)]
+    sem = asyncio.Semaphore(6)
+
+    async def resolve(item: dict) -> tuple[dict, dict | None]:
+        key = item.get("key") or (item.get("data") or {}).get("key") or ""
+        async with sem:
+            children = await _zotero_children(client, key) if key else []
+        return item, _zotero_pdf_attachment(children)
+
+    return await asyncio.gather(*(resolve(item) for item in targets)), total
+
+
+async def _zotero_file_bytes(client: httpx.AsyncClient, att: dict) -> bytes:
+    """读取附件 PDF：本地 API 会 302 到 file://，拿不到时直接读 Zotero 存储目录。"""
+    key = str(att.get("key") or "")
+    data = att.get("data") or {}
+    candidates: list[Path] = []
+
+    try:
+        r = await client.get(f"{ZOTERO_BASE}/items/{key}/file")
+        if r.status_code == 200 and r.content[:4] == b"%PDF":
+            return r.content
+        if r.status_code in (301, 302, 303, 307, 308):
+            path = _zotero_local_path(r.headers.get("location", ""))
+            if path:
+                candidates.append(path)
+        if not candidates:
+            r2 = await client.get(f"{ZOTERO_BASE}/items/{key}/file/view/url")
+            if r2.status_code == 200:
+                path = _zotero_local_path(r2.text.strip())
+                if path:
+                    candidates.append(path)
+    except Exception:
+        pass
+
+    raw_path = str(data.get("path") or "")
+    filename = str(data.get("filename") or "")
+    if raw_path.startswith("storage:"):
+        candidates.append(
+            _zotero_data_dir() / "storage" / key / raw_path.split(":", 1)[1]
+        )
+    elif raw_path:
+        candidates.append(Path(raw_path).expanduser())
+    if filename:
+        candidates.append(_zotero_data_dir() / "storage" / key / filename)
+
+    for path in candidates:
+        try:
+            blob = path.read_bytes()
+        except OSError:
+            continue
+        if blob[:4] == b"%PDF":
+            return blob
+    raise ZoteroError("Zotero 里找不到这个 PDF（可能只同步了题录、附件未下载到本机）")
 
 
 @app.get("/api/zotero/probe")
 async def zotero_probe() -> dict:
-    """探测本机 Zotero 7 的本地 API 是否开启。"""
+    """兼容旧调用：等同 /api/zotero/status。"""
+    return await zotero_status()
+
+
+@app.get("/api/zotero/status")
+async def zotero_status() -> dict:
+    """探测本机 Zotero 本地 API 是否可读。"""
+    data_dir = _zotero_data_dir()
     try:
-        async with httpx.AsyncClient(timeout=3, trust_env=False) as c:
+        async with _zotero_client(timeout=3) as c:
             r = await c.get(f"{ZOTERO_BASE}/items", params={"limit": 1})
-        return {"ok": r.status_code == 200, "status": r.status_code}
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": f"连不上本机 Zotero（{e}）。{_ZOTERO_HINT}"}
+    if r.status_code == 403:
+        return {"ok": False, "status": 403, "error": _ZOTERO_HINT}
+    return {
+        "ok": r.status_code == 200,
+        "status": r.status_code,
+        "version": r.headers.get("Zotero-API-Version") or "",
+        "data_dir": str(data_dir) if data_dir.exists() else "",
+    }
+
+
+@app.get("/api/zotero/collections")
+async def zotero_collections() -> dict:
+    try:
+        async with _zotero_client() as c:
+            r = await _zotero_get(c, "/collections", {"limit": 500})
+            rows = r.json()
+    except ZoteroError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+    collections = []
+    for row in rows:
+        data = row.get("data") or {}
+        collections.append(
+            {
+                "key": row.get("key") or data.get("key"),
+                "name": str(data.get("name") or "未命名分类").strip(),
+                "items": int((row.get("meta") or {}).get("numItems") or 0),
+            }
+        )
+    collections.sort(key=lambda item: item["name"].lower())
+    return {"collections": collections}
+
+
+@app.get("/api/zotero/items")
+async def zotero_items(
+    collection: str = Query("", max_length=40),
+    q: str = Query("", max_length=200),
+    limit: int = Query(50, ge=1, le=100),
+    start: int = Query(0, ge=0),
+) -> dict:
+    """分页列出 Zotero 条目，并标注 PDF 附件 / 是否已在文献库中。"""
+    try:
+        async with _zotero_client() as c:
+            pairs, total = await _zotero_candidates(
+                c,
+                collection=collection.strip(),
+                q=q,
+                limit=limit,
+                start=start,
+            )
+    except ZoteroError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+    existing = store.list()
+    by_id = {row["id"]: row for row in existing}
+    by_source = {
+        str(row.get("source_id")): row for row in existing if row.get("source_id")
+    }
+    by_title: dict[str, str] = {}
+    for row in existing:
+        key = _normalize_title(row.get("title"))
+        if key:
+            by_title.setdefault(key, row["id"])
+
+    items = []
+    for item, pdf in pairs:
+        data = item.get("data") or {}
+        key = item.get("key") or data.get("key")
+        title = str(data.get("title") or "").strip()
+        meta = _zotero_meta(data)
+        duplicate = by_source.get(f"zotero:{key}")
+        if not duplicate and title:
+            duplicate = by_id.get(by_title.get(_normalize_title(title), ""))
+        pdf_data = (pdf or {}).get("data") or {}
+        items.append(
+            {
+                "key": key,
+                "title": title or "(无标题)",
+                "authors": meta["authors"],
+                "year": meta["year"] or None,
+                "item_type": data.get("itemType") or "",
+                "publication": meta["venue"],
+                "doi": meta["doi"],
+                "url": meta["url"],
+                "date_added": data.get("dateAdded") or "",
+                "pdf": (
+                    {
+                        "key": pdf.get("key"),
+                        "filename": pdf_data.get("filename")
+                        or str(pdf_data.get("path") or "").replace("storage:", ""),
+                    }
+                    if pdf
+                    else None
+                ),
+                "imported": bool(duplicate),
+            }
+        )
+    return {
+        "items": items,
+        "total": total,
+        "start": start,
+        "limit": limit,
+        "has_more": start + len(items) < total,
+    }
 
 
 class ZoteroImportReq(BaseModel):
-    limit: int = 20
+    # keys 为空时按 collection/q/limit 批量挑带 PDF 的条目（兼容旧的一键导入）
+    keys: list[str] = Field(default_factory=list, max_length=100)
+    collection: str = ""
+    q: str = ""
+    limit: int = Field(20, ge=1, le=100)
 
 
 @app.post("/api/zotero/import")
 async def zotero_import(req: ZoteroImportReq) -> dict:
-    """从 Zotero 本地库里挑带 PDF 附件的条目导入。
-
-    Zotero 7 需在「设置 → 高级」勾选允许其他应用访问本地 API，否则这里会连不上。
-    """
-    imported, skipped, errors = 0, 0, []
+    """把选中的 Zotero 条目（带 PDF 附件）导入文献库，并后台解析。"""
+    imported, skipped, errors, papers = 0, 0, [], []
     try:
-        async with httpx.AsyncClient(timeout=20, trust_env=False) as c:
-            r = await c.get(
-                f"{ZOTERO_BASE}/items",
-                params={"limit": req.limit, "itemType": "-attachment || note"},
+        async with _zotero_client(timeout=60) as c:
+            pairs, _ = await _zotero_candidates(
+                c,
+                collection=req.collection.strip(),
+                q=req.q,
+                limit=req.limit,
+                keys=req.keys or None,
             )
-            r.raise_for_status()
-            items = r.json()
-    except Exception as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"连不上 Zotero 本地 API（{e}）。请在 Zotero 设置 → 高级里允许其他应用访问，"
-            "或直接把 PDF 拖进来。",
-        ) from e
-
-    async with httpx.AsyncClient(timeout=60, trust_env=False) as c:
-        for item in items:
-            data = item.get("data") or {}
-            if data.get("itemType") in ("attachment", "note"):
-                continue
-            key = item.get("key") or data.get("key")
-            if not key:
-                continue
-            try:
-                kids = (
-                    await c.get(f"{ZOTERO_BASE}/items/{key}/children")
-                ).json()
-                pdf_att = next(
-                    (
-                        k for k in kids
-                        if (k.get("data") or {}).get("contentType") == "application/pdf"
-                    ),
-                    None,
-                )
-                if not pdf_att:
+            for item, pdf in pairs:
+                data = item.get("data") or {}
+                key = item.get("key") or data.get("key")
+                title = str(data.get("title") or "").strip() or "(无标题)"
+                if not pdf:
                     skipped += 1
                     continue
-                att_key = pdf_att.get("key")
-                resp = await c.get(f"{ZOTERO_BASE}/items/{att_key}/file")
-                resp.raise_for_status()
-                store.add(_zotero_name(data), resp.content)
-                imported += 1
-            except Exception as e:
-                errors.append(f"{data.get('title', key)}: {e}"[:160])
+                if key and store.find_by_source(f"zotero:{key}"):
+                    skipped += 1
+                    continue
+                try:
+                    blob = await _zotero_file_bytes(c, pdf)
+                    meta = {"source": "zotero", "source_id": f"zotero:{key}"}
+                    meta.update(
+                        {k: v for k, v in _zotero_meta(data).items() if v}
+                    )
+                    row = store.add(_zotero_name(data), blob, meta)
+                    asyncio.create_task(_parse_task(row["id"]))
+                    papers.append(_public(row))
+                    imported += 1
+                except Exception as e:
+                    errors.append(f"{title}: {e}"[:160])
+    except ZoteroError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
 
-    return {"imported": imported, "skipped": skipped, "errors": errors[:5]}
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "errors": errors[:10],
+        "papers": papers,
+    }
 
 
 def _zotero_name(data: dict) -> str:
-    title = (data.get("title") or "zotero-paper")[:80]
-    safe = "".join(ch for ch in title if ch not in '\\/:*?"<>|').strip() or "zotero"
+    title = str(data.get("title") or "zotero-paper")[:80]
+    safe = "".join(ch for ch in title if ch not in '\\/:*?"<>|\r\n\t').strip() or "zotero"
     return f"{safe}.pdf"
 
 
@@ -1427,8 +1849,17 @@ def _add_scholar_pdf(
 
 app.include_router(build_scholar_router(store, _add_scholar_pdf, _public))
 
+# 研究 agent 的项目/产物/标签工具：与检索工具同一前缀，需在 main 里拿到
+# 文献库与「入库并后台解析」的回调，所以放在依赖都就绪之后注册。
+app.include_router(
+    build_tools_router(research_store, store, _add_scholar_pdf, _public)
+)
+
 
 if WEB_DIST.exists():
+    # pdf.js 的 worker 是 .mjs；Windows 上 mimetypes 默认不认识 .mjs，会按 text/plain
+    # 返回，浏览器拒绝把它当模块加载，导致 PDF 预览与打印失败。
+    mimetypes.add_type("text/javascript", ".mjs")
     # 直接托管打包后的前端：python -m server.main 打开 http://localhost:8000 即可
     app.mount("/", StaticFiles(directory=str(WEB_DIST), html=True), name="web")
 

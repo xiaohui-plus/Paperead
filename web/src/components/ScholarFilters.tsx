@@ -42,6 +42,8 @@ function CommitInput({
 /** 高级检索：字段、分类、年份区间、每页条数、短语精确匹配。 */
 export function ScholarFilters({ params, onChange }: Props) {
   const isArxiv = params.source === 'arxiv'
+  // Semantic Scholar 的检索接口没有字段限定参数
+  const showField = params.source !== 'semanticscholar'
   const hasFilters =
     params.field !== 'all' ||
     params.phrase ||
@@ -51,19 +53,21 @@ export function ScholarFilters({ params, onChange }: Props) {
 
   return (
     <div className="scholar-filters">
-      <label>
-        <span>检索字段</span>
-        <select
-          value={params.field}
-          onChange={(e) => onChange({ field: e.target.value as SearchParams['field'] })}
-        >
-          {FIELD_META.map((f) => (
-            <option key={f.k} value={f.k}>
-              {f.l}
-            </option>
-          ))}
-        </select>
-      </label>
+      {showField && (
+        <label>
+          <span>检索字段</span>
+          <select
+            value={params.field}
+            onChange={(e) => onChange({ field: e.target.value as SearchParams['field'] })}
+          >
+            {FIELD_META.map((f) => (
+              <option key={f.k} value={f.k}>
+                {f.l}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
 
       {isArxiv && (
         <label>

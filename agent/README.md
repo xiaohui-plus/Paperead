@@ -2,7 +2,7 @@
 
 DSH（DeepSeek Harness）运行时，作为 Paperead 的 Node sidecar 使用。
 
-## A0 状态
+## 状态（A0 + P0.5 / P1 / P2）
 
 已完成并验证：
 
@@ -13,6 +13,14 @@ DSH（DeepSeek Harness）运行时，作为 Paperead 的 Node sidecar 使用。
 - 进程重启后同一 session 恢复（`agents.resume`），turn 继续递增。
 - Tauri `agent_sidecar.rs` 编译通过；web 的 `?research=spike` 页面构建通过。
 - 完整组合的关键是禁用 `hmr`（官方 `dsh-web-app` 也这么做）；不禁用会拖住启动。
+- P0.5：6 个接入 seam 的契约固化在 `agent/docs/dsh-integration-notes.md`。
+- P1：`npm run test:full` 覆盖工具清单、工具卡、todo/plan、标题（provider）、
+  `presentationMeta` 和 resume；shell/fs/subagent 断言为不可见。
+- P2：agent 端口/token 在 Python 启动前预分配，通过环境变量注入；
+  不再写 `agent.json`，Python 代理不向前端暴露 token。
+- 内置技能：`agent/skills` 通过 `PAPEREAD_SKILLS_DIR` + `customSkillDirs` 接入，
+  回归断言 `write-latex` 进入模型请求；用户明确要求 LaTeX 时可按技能产出
+  `.tex` 并调用 `export_document(format="latex" | "pdf")` 落盘/编译。
 
 ## 为什么不用 `dsh --profile`
 
@@ -44,6 +52,15 @@ $env:PAPEREAD_AGENT_COMPOSE = "full"
 
 ## 冒烟测试（不消耗真实额度）
 
+一键完整组合回归（自带假 LLM、临时 `DSH_HOME`、自动清理）：
+
+```powershell
+cd agent
+npm run test:full
+```
+
+手工最小组合：
+
 ```powershell
 # 终端 1：假 LLM
 node agent/test/mock-llm.mjs
@@ -67,14 +84,16 @@ agent/
   src/bin.mjs           # 直接 boot 入口
   minimal.yml           # A0 最小组合
   bundle/               # @paperead/dsh-research（host + tools）
+  skills/               # 内置技能（写综述、LaTeX 写作、找文献等）
   profiles/research/    # 完整组合的 profile 模板（暂未使用）
   test/mock-llm.mjs     # 假 DeepSeek SSE
-  test/spike-client.mjs # 冒烟客户端
+  test/spike-client.mjs # 最小组合冒烟客户端
+  test/full-regression.mjs # 完整组合回归
+  docs/                 # 接入 seam 笔记
 ```
 
 ## 已知限制
 
-- 完整组合已能启动，但 skills/todo/compaction/title 还没有逐项回归。
-- `agent.json` 握手文件由 Tauri 写入数据目录，Python 的 `/api/research/agent` 读取；A2 会换成正式代理。
+- 完整组合已回归 tools/todo/title/meta/resume/skills 发现；compaction 的深触发仍未覆盖
+  （compaction 需要真实上下文阈值，见 `docs/dsh-integration-notes.md` 的升级清单）。
 - 安装包体积与启动时间尚未在干净 Windows 上实测。
-- Tauri 端到端仍卡在现有 Python sidecar 的 `/api/health` 超时（不是 agent 本身）。

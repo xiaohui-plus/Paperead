@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Sidebar } from './Sidebar'
+import type { NavKey } from './Sidebar'
 import { SettingsDialog } from './SettingsDialog'
 import { ScholarDaily } from './ScholarDaily'
 import { ScholarDetail } from './ScholarDetail'
@@ -11,10 +12,12 @@ import {
   exportScholarPapers,
   getDaily,
   getScholarPaper,
+  getScholarSources,
   importScholarPaper,
   searchPapers,
   type DailyResponse,
   type ScholarPaper,
+  type ScholarSource,
   type SearchParams,
   type SearchResponse,
 } from '../lib/scholar'
@@ -22,7 +25,7 @@ import { readParams, readPid, writeParams } from '../lib/scholarUrl'
 
 interface Props {
   onOpenPaper: (id: string) => void
-  onNav: (key: 'library' | 'search') => void
+  onNav: (key: NavKey) => void
 }
 
 type Toast = { text: string; kind: 'ok' | 'err' } | null
@@ -42,6 +45,9 @@ export function ScholarPage({ onOpenPaper, onNav }: Props) {
   const [advanced, setAdvanced] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [toast, setToast] = useState<Toast>(null)
+  const [disabledSources, setDisabledSources] = useState<
+    Partial<Record<ScholarSource, string>>
+  >({})
 
   const [data, setData] = useState<SearchResponse | null>(null)
   const [searching, setSearching] = useState(false)
@@ -98,6 +104,26 @@ export function ScholarPage({ onOpenPaper, onNav }: Props) {
     writeParams(next, pidRef.current, 'replace')
     mainRef.current?.scrollTo({ top: 0 })
   }, [])
+
+  // 数据源可用性：CORE 需要文档方自行配置 API Key
+  useEffect(() => {
+    let alive = true
+    getScholarSources()
+      .then((result) => {
+        if (alive) setDisabledSources(result.disabled || {})
+      })
+      .catch(() => {
+        /* 可用性只是增强信息，取不到就按全部可用处理 */
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  // 地址栏里可能留着已经不可用的数据源（例如 Key 后来被移除）
+  useEffect(() => {
+    if (disabledSources[params.source]) update({ source: 'openalex' })
+  }, [disabledSources, params.source, update])
 
   // 输入停顿 450ms 自动检索；回车由表单立即提交
   useEffect(() => {
@@ -250,6 +276,8 @@ export function ScholarPage({ onOpenPaper, onNav }: Props) {
     : 0
   const highlightQuery = data?.translated ? data.used_query : params.q
   const hasQuery = params.q.trim().length > 0
+  // Semantic Scholar 与 CORE 的关键词检索接口不支持自定义排序
+  const showSorts = params.source !== 'semanticscholar' && params.source !== 'core'
 
   return (
     <div className="library">
@@ -282,6 +310,7 @@ export function ScholarPage({ onOpenPaper, onNav }: Props) {
               onToggleAdvanced={() => setAdvanced((value) => !value)}
               loading={searching}
               translatedQuery={data?.translated ? data.used_query : null}
+              disabledSources={disabledSources}
             />
 
             {!hasQuery ? (
@@ -304,19 +333,21 @@ export function ScholarPage({ onOpenPaper, onNav }: Props) {
                     )}
                     {searching && data ? <em>更新中…</em> : null}
                   </span>
-                  <div className="scholar-sorts">
-                    {SORT_META.filter((s) => params.source === 'arxiv' || s.k !== 'updated').map(
-                      (s) => (
-                        <button
-                          key={s.k}
-                          className={params.sort === s.k ? 'is-on' : ''}
-                          onClick={() => update({ sort: s.k })}
-                        >
-                          {s.l}
-                        </button>
-                      ),
-                    )}
-                  </div>
+                  {showSorts && (
+                    <div className="scholar-sorts">
+                      {SORT_META.filter((s) => params.source === 'arxiv' || s.k !== 'updated').map(
+                        (s) => (
+                          <button
+                            key={s.k}
+                            className={params.sort === s.k ? 'is-on' : ''}
+                            onClick={() => update({ sort: s.k })}
+                          >
+                            {s.l}
+                          </button>
+                        ),
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {data?.error && <p className="scholar-empty">{data.error}</p>}

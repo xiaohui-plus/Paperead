@@ -87,7 +87,7 @@ def test_saved_files_are_valid_json(store):
 @pytest.mark.parametrize("bad_version", [None, "1x"])
 def test_invalid_version_is_backed_up_and_reset(store, bad_version):
     store.profile_path.write_text(
-        json.dumps({"version": bad_version, "traits": {"depth": "x"}}),
+        json.dumps({"version": bad_version, "background": "旧背景"}),
         encoding="utf-8",
     )
     profile = store.profile()
@@ -95,7 +95,7 @@ def test_invalid_version_is_backed_up_and_reset(store, bad_version):
         "version": memlib.VERSION,
         "updated_at": 0.0,
         "turn_count": 0,
-        "traits": {},
+        "background": "",
     }
     backup = store.profile_path.with_name("profile.json.bak")
     assert backup.exists()
@@ -103,14 +103,14 @@ def test_invalid_version_is_backed_up_and_reset(store, bad_version):
 
 
 def test_overflow_version_is_backed_up(store):
-    store.profile_path.write_text('{"version": 1e400, "traits": {}}', encoding="utf-8")
+    store.profile_path.write_text('{"version": 1e400, "background": ""}', encoding="utf-8")
     assert store.profile()["version"] == memlib.VERSION
     backup = store.profile_path.with_name("profile.json.bak")
     assert backup.exists()
     assert json.loads(backup.read_text(encoding="utf-8"))["version"] == float("inf")
 
 
-def test_older_version_is_accepted_and_normalized(store):
+def test_legacy_traits_are_migrated_to_background(store):
     store.profile_path.write_text(
         json.dumps(
             {
@@ -121,7 +121,8 @@ def test_older_version_is_accepted_and_normalized(store):
                         "confidence": 0.6,
                         "evidence": ["x"],
                         "updated_at": 0,
-                    }
+                    },
+                    "goal": {"value": "用于自己的数据", "confidence": 0.8, "evidence": ["y"]},
                 },
             },
             ensure_ascii=False,
@@ -130,60 +131,37 @@ def test_older_version_is_accepted_and_normalized(store):
     )
     profile = store.profile()
     assert profile["version"] == memlib.VERSION
-    assert profile["traits"] == {
-        "depth": {
-            "value": "需要类比",
-            "confidence": 0.6,
-            "evidence": ["x"],
-            "updated_at": 0.0,
-        }
-    }
-    assert isinstance(profile["traits"]["depth"]["updated_at"], float)
+    assert profile["background"] == "需要类比；用于自己的数据"
+    assert "traits" not in profile
     assert not store.profile_path.with_name("profile.json.bak").exists()
 
 
-def test_profile_normalizes_and_drops_invalid_traits(store):
+def test_profile_normalizes_background(store):
     store.profile_path.write_text(
         json.dumps(
             {
                 "version": memlib.VERSION,
-                "traits": {
-                    "depth": {
-                        "value": "  需要类比  ",
-                        "confidence": 1.7,
-                        "evidence": ["a", "b", "c", "d"],
-                        "updated_at": "3.5",
-                    },
-                    "goal": "想用于自己的数据",
-                    "favorite_color": {
-                        "value": "蓝色",
-                        "confidence": 0.6,
-                        "evidence": ["x"],
-                        "updated_at": 0,
-                    },
-                    "language": {"value": "中", "confidence": 0.6, "evidence": ["x"]},
-                    "answer_style": {"value": "先给结论", "evidence": "not a list"},
-                    "math_comfort": ["不是字典"],
-                },
+                "background": "  第一行\n第二行  \x00  ",
             },
             ensure_ascii=False,
         ),
         encoding="utf-8",
     )
-    traits = store.profile()["traits"]
-    assert set(traits) == {"depth", "answer_style"}
-    assert traits["depth"] == {
-        "value": "需要类比",
-        "confidence": 0.9,
-        "evidence": ["b", "c", "d"],
-        "updated_at": 3.5,
-    }
-    assert traits["answer_style"] == {
-        "value": "先给结论",
-        "confidence": 0.5,
-        "evidence": [],
-        "updated_at": 0.0,
-    }
+    assert store.profile()["background"] == "第一行 第二行"
+
+    store.profile_path.write_text(
+        json.dumps({"version": memlib.VERSION, "background": 42}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    assert store.profile()["background"] == ""
+
+    store.profile_path.write_text(
+        json.dumps({"version": memlib.VERSION, "background": "长" * 450}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    background = store.profile()["background"]
+    assert len(background) == memlib.BACKGROUND_LIMIT
+    assert background.endswith("…")
 
 
 @pytest.mark.parametrize("turn_count", ["x", 1e400])
@@ -194,7 +172,6 @@ def test_profile_normalizes_turn_count_and_updated_at(store, turn_count):
                 "version": memlib.VERSION,
                 "turn_count": turn_count,
                 "updated_at": "bad",
-                "traits": {},
             }
         ),
         encoding="utf-8",
@@ -559,29 +536,25 @@ def test_recent_before_n_zero_returns_empty(store):
     assert store.recent_before("p1", user["id"], -2) == []
 
 
-def test_merge_trait_updates_confidence_conservatively(store):
-    store.apply_patch(
-        "p1",
-        {"traits": [{"key": "depth", "value": "需要类比", "confidence": 0.6, "evidence": "要求类比"}]},
-    )
-    first = store.profile()["traits"]["depth"]
-    assert first["value"] == "需要类比"
-    assert first["confidence"] == pytest.approx(0.6, abs=0.01)
+def test_merge_background_replaces_free_text(store):
+    store.apply_patch("p1", {"background": "  生物信息背景，需要类比  "})
+    assert store.profile()["background"] == "生物信息背景，需要类比"
 
     store.apply_patch(
         "p1",
-        {"traits": [{"key": "depth", "value": "需要类比和前置", "confidence": 0.9, "evidence": "再次要求"}]},
+        {"background": "生物信息背景，需要类比；目的是判断方法能否用于自己的数据"},
     )
-    second = store.profile()["traits"]["depth"]
-    # 0.6*0.6 + 0.4*0.9 = 0.72，单轮变化不超过 ±0.2
-    assert second["confidence"] == pytest.approx(0.72, abs=0.01)
-    assert len(second["evidence"]) == 2
+    assert (
+        store.profile()["background"]
+        == "生物信息背景，需要类比；目的是判断方法能否用于自己的数据"
+    )
 
 
-def test_merge_rejects_unknown_trait_and_empty_evidence(store):
-    store.apply_patch("p1", {"traits": [{"key": "favorite_color", "value": "blue", "confidence": 0.9, "evidence": "x"}]})
-    store.apply_patch("p1", {"traits": [{"key": "depth", "value": "需要类比", "confidence": 0.9, "evidence": ""}]})
-    assert store.profile()["traits"] == {}
+def test_merge_rejects_invalid_background(store):
+    store.apply_patch("p1", {"background": "旧背景"})
+    for value in (None, 42, ["条目"], "", "   "):
+        store.apply_patch("p1", {"background": value})
+    assert store.profile()["background"] == "旧背景"
 
 
 def test_concept_state_can_go_up_but_not_down_without_explicit(store):
@@ -650,16 +623,7 @@ def test_merge_rejects_non_string_patch_fields(store):
     store.apply_patch(
         "p1",
         {
-            "traits": [
-                {"key": "depth", "value": None, "confidence": 0.6, "evidence": "x"},
-                {"key": 123, "value": "需要类比", "confidence": 0.6, "evidence": "x"},
-                {
-                    "key": "goal",
-                    "value": "用于单细胞数据",
-                    "confidence": 0.6,
-                    "evidence": {"quote": "x"},
-                },
-            ],
+            "background": {"text": "用户需要类比"},
             "concepts": [
                 {"name": None, "state": "learning", "evidence": "x"},
                 {"name": "消息传递", "state": True, "evidence": "x"},
@@ -673,7 +637,7 @@ def test_merge_rejects_non_string_patch_fields(store):
             "card": {"one_liner": 123, "domains": [{"bad": 1}, None, 7]},
         },
     )
-    assert store.profile()["traits"] == {}
+    assert store.profile()["background"] == ""
     assert store.concepts()["concepts"] == []
     assert store.chat("p1")["card"]["facts"] == []
     assert store.chat("p1")["card"]["summary"] == ""
@@ -930,30 +894,26 @@ def test_brief_includes_profile_concepts_and_card(store):
     store.apply_patch(
         "p1",
         {
-            "traits": [{"key": "depth", "value": "需要类比", "confidence": 0.8, "evidence": "要求类比"}],
+            "background": "生物信息背景，需要类比，习惯先看结论",
             "concepts": [{"name": "消息传递", "state": "understood", "evidence": "懂了", "explicit": True}],
             "summary": "用户已经理解了消息传递，正在关心 BST 的时间复杂度，还没有搞懂与 SEAL 的对比是否公平。",
         },
     )
     brief = store.build_brief("p1", "消息传递在 BST 里怎么用？")
-    assert "理解深度：需要类比" in brief
+    assert "【关于读者】" in brief
+    assert "生物信息背景，需要类比，习惯先看结论" in brief
     assert "消息传递：已懂" in brief
     assert "BST 的时间复杂度" in brief
 
 
-def test_brief_omits_stale_low_confidence_trait(store):
+def test_brief_keeps_background_regardless_of_age(store):
     old = memlib._now() - 400 * 86400
     profile = store.profile()
-    profile["traits"]["goal"] = {
-        "value": "判断能否用于自己的数据",
-        "confidence": 0.8,
-        "evidence": ["x"],
-        "updated_at": old,
-    }
+    profile["background"] = "判断能否用于自己的数据"
     profile["updated_at"] = old
     memlib._atomic_write(store.profile_path, profile)
     brief = store.build_brief("p1", "这篇能用在单细胞数据上吗")
-    assert "判断能否用于自己的数据" not in brief
+    assert "判断能否用于自己的数据" in brief
 
 
 def test_brief_retrieves_old_turn(store):
@@ -1032,11 +992,7 @@ def test_brief_tolerates_malformed_other_paper(store):
 
 
 def test_brief_stays_within_budget(store):
-    for key in memlib.TRAIT_KEYS:
-        store.apply_patch(
-            "p1",
-            {"traits": [{"key": key, "value": "特" * 40, "confidence": 0.9, "evidence": "x"}]},
-        )
+    store.apply_patch("p1", {"background": "背" * 400})
 
     concept_names = ["概" * 39 + str(i) for i in range(4)]
     store.apply_patch(
@@ -1077,9 +1033,9 @@ def test_brief_stays_within_budget(store):
         )
 
     brief = store.build_brief("p1", base_question, exclude_message_id=current["id"])
-    assert len(brief) <= 1300
+    assert len(brief) <= 1500
     caps = {
-        "【关于读者】": 200,
+        "【关于读者】": 400,
         "【概念理解】": 160,
         "【这篇聊到哪】": 300,
         "【此前问答】": 450,

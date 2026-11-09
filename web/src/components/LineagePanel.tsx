@@ -82,7 +82,7 @@ export function LineagePanel({ paperId, onOpenSettings, settingsVersion = 0 }: P
       <div className="guide">
         <div className="guide-loading">
           <div className="spinner" />
-          正在梳理：找出本文从哪些论文获得了启发…
+          正在梳理：结合引用位置与文献标题推断思路来源…
         </div>
       </div>
     )
@@ -118,11 +118,16 @@ export function LineagePanel({ paperId, onOpenSettings, settingsVersion = 0 }: P
   }
 
   if (!data || data.nodes.length === 0) {
+    const parsed = data?.stats
     return (
       <div className="guide">
         <div className="guide-empty">
           <b>没有找到明确的启发关系</b>
-          <span>这篇论文的引用多是罗列式的，无法判断每篇的具体作用。</span>
+          <span>
+            {parsed
+              ? `已解析 ${parsed.references} 篇参考文献、${parsed.uniqueCitations} 个引用，但没有找到足以判断关系的线索。`
+              : '这篇论文的引用多是罗列式的，无法判断每篇的具体作用。'}
+          </span>
           <button className="btn" onClick={() => generate(true)}>
             重新分析
           </button>
@@ -133,7 +138,9 @@ export function LineagePanel({ paperId, onOpenSettings, settingsVersion = 0 }: P
 
   return (
     <div className="lineage">
-      <p className="lineage-hint">按年份从旧到新。点任意一条看它给了本文什么、本文改了什么。</p>
+      <p className="lineage-hint">
+        作者通常不会直说借鉴关系。这里结合引用位置、文献标题与上下文推断；标注「推断」的条目可信度较低，点开可看原文依据。
+      </p>
 
       <div className="lineage-rail">
         {data.nodes.map((n: LineageNode) => (
@@ -144,6 +151,11 @@ export function LineagePanel({ paperId, onOpenSettings, settingsVersion = 0 }: P
                 <span className="ln-dot" />
                 <span className="ln-title">{n.title}</span>
                 <span className="ln-role">{n.roleLabel}</span>
+                {n.confidence && n.confidence !== 'high' && (
+                  <span className={`ln-conf ${n.confidence}`}>
+                    {n.confidence === 'low' ? '低置信' : '推断'}
+                  </span>
+                )}
               </button>
               <p className="ln-borrow">{n.borrow}</p>
 
@@ -157,7 +169,7 @@ export function LineagePanel({ paperId, onOpenSettings, settingsVersion = 0 }: P
                   )}
                   {n.evidence && (
                     <p className="ln-evidence">
-                      <b>原文依据</b>
+                      <b>{n.confidence === 'high' ? '原文依据' : '引用上下文'}</b>
                       “{n.evidence}”
                     </p>
                   )}

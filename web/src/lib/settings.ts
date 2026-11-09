@@ -637,6 +637,23 @@ export function visionModel(): ModelProfile | null {
   return readyModel(loadModelSettings(), 'vision')
 }
 
+/**
+ * 把识图模型配置推给本地服务，供解析阶段把公式裁图转成 LaTeX。
+ * 服务端只放在内存里，不落盘；本地服务没起时静默忽略。
+ */
+export async function syncVisionConfig(): Promise<void> {
+  try {
+    const model = visionModel()
+    await fetch('/api/config/vision', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config: model ? toPayload(model) : null }),
+    })
+  } catch {
+    // 本地服务未启动：下次启动或保存设置时会再同步
+  }
+}
+
 export function isAnswerConfigured(): boolean {
   return Boolean(answerModel())
 }

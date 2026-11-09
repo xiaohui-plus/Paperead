@@ -16,22 +16,22 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub struct AgentSidecar {
     pub child: Child,
-    pub port: u16,
     pub token: String,
-    info_path: PathBuf,
     #[cfg(windows)]
     job: Option<isize>,
 }
 
 impl AgentSidecar {
+    /// The endpoint is reserved by the caller (`main`) before the Python sidecar
+    /// starts, so the proxy can be configured through the environment.
     pub fn start(
         app: &AppHandle,
         python_port: u16,
         python_token: &str,
         data_dir: &Path,
+        port: u16,
+        token: String,
     ) -> Result<Self, String> {
-        let port = free_port()?;
-        let token = random_token();
         let agent_dir = agent_dir(app)?;
         let bin = agent_dir.join("src").join("bin.mjs");
         if !bin.is_file() {
@@ -59,9 +59,11 @@ impl AgentSidecar {
 
         let node = node_path(&agent_dir);
         let llm_key = paths::var("PAPEREAD_LLM_KEY")
+            .or_else(|| paths::var("PAPEREAD_API_KEY"))
             .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok())
             .unwrap_or_default();
         let llm_base = paths::var("PAPEREAD_LLM_BASE")
+            .or_else(|| paths::var("PAPEREAD_BASE_URL"))
             .unwrap_or_else(|| "https://api.deepseek.com".into());
         let model = paths::var("PAPEREAD_MODEL")
             .unwrap_or_else(|| "deepseek-v4-flash".into());
@@ -104,12 +106,9 @@ impl AgentSidecar {
             .spawn()
             .map_err(|error| format!("启动研究 agent 失败：{error}"))?;
         let job = assign_job(&child);
-        let info_path = data_dir.join("agent.json");
         let mut sidecar = Self {
             child,
-            port,
             token,
-            info_path,
             #[cfg(windows)]
             job,
         };
@@ -118,14 +117,6 @@ impl AgentSidecar {
         loop {
             let last_error = match api::agent_health(port, &sidecar.token) {
                 Ok(value) if value["ok"].as_bool() == Some(true) => {
-                    let info = serde_json::json!({
-                        "port": sidecar.port,
-                        "token": sidecar.token,
-                        "pid": sidecar.child.id(),
-                    });
-                    if let Err(error) = fs::write(&sidecar.info_path, info.to_string()) {
-                        paths::log_line(app, &format!("write agent.json failed: {error}"));
-                    }
                     paths::log_line(app, "agent ready");
                     return Ok(sidecar);
                 }
@@ -144,7 +135,6 @@ impl AgentSidecar {
     }
 
     pub fn stop(&mut self) {
-        let _ = fs::remove_file(&self.info_path);
         #[cfg(windows)]
         if let Some(raw) = self.job.take() {
             unsafe {
@@ -166,7 +156,7 @@ impl Drop for AgentSidecar {
     }
 }
 
-fn free_port() -> Result<u16, String> {
+pub fn free_port() -> Result<u16, String> {
     let listener =
         TcpListener::bind("127.0.0.1:0").map_err(|error| format!("找不到空闲端口：{error}"))?;
     let port = listener
@@ -177,7 +167,7 @@ fn free_port() -> Result<u16, String> {
     Ok(port)
 }
 
-fn random_token() -> String {
+pub fn random_token() -> String {
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()

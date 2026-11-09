@@ -221,10 +221,45 @@ def test_fulltext_error_is_reported(client, monkeypatch):
     async def boom(_doi):
         raise FriendlyError("免费全文查询服务暂时不可用（429），请稍后重试。", True)
 
+    async def no_pdf(_doi):
+        return None
+
     monkeypatch.setattr(search_mod, "find_free_full_text", boom)
+    monkeypatch.setattr(search_mod, "find_s2_open_pdf", no_pdf)
+    monkeypatch.setattr(search_mod, "find_core_pdf", no_pdf)
     body = client.get("/api/scholar/fulltext", params={"doi": "10.1/x"}).json()
     assert body["pdf_url"] is None
     assert "429" in body["error"]
+
+
+def test_fulltext_falls_back_to_semantic_scholar(client, monkeypatch):
+    async def empty(_doi):
+        return {
+            "pdf_url": None,
+            "pdf_urls": [],
+            "landing_url": None,
+            "oa_status": None,
+            "error": None,
+        }
+
+    async def s2(_doi):
+        return "https://s2/pdf"
+
+    async def no_core(_doi):
+        return None
+
+    monkeypatch.setattr(search_mod, "find_free_full_text", empty)
+    monkeypatch.setattr(search_mod, "find_s2_open_pdf", s2)
+    monkeypatch.setattr(search_mod, "find_core_pdf", no_core)
+    body = client.get("/api/scholar/fulltext", params={"doi": "10.1/x"}).json()
+    assert body["pdf_url"] == "https://s2/pdf"
+    assert body["error"] is None
+
+
+def test_sources_reports_disabled_core(client, monkeypatch):
+    monkeypatch.delenv("PAPEREAD_CORE_API_KEY", raising=False)
+    body = client.get("/api/scholar/sources").json()
+    assert "core" in body["disabled"]
 
 
 def test_import_falls_back_to_next_pdf_candidate(client, library, monkeypatch):

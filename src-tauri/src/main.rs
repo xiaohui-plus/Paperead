@@ -41,7 +41,15 @@ fn main() {
         .setup(|app| {
             let handle = app.handle().clone();
             let data_dir = paths::ensure_data_dir(&handle);
-            let sidecar = match Sidecar::start(&handle) {
+            // Reserve the research-agent endpoint before Python starts so the
+            // proxy can be configured by environment instead of a file.
+            let agent_endpoint = agent_sidecar::free_port()
+                .map(|port| (port, agent_sidecar::random_token()))
+                .map_err(|error| {
+                    paths::log_line(&handle, &format!("reserve agent port failed: {error}"));
+                })
+                .ok();
+            let sidecar = match Sidecar::start(&handle, agent_endpoint.clone()) {
                 Ok(sidecar) => sidecar,
                 Err(error) => {
                     paths::log_line(&handle, &format!("start failed: {error}"));
@@ -58,13 +66,18 @@ fn main() {
             let port = sidecar.port;
             let token = sidecar.token.clone();
 
-            let agent = match AgentSidecar::start(&handle, port, &token, &data_dir) {
-                Ok(agent) => Some(agent),
-                Err(error) => {
-                    // Research is optional: the library and reader must still open.
-                    paths::log_line(&handle, &format!("agent start failed: {error}"));
-                    None
+            let agent = match agent_endpoint {
+                Some((agent_port, agent_token)) => {
+                    match AgentSidecar::start(&handle, port, &token, &data_dir, agent_port, agent_token) {
+                        Ok(agent) => Some(agent),
+                        Err(error) => {
+                            // Research is optional: the library and reader must still open.
+                            paths::log_line(&handle, &format!("agent start failed: {error}"));
+                            None
+                        }
+                    }
                 }
+                None => None,
             };
 
             app.manage(AppState {

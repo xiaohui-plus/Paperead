@@ -31,7 +31,10 @@ pub struct Sidecar {
 }
 
 impl Sidecar {
-    pub fn start(app: &AppHandle) -> Result<Self, String> {
+    /// `agent` is the already-reserved research-agent endpoint. It is injected
+    /// into the Python process environment so the proxy can reach the agent
+    /// without a handshake file on disk.
+    pub fn start(app: &AppHandle, agent: Option<(u16, String)>) -> Result<Self, String> {
         let data_dir = paths::ensure_data_dir(app);
         let port = free_port()?;
         let token = random_token();
@@ -64,6 +67,11 @@ impl Sidecar {
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
+        if let Some((agent_port, agent_token)) = agent {
+            command
+                .env("PAPEREAD_AGENT_PORT", agent_port.to_string())
+                .env("PAPEREAD_AGENT_TOKEN", agent_token);
+        }
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
 

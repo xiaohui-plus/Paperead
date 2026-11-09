@@ -1,6 +1,6 @@
 # Paperead 研究功能技术方案
 
-> 版本：v0.3（外部检索改为复用 Scolar_search）  
+> 版本：v0.5（新增 §22 导航与项目结构；§21 六类能力设计；无额度/计费/用量）  
 > 日期：2026-11-08  
 > 状态：设计已确认，搜索接入等待中；其余部分可实施  
 > 关联：`docs/design-tutor.md`、`docs/desktop.md`、DSH `0.1.0-rc.6`、`F:\Project\Scolar_search`  
@@ -35,7 +35,7 @@
 - **整理文献**：去重、主题聚类、打标签、生成阅读清单。
 - **写综述报告**：大纲 → 证据表 → 分节起草 → 引用核验 → 导出（docx 优先）。
 - **参考文献引用助手**：逐条核验、给出修正建议、导出 bib。
-- **工程属性**：可中断、可恢复、可观测、成本可控、引用不编造。
+- **工程属性**：可中断、可恢复、可观测、引用不编造。
 
 ### 1.2 非目标（v1 明确不做）
 
@@ -157,7 +157,7 @@ flowchart LR
 | 进程 | 职责 | 不做什么 |
 |---|---|---|
 | **React（Tauri WebView）** | 页面、状态机、SSE 渲染、引用解析 | 不直接调模型/检索，不存密钥 |
-| **Python FastAPI** | 项目/文献/产物/来源/用量的系统记录；本地库检索；PDF 解析；对外 API；SSE 代理 | 不跑 agent loop；不重写外部 provider |
+| **Python FastAPI** | 项目/文献/产物/来源的系统记录；本地库检索；PDF 解析；对外 API；SSE 代理 | 不跑 agent loop；不重写外部 provider |
 | **Node agent host** | DSH 组合、会话生命周期、工具、事件投影、SSE；直接写项目 `artifacts/` | 不直接读写文献库 PDF/blocks（走 Python） |
 | **Scolar_search** | arXiv/PubMed/OpenAlex/Europe PMC 检索、详情、OA 全文、引用格式 | 等接入后按其现有能力用，不重复建设 |
 | **DSH 内核** | 模型请求、工具编排、压缩、持久化、恢复 | 产品语义 |
@@ -171,7 +171,7 @@ flowchart LR
 5. 工具（如 `academic_search`）调用 `SearchBackend`：接入后走 Scolar_search（A. TS 包 / B. HTTP），现在走 FakeBackend；本地库检索走 Python。适配层负责多源合并与来源注册。
 6. Node 把工具结果交给模型；模型继续调用或给出最终回答。
 7. Node 把 DSH 事件投影成产品 SSE，Python 原样转发给前端。
-8. 轮次结束：Node 把 usage / sources / artifact 写回 Python 索引；前端显示“已处理 47 秒”。
+8. 轮次结束：Node 把 sources / artifact 写回 Python 索引；前端显示“已处理 47 秒”。
 
 ### 4.3 为什么一个 Node host 服务所有项目
 
@@ -925,18 +925,6 @@ CREATE TABLE artifacts (
   meta TEXT NOT NULL DEFAULT '{}'
 );
 
-CREATE TABLE usage (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id TEXT NOT NULL,
-  turn INTEGER,
-  model TEXT,
-  prompt_tokens INTEGER NOT NULL DEFAULT 0,
-  cached_tokens INTEGER NOT NULL DEFAULT 0,
-  completion_tokens INTEGER NOT NULL DEFAULT 0,
-  reasoning_tokens INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL
-);
-
 CREATE TABLE search_cache (
   key TEXT PRIMARY KEY,
   payload TEXT NOT NULL,
@@ -965,7 +953,6 @@ CREATE VIRTUAL TABLE blocks_fts USING fts5(
 - **会话与消息**：DSH zstd jsonl 是唯一真源；`sessions` 表只存标题、状态、时间等索引。
 - **来源注册表**：`tool/result.meta.sources` 是回放真源；`session_sources` 是查询/导出的索引。
 - **项目/文献/产物**：SQLite + 文件系统。
-- **用量**：`turn/end` 后由 Host 写 `usage`。
 
 ---
 
@@ -977,7 +964,7 @@ CREATE VIRTUAL TABLE blocks_fts USING fts5(
 type ResearchEvent =
   | { seq: number; type: 'turn.start'; turn: number; at: number }
   | { seq: number; type: 'turn.end'; turn: number; status: 'ok'|'error'|'aborted';
-      durationMs: number; usage?: Usage }
+      durationMs: number }
   | { seq: number; type: 'reasoning.delta'; turn: number; step: number; text: string }
   | { seq: number; type: 'text.delta'; turn: number; step: number; text: string }
   | { seq: number; type: 'tool.draft'; callId: string; name: string;
@@ -1049,17 +1036,20 @@ idle
 **路由（不改现有默认页）**：
 
 - `/`、`/?p=` 保持现状：文献库 / 阅读页。
-- `/?view=research` 进入研究首页。
-- `/?view=project&id=<projectId>` 进入项目页。
-- 现有 `Sidebar` 增加“研究”一级入口；研究区内部再用 `ResearchShell` 的二级导航（研究 / 写综述 / 引用助手 / 项目）。
+- `/?view=research` 进入研究首页，`/?view=review` 进入写综述报告首页。
+- `/?view=project&id=<projectId>` 进入项目页；返回目标由项目的 `kind` 决定（`research` → 研究首页，`review` → 写综述报告首页）。
+- 侧栏是全局一级导航；**研究与写综述各自在侧栏下方显示本功能的项目列表，侧栏不出现任何会话**（详见 §22）。
 - 不做服务端路由改造：仍然由 Python 托管 `web/dist`，`view` 走 query，避免破坏现有深链。
 
 ```
 web/src/research/
-  ResearchShell.tsx          # 二级导航 + 路由壳
-  ResearchHome.tsx           # 研究首页（/?view=research）
-  ProjectPage.tsx            # 项目页
-  ProjectSidebar.tsx         # 文件 / 会话
+  ResearchShell.tsx          # 全局侧栏 + 页面路由壳
+  SidebarProjects.tsx        # 侧栏“项目”分区（按 kind 过滤、+ 新建）
+  ResearchHome.tsx           # 研究首页（?view=research）
+  ReviewHome.tsx             # 写综述报告首页（?view=review）
+  ProjectPage.tsx            # 项目页（?view=project）
+  ProjectRail.tsx            # 项目页左栏：文件 / 会话
+  ProjectFileTree.tsx        # 文件夹树（展开/折叠/预览）
   SessionList.tsx
   Composer.tsx               # @ / $ / 附件 / 停止
   MentionMenu.tsx
@@ -1093,13 +1083,13 @@ web/src/lib/
 
 | 截图元素 | 实现 |
 |---|---|
-| 左侧 `主页 / 研究 / 文献库 / 写综述报告 / 参考文献引用助手 / 项目` | 现有 `Sidebar` 增加“研究”入口；研究区内部二级导航（不改默认首页） |
+| 左侧 `主页 / 研究 / 文献库 / 写综述报告 / 参考文献引用助手 / 项目` | 全局 `Sidebar`；研究与写综述各自在下方显示本功能的项目列表（§22），不列会话 |
 | 大标题“快速开始，或切换项目继续研究” | `ResearchHome` hero |
 | `在项目 / 新项目 / 继续` 分段 | 项目选择器（新项目=创建，继续=最近会话） |
 | 输入框 `描述研究任务，@添加文献、文件夹或项目文件，$调用技能` | `Composer` + `MentionMenu` + `SkillMenu` |
 | 六个快捷动作 | `QuickActions` → 创建会话 + 预置技能/提示词 |
 | 大家都在搜 | `TrendingQueries`（可配置，不依赖遥测） |
-| 项目页 `文件 / 会话` | `ProjectSidebar` 两个 tab |
+| 项目页 `文件 / 会话` | `ProjectRail` 两个 tab；文件为文件夹树，会话按时间倒序 |
 | 会话列表 `46秒 / 5分` | 相对时间，30s 刷新 |
 | “已处理 47 秒” | `TurnHeader`，来自 `turn.end.durationMs` |
 | 叙述段落 | `text.delta` 流式 markdown |
@@ -1134,11 +1124,11 @@ web/src/lib/
 
 ### 10.8 研究首页 / 项目页 / 写作 / 引用助手
 
-**研究首页**（`/?view=research`）：hero + 项目分段 + composer + 六个快捷动作 + 热门问题 + 最近项目（有项目时）。
+**研究首页**（`/?view=research`）：全局侧栏（下方只列研究项目）+ hero + 项目分段 + composer + 六个快捷动作 + 热门问题。
 
-**项目页**：顶栏（返回、项目名、文件/会话切换、设置）；左栏 280px；主区对话；右侧可拉出的“来源 / 产物 / 计划”抽屉。
+**项目页**（`/?view=project&id=...`）：脱离全局侧栏，左栏是本项目的 `文件 / 会话`；顶栏（返回、可编辑项目名、更多）；主区对话；右侧可拉出的“来源 / 产物 / 计划”抽屉。返回落到项目 `kind` 对应的功能首页。
 
-**写综述报告**：选择项目/主题/篇幅/引用风格 → 创建 `write-review` 会话 → 主区对话，右侧 `ArtifactPanel` 实时预览 `artifacts/review.md`，顶部显示大纲进度；导出顺序 **docx（主）→ md（源文件）→ bib（参考文献）**，PDF/LaTeX 放后续。
+**写综述报告**（`/?view=review`）：与首页同构，但侧栏下方只列 `kind='review'` 的项目；进入项目后主区对话，右侧 `ArtifactPanel` 实时预览 `artifacts/review.md`，顶部显示大纲进度；导出顺序 **docx（主）→ md（源文件）→ bib（参考文献）**，PDF/LaTeX 放后续。
 
 **引用助手**：独立页面，上传 docx/pdf → 解析参考文献 → 表格（状态/候选/建议）→ “生成修正后的参考文献” → 导出。
 
@@ -1152,8 +1142,12 @@ web/src/lib/
 |---|---|---|
 | `GET` | `/api/research/health` | agent 是否就绪、版本、模型 |
 | `GET` | `/api/research/home` | 最近项目、最近会话、快捷动作、热门问题 |
-| `POST` | `/api/research/projects` | 创建项目 |
+| `GET` | `/api/research/projects?kind=research\|review` | 按功能列项目（侧栏数据源，按 `updated_at` 倒序） |
+| `POST` | `/api/research/projects` | 创建项目（`kind` 必填，`name` 可缺省为“新项目”） |
 | `GET/PATCH/DELETE` | `/api/research/projects/{id}` | 项目详情/改名/归档 |
+| `GET` | `/api/research/projects/{id}/files` | 文件与文件夹扁平列表（含 `parent_id`，前端建树） |
+| `POST` | `/api/research/projects/{id}/files` | 上传文件 |
+| `POST` | `/api/research/projects/{id}/folders` | 新建文件夹 |
 | `GET` | `/api/research/projects/{id}/sessions` | 会话列表 |
 | `POST` | `/api/research/projects/{id}/sessions` | 新建会话 |
 | `GET` | `/api/research/sessions/{id}` | 会话详情 |
@@ -1162,7 +1156,6 @@ web/src/lib/
 | `POST` | `/api/research/sessions/{id}/messages` | 发消息，202 |
 | `POST` | `/api/research/sessions/{id}/cancel` | 停止 |
 | `POST` | `/api/research/sessions/{id}/fork` | 从某个 turn 分叉（重新生成） |
-| `POST` | `/api/research/projects/{id}/files` | 上传文件 |
 | `GET` | `/api/research/projects/{id}/artifacts` | 产物列表 |
 | `GET` | `/api/research/artifacts/{id}` | 产物内容 |
 | `GET` | `/api/research/skills` | 技能目录（`$` 菜单） |
@@ -1188,7 +1181,7 @@ data: {"seq":128,"type":"tool.end","callId":"c7","status":"ok","durationMs":3210
 | `POST` | `/internal/papers/{id}/read` | 段落读取 |
 | `POST` | `/internal/citations/check` | 引用核验 |
 | `GET` | `/internal/projects/{id}/context` | 项目简报/库统计 |
-| `POST` | `/internal/sessions/{id}/turn` | 轮次结束回写 usage/sources |
+| `POST` | `/internal/sessions/{id}/turn` | 轮次结束回写 sources/artifact |
 | `POST` | `/internal/artifacts` | 产物索引 |
 
 鉴权：`X-Paperead-Token` + 仅回环 + `Origin` 校验（内部请求无 Origin，用 token）。
@@ -1217,7 +1210,7 @@ sequenceDiagram
   N-->>W: SSE tool.end + sources
   N->>N: 模型筛选/读全文/组织答案
   N-->>W: text.delta + [[S1]]
-  N-->>W: turn.end（耗时/用量）
+  N-->>W: turn.end（耗时）
 ```
 
 ### 12.2 整理文献
@@ -1249,7 +1242,7 @@ UI：表格（题名/年份/主题/理由/顺序），可勾选加入项目、�
 
 ---
 
-## 13. 可靠性与成本
+## 13. 可靠性与运行边界
 
 ### 13.1 超时
 
@@ -1257,28 +1250,19 @@ UI：表格（题名/年份/主题/理由/顺序），可勾选加入项目、�
 |---|---|
 | LLM 请求 | 300s（DSH 适配器默认，流空闲超时） |
 | 单源检索（Scolar_search） | 8–12s |
-| 工具总预算 | 20s（检索）/ 30s（读）/ 90s（入库）/ 20s（核验） |
+| 工具超时 | 20s（检索）/ 30s（读）/ 90s（入库）/ 20s（核验） |
 | 单轮 | 15 分钟硬上限；“深度研究”30 分钟 |
 | SSE 心跳 | 15s |
 | agent 启动健康检查 | 20s |
 
-### 13.2 预算与上限
+### 13.2 运行边界（非计费）
 
-- 每轮默认最多 **30 次工具调用、40 次模型请求、15 分钟**。
-- “深度研究”模式：60 次工具 / 80 次模型 / 30 分钟；用户可在设置里调低，不鼓励调高。
 - 单次检索最多 30 条；进入上下文的摘要每条 ≤ 1200 字。
 - 单轮上下文目标 ≤ 80k tokens；超过交给 DSH 压缩。
 - 搜索结果缓存命中率目标 ≥ 40%（同一主题重复研究）。
+- **不做额度、计费、会员和用量统计配置**；只保留超时与并发保护。
 
-### 13.3 成本估算
-
-以 V4 Flash 为主、Pro 只用于综述/深度分析：
-
-- 一次“找文献”：6–10 次模型调用 + 5–10 次检索，约 5–10 万输入 token、5–10k 输出；量级在“几毛到 1 元”。
-- 一次综述：3–6 万输出 token + 多轮检索，量级在“2–5 元”。
-- 具体价格以 DeepSeek 当期价目为准；产品设置里给“本轮估算”，不做硬编码。
-
-### 13.4 并发
+### 13.3 并发
 
 - 同一会话同时只允许一个活跃 turn；运行中再发送 → 排队（`followup`）或提示“先停止”。
 - 不同会话可并行；全局最多 4 个活跃 turn，避免 API 限流。
@@ -1375,7 +1359,7 @@ CI 里增加 agent 单测 + 一次 `--dump-config` 冒烟。
 | **M1.5 Scolar_search 接入** | 1–2 周 | A. TS 包 / B. HTTP seam、`ScolarSearchBackend`、真实 `academic_search`、`paper_get`、合法全文入口、契约测试 | 用真实 Scolar_search 跑“肝癌治疗”主题：题名/年份/DOI 正确，源失败可降级，结果卡片完整 |
 | **M2 整理与入库** | 2 周 | `paper_ingest`、`citation_check`、产物、`organize-library`、`reading-list.md`、引用格式复用 | 10 篇 OA 入库、去重、生成带理由的阅读清单；引用核验能识别年份/作者/DOI 错误 |
 | **M3 综述与引用助手** | 3 周 | `write-review`、证据表、分节落盘、`ArtifactPanel`、docx/bib 导出、引用助手页面、memory 接入 | 生成 3000 字综述，≥30 条已核验引用，导出 docx，未核实引用为 0 |
-| **M4 质量与规模化** | 2 周 | 子代理并行筛选、评测集、成本面板、崩溃恢复、性能优化、文档 | 30 个主题评测达标；p95 延迟与单轮成本在预算内 |
+| **M4 质量与规模化** | 2 周 | 子代理并行筛选、评测集、崩溃恢复、性能优化、文档 | 30 个主题评测达标；p95 延迟达标 |
 
 **团队**：1 名前端（React/交互）、1 名后端（Python/数据）、1 名 Node/DSH 集成（可与后端同一人）、0.5 名 Rust/Tauri/打包、1 名领域评测（兼职）。  
 **总量**：2 人约 11–13 周（含 M1.5 等接入）；单人约 18–22 周。
@@ -1400,7 +1384,7 @@ CI 里增加 agent 单测 + 一次 `--dump-config` 冒烟。
 
 ### 17.2 集成
 
-- 假 LLM：一个 OpenAI 兼容的 SSE server，按脚本返回“先 reasoning、再 tool_call、再 text”，让 E2E 可重复、零成本。
+- 假 LLM：一个 OpenAI 兼容的 SSE server，按脚本返回“先 reasoning、再 tool_call、再 text”，让 E2E 可重复、零外部调用。
 - 假 provider：本地 HTTP fixture，覆盖超时、429、空结果、字段缺失。
 
 ### 17.3 E2E（Playwright）
@@ -1412,7 +1396,7 @@ CI 里增加 agent 单测 + 一次 `--dump-config` 冒烟。
 ### 17.4 评测集
 
 - 30 个主题（CS / 生物医学 / 临床各 10），每个主题 5–10 篇“必须命中”的论文。
-- 指标：Recall@20、nDCG@10、可核查来源比例、阅读顺序合理性（人工 1–5）、p50/p95 延迟、单轮成本。
+- 指标：Recall@20、nDCG@10、可核查来源比例、阅读顺序合理性（人工 1–5）、p50/p95 延迟。
 - 引用核验：100 条真实参考文献 + 20 条人为破坏（错年/错作者/假 DOI），看 precision/recall。
 - 综述：结构、覆盖、引用密度、未核实引用数、人工评分。
 
@@ -1433,7 +1417,7 @@ CI 里增加 agent 单测 + 一次 `--dump-config` 冒烟。
 | 学术源限流/封禁/字段变化 | 搜索结果缺失 | 多源、缓存、熔断、适配器测试、`mailto` |
 | 检索质量不够 | 用户不信任 | 评测集、查询扩展技能、引文滚雪球、人工可编辑 |
 | 引用编造 | 产品致命 | 只允许工具来源、`citation_check`、未核实提示、发布门槛 |
-| 长对话上下文爆炸 | 慢/贵 | DSH 压缩、摘要截断、工具结果裁剪、预算上限 |
+| 长对话上下文爆炸 | 慢/贵 | DSH 压缩、摘要截断、工具结果裁剪、上下文上限 |
 | 提示词注入 | 数据外泄/乱写文件 | 不可信内容围栏、无 shell、路径白名单、写产物版本化 |
 | 多进程生命周期 | 僵尸进程/端口占用 | Job Object、健康检查、单实例、日志 |
 | KV cache 失效 | 成本上升 | 稳定系统前缀、动态信息走工具、避免中途换模型 |
@@ -1450,7 +1434,7 @@ CI 里增加 agent 单测 + 一次 `--dump-config` 冒烟。
 | 3 | 数据源 | **复用 Scolar_search**（arXiv / PubMed / OpenAlex / Europe PMC + Unpaywall），不重复建设 provider；接入方式 A（TS 包）/ B（HTTP）待接入时确认。**不接 SCI-Hub/LibGen**；CNKI/万方 v1 不做 |
 | 4 | 思维链 | 原始 reasoning **默认折叠**，只展示计划 + 工具轨迹；`showReasoning` 默认 `false` |
 | 5 | 综述导出 | **docx 优先**，保留 md 源文件 + bib；PDF/LaTeX 后续 |
-| 6 | 预算 | 默认 **30 次工具 / 40 次模型 / 15 分钟**；深度研究 60/80/30；可配置 |
+| 6 | 额度/计费 | **不做**：不建 usage 表，不做额度、会员、升级配置；只保留超时与并发保护 |
 
 剩余实施细节（不阻塞）：S2/CORE 的 key 是否配置、机构订阅跳转文案、中文库合作方式。
 
@@ -1464,7 +1448,279 @@ M1  研究骨架：项目/会话 + 研究首页/项目页 + 思维链 + 本地�
 M1.5 Scolar_search 接入：TS 包/HTTP seam + 真实 academic_search + 全文入口
 M2  整理/入库 + 引用核验 + 产物 + 阅读清单
 M3  综述写作 + 产物面板 + docx/bib + 引用助手 + memory
-M4  子代理 + 评测 + 成本/性能 + 稳定性
+M4  子代理 + 评测 + 稳定性/性能
 ```
 
 **先做 M0，不要先写页面。** M0 验证的是“DSH 能否稳定地作为一个可分发的本地 agent runtime”，这是整个方案唯一的高风险假设；页面和检索都可以后补，这个假设不成立就要换路线。
+
+---
+
+## 21. 六类能力的详细设计（v1.1，无额度）
+
+本节把参考首页上的六个快捷动作（找文献 / 整理文献 / 定研究问题 / 设计研究 / 写作修改 / 做汇报）和两个侧栏页面（写综述报告 / 参考文献引用助手）落到可实施粒度。§7 的工具、§8 的技能、§12 的流程继续有效，本节只补**尚未设计的缺口**和**验收口径**。
+
+### 21.1 范围与不变量
+
+- 不做额度、会员、升级、用量统计；不建 `usage` 表，不显示计费信息。
+- DSH 会话日志仍是消息真源；SQLite 只存索引、项目、产物、来源。
+- 模型不直接读写用户文件：副作用只经 `artifact_*` / `project_*` 工具落到 Python API。
+- 不向模型暴露 shell、任意路径 fs、subagent；技能只能是“提示词 + 现有工具”的组合。
+- 正文引用只能由工具返回的来源生成，禁止模型自由编造参考文献。
+
+### 21.2 七个接入缺口（G1–G7）
+
+| 编号 | 缺口 | 现状 | 设计 | 验收 |
+|---|---|---|---|---|
+| G1 | 历史回放 | host 的 `history` 在内存里，重启后 `after=0` 为空 | `agents.resume` 后直接读 `agent.session.events`（rc.6 已暴露该 getter），按 `seq` 灌入内存环形缓冲；不自行解析 zstd、不读会话文件 | 重启后同一 session 的 `after=0` 返回不少于重启前的 `seq` |
+| G2 | 工具桥 | agent 已有 `PAPEREAD_API_BASE` / `PAPEREAD_TOKEN`，但没有 API 客户端和 `/internal/*` 端点 | 新增 `agent/bundle/lib/api.js`（token、超时、仅 GET 重试）；Python 增加 `/internal/papers`、`/internal/projects`、`/internal/artifacts`、`/internal/citations` | 任一工具在 agent 内调用成功，token 不出现在日志 |
+| G3 | 技能目录 | `$` 没有数据源；DSH 只把技能给模型 | host 扫描 `DSH_HOME/skills` 与内置 `agent/skills/*/SKILL.md`，暴露 `GET /v1/skills`，返回 `{id,name,description,whenToUse,inputs,source}` | 首页 `$` 菜单能看到内置 6 个技能 |
+| G4 | 附件管线 | 无上传；DSH attachment 未接 | Python `/api/files` 上传到项目目录并解析 PDF blocks；`@` 只传附件清单与 id，不塞全文；读取走 `paper_read` | 拖入 1 篇 PDF，`@` 选中后模型能引用其段落 |
+| G5 | 产物读写 | 无产物编辑与导出 | `artifacts` 表 + 文件；`artifact_write` / `artifact_read`；导出服务（docx / pptx / md） | 生成 `outline.md`，修改后版本号 +1，可导出 docx |
+| G6 | 汇报导出 | 无幻灯片 | `slides` 产物：`slides.json` + `slides.md`；服务端用 pptx 库导出 | 6 页幻灯片可导出并在 PowerPoint 打开 |
+| G7 | 项目上下文 | 会话不知道项目里有什么 | 建会话时注入项目简报（名称、研究问题、已选文献元数据、最近产物）；运行中可调 `project_context` | 新会话首轮能说出项目内 3 篇文献题名 |
+
+### 21.3 六个快捷动作
+
+每个动作 = 一个技能 + 一组工具 + 一个产物。技能只写“何时用、怎么做、做完的标准”，不写死提示词全文。
+
+| 动作 | 首轮工具序列 | 技能 | 产物 | 失败态 |
+|---|---|---|---|---|
+| 找文献 | `academic_search` → `paper_ingest`（仅 OA）→ `library_search` | `find-literature` | `reading-list.md` + 来源表 | 单源失败降级；0 结果时给出扩展查询建议 |
+| 整理文献 | `library_search` → `paper_read` → `citation_check` | `organize-library` | 主题聚类 + 标签 + 阅读顺序 | 重复条目进入待合并列表，不静默删除 |
+| 定研究问题 | `project_context` → `library_search` → `paper_read` | `frame-question` | `gap-matrix.md` + `questions.md` | 证据不足时明确写“不足以支持该问题” |
+| 设计研究 | `project_context` → `paper_read` → `todo_write` | `design-study` | `protocol.md`（问题/设计/数据/分析/威胁） | 缺少关键字段时停在待补全，不生成空泛方案 |
+| 写作修改 | `artifact_read` → `paper_read` → `citation_format` → `artifact_write` | `write-review` | 大纲 → 证据表 → 分节草稿 | 未核验引用用 `[待核验]` 标记，不写成正式引用 |
+| 做汇报 | `artifact_read` → `artifact_write(kind=slides)` → `export_document` | `make-deck` | `slides.json` + pptx | 图表缺数据时留占位并标注来源 |
+
+**技能目录约定**：`agent/skills/<id>/SKILL.md`，frontmatter 包含 `name`、`description`、`when_to_use`、`required_tools`、`produces`。技能正文只描述步骤、判据和输出格式，不包含本地路径、密钥或 shell 命令。
+
+### 21.4 工具增量
+
+在 §7 已有 8 个工具之上新增：
+
+| 工具 | 入参要点 | 返回 | 说明 |
+|---|---|---|---|
+| `project_context` | `projectId` | 简报 + 文献元数据 + 最近产物 | 只读，注入首轮上下文 |
+| `artifact_read` | `artifactId` / `path` | 内容 + 版本 | 限制在项目 `artifacts/` 下 |
+| `artifact_write` | `projectId`、`kind`、`title`、`content`、`baseVersion` | 新版本号 | `baseVersion` 冲突时拒绝并返回最新版本 |
+| `citation_format` | `sourceIds`、`style` | 格式化文本 + 缺字段列表 | 默认 GB/T 7714 |
+| `export_document` | `artifactId`、`format` | 导出文件路径 | docx / pptx / md |
+
+工具执行统一约定：
+
+- 失败返回结构化 `{code, message, hint}`，模型可据此重试或换源。
+- 所有写操作带 `projectId`，服务端校验项目存在且未归档。
+- 长任务通过 `tool.progress` 推送“检索中 / 解析中 / 导出中”，不静默运行。
+
+### 21.5 数据与 API 增量
+
+- `projects` 增加 `kind`（`research` / `review`，决定侧栏归属与返回目标）、`brief`（研究问题/关键词）、`status`（active/archived）。
+- `project_items` 增加 `kind`（paper/file/source）与 `role`（core/background/opposing）。
+- `artifacts` 增加 `format`（md/docx/pptx/json）与 `version` 文件命名规则：`<id>-v<n>.<format>`。
+- `sessions` 记录 `project_id`、`title`、`last_turn`、`status`；消息正文仍只在 DSH 日志。
+- 新增 API：
+  - `GET/POST /api/projects`、`GET/PATCH /api/projects/{id}`
+  - `POST /api/projects/{id}/files`（上传解析）
+  - `GET/POST /api/projects/{id}/artifacts`、`GET /api/artifacts/{id}/export?format=`
+  - `GET /api/skills`（代理 host 的技能目录）
+  - `GET /api/home`（最近项目、运行中会话、静态推荐问题）
+- 向内工具专用：`/internal/papers/*`、`/internal/projects/{id}/context`、`/internal/artifacts`、`/internal/citations/*`，只允许 `X-Paperead-Token` + 回环。
+- 侧栏过滤、项目页文件树与会话懒创建所需的字段/排序/空态，见 §22。
+
+### 21.6 页面与状态
+
+**研究首页**
+
+- 四种状态：无项目（引导新建）、有项目无会话（继续上次）、有运行中会话（顶部“正在研究”）、空搜索。
+- Tab：`在项目` / `新项目` / `继续`。`继续` 只列最近 5 个会话，按 `updated_at` 排序。
+- Composer：`@` 展开“文献 / 项目文件 / 来源”三组；`$` 展开技能目录；六个快捷动作只是预填提示 + 绑定技能，不绕过 composer。
+- 推荐问题使用本地静态清单（可随版本更新），不做用户行为上报。
+
+**项目页**
+
+- 左栏：项目 `文件 / 会话` 两个 tab（文件为文件夹树，会话按 `updated_at` 倒序）；中栏：对话流；右栏抽屉：计划 / 来源 / 产物。详见 §22.3。
+- 对话流元素：turn 卡、可折叠 reasoning、todo 条、工具卡、来源 chip、引用悬浮、停止/继续、产物更新提示。
+- 工具卡显示“在做什么 + 进度 + 结果摘要”，长任务不允许静默。
+
+**写综述报告**
+
+- 左侧大纲树（章节状态：空/草稿/已核验），右侧分段编辑器，底部引用抽屉。
+- 引用插入只接受来源 id；未核验引用高亮并阻止导出为“最终版”。
+- 导出：docx 优先，附 `.bib` 与 md 源文件。
+
+**参考文献引用助手**
+
+- 表格视图：来源、年份、DOI、核验状态、缺失字段、格式化结果。
+- 支持批量核验、单条修正建议、复制与导出；不做自由文本“生成参考文献”。
+
+### 21.7 一次垂直切片的验收
+
+新建项目“肝癌免疫治疗进展” → 找文献（≥8 条来源）→ 整理（≥2 篇入库并打标签）→ 定研究问题（gap 矩阵）→ 设计研究（protocol）→ 写综述大纲（带来源引用）→ 导出 docx。
+
+验收断言：
+
+1. 刷新应用后项目、会话、产物、来源都还在。
+2. 重启 agent 后 `after=0` 能回放完整对话。
+3. 正文引用全部能在来源表中找到；未核验引用为 0。
+4. `outline.md` 版本 ≥2，导出的 docx 可打开且引用格式为 GB/T 7714。
+5. 任一工具失败时 UI 显示原因与下一步，不出现“静默失败”。
+
+### 21.8 与 Phase A 计划的对应
+
+| Phase A | 本节增量 |
+|---|---|
+| A1 数据层 | 采用本节 §21.5 的字段与 API；去掉 `usage` 表 |
+| A2 代理 | 增加 `/internal/*` 与 `GET /v1/skills` 的转发 |
+| A3 UI 壳 | 按 §21.6 实现首页与项目页；首页不做额度 banner |
+| A4 SSE | 实现 G1 历史回放与 `after` 续传 |
+| A6 找/整理 | 采用 §21.3 前两行与 G4 |
+| A7 写作 | 采用 §21.3 “写作修改”与 G5 |
+| A8 引用 | 采用 “参考文献引用助手”页面与 `citation_format` |
+| 新增 | G6 汇报导出、G7 项目上下文、G3 技能目录 |
+
+### 21.9 实施顺序（不按时间，只按依赖）
+
+1. G2 + G3 + G7：没有工具桥和技能目录，页面只能空转。
+2. A1 + A3：项目/会话/产物/来源表与首页、项目页骨架。
+3. G1 + A4 + A5：回放、SSE 客户端、transcript 与工具卡。
+4. G4 + A6：附件管线、找文献、整理文献。
+5. G5 + G6 + A7 + A8：写作、导出、汇报、引用助手。
+6. 每个阶段结束跑一次 §21.7 的垂直切片，未通过不进入下一阶段。
+
+### 21.10 明确不做
+
+- 额度、会员、升级、计费、用量面板。
+- 自动写完整论文、自动投稿、绕过付费墙。
+- shell / 任意路径 fs / 子代理对用户可见。
+- 用户行为埋点与“大家都在搜”的在线统计。
+
+---
+
+## 22. 导航与项目结构（v0.5）
+
+### 22.1 信息架构
+
+四条参考页面汇总出的一条规则：**项目是侧栏的唯一组织单位，会话只属于项目页**。
+
+```
+主页
+研究                 ← 一级入口（激活时下方出现项目分区）
+  项目  [+]
+    项目 A
+    项目 B
+文献库
+写综述报告            ← 一级入口（独立项目集合）
+  项目  [+]
+    综述项目 A
+参考文献引用助手
+```
+
+- 研究与写综述是**并列业务线**，不是父子关系；通过 `projects.kind`（`research` / `review`）区分。
+- 侧栏“项目”分区只在研究或写综述激活时出现，只列当前 `kind` 的项目，按 `updated_at` 倒序，最多 30 条。
+- **侧栏不出现任何会话/聊天**；会话一律在项目页左栏出现。
+- 分区标题右侧 `+` 是新建项目的唯一入口；空态显示“还没有项目”+“新建项目”文字按钮。
+- 项目行：图标 + 名称；hover 出现 `...`（重命名 / 归档）；有运行中会话时显示小圆点，但不改变排序，避免列表跳动。
+- 引用助手是独立页面，不挂项目；主页/文献库维持现状。
+
+### 22.2 路由与状态
+
+| 场景 | URL | 侧栏状态 |
+|---|---|---|
+| 研究首页 | `/?view=research` | `研究` 高亮，列表为 `kind=research` |
+| 写综述首页 | `/?view=review` | `写综述报告` 高亮，列表为 `kind=review` |
+| 项目页 | `/?view=project&id=<pid>` | 全局侧栏隐藏，显示项目左栏 |
+| 项目内会话 | `/?view=project&id=<pid>&sid=<sid>` | 同上，会话行高亮 |
+| 引用助手 | `/?view=citation` | `参考文献引用助手` 高亮 |
+
+- `?p=` 优先级仍高于 `view`（阅读页不受影响）。
+- 项目页返回按钮按 `kind` 落到 `view=research` / `view=review`。
+- 每个 `kind` 记住最后打开的项目（localStorage，仅作首页“继续”的默认值；URL 始终显式带 `id`）。
+- 前进/后退必须还原侧栏高亮、项目列表和项目页 tab。
+
+### 22.3 项目页布局
+
+- 顶栏：`←` 返回、项目名（行内可编辑）、右侧 `...`（重命名 / 归档 / 项目设置）。
+- 左栏 240–280px：`文件 / 会话` 分段 tab，右侧 `+`。
+- 主区：未选会话时显示“在项目中发起会话”+ composer；选中会话时显示转写。
+- 右侧抽屉：计划 / 来源 / 产物（沿用 §10.6、§21.6）。
+
+**会话 tab**
+
+- 行内容：标题 + 相对时间（4 时 / 5 时）+ 运行中圆点；hover 显示重命名 / 归档。
+- 排序：`updated_at` 倒序；选中项高亮并写入 `&sid=`。
+- `+` **不立即创建 DSH 会话**，只打开空白 composer；首条消息发送时才创建会话，标题仍由 DSH 标题插件生成。快捷动作带预置技能时可直接创建并发送。
+
+**文件 tab**
+
+- 数据来自 `GET /projects/{id}/files` 的扁平列表，前端按 `parent_id` 建树；文件夹可展开/折叠，展开状态存组件内存，刷新后重置。
+- 文件夹行显示 chevron + 名称 + 子项数；文件行按类型显示图标。
+- 文件点击在主区内嵌预览：PDF 复用现有 `ReaderView`（带返回回到项目页）；md 渲染 markdown；图片直接显示；docx 提供“打开/下载”。
+- `+` 展开菜单：新建文件夹 / 上传文件；上传完成即插入当前文件夹。
+- 产物在树中作为只读的 `产物/` 虚拟目录出现（与右侧抽屉同源，不重复入库）。
+
+### 22.4 新建项目
+
+1. 点击侧栏 `+` → `POST /api/research/projects {kind}`，服务端生成 `name="新项目"`。
+2. 立即跳转 `/?view=project&id=<pid>&rename=1`，标题进入行内编辑态并全选。
+3. `Enter` / 失焦 `PATCH` 保存；`Esc` 保留“新项目”；空字符串回退“新项目”。
+4. 侧栏乐观插入到顶部；创建失败回滚并提示，不跳转。
+5. 不弹模态框；`+` 在请求期间禁用，名称上限 80 字；允许重名，以 id 为身份。
+
+### 22.5 数据模型增量
+
+```sql
+ALTER TABLE projects ADD COLUMN kind TEXT NOT NULL DEFAULT 'research'
+  CHECK (kind IN ('research','review'));
+CREATE INDEX idx_projects_kind_updated
+  ON projects(kind, archived, updated_at DESC);
+
+-- project_items.kind 的 CHECK 扩展为 ('paper','file','folder','note')
+ALTER TABLE project_items ADD COLUMN parent_id TEXT
+  REFERENCES project_items(id) ON DELETE CASCADE;
+ALTER TABLE project_items ADD COLUMN size INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE project_items ADD COLUMN mime TEXT NOT NULL DEFAULT '';
+CREATE INDEX idx_project_items_parent
+  ON project_items(project_id, parent_id);
+```
+
+- 不新增会话表；`sessions.project_id` 已足够，侧栏不查询会话。
+- `projects.updated_at` 在以下时机刷新：改名、创建会话、turn 结束、文件上传、产物写入。
+- 现有 `projects` 行迁移为 `kind='research'`。
+
+### 22.6 API 形状
+
+```jsonc
+// GET /api/research/projects?kind=research
+{ "items": [
+  { "id": "p1", "name": "肝癌免疫治疗", "kind": "research",
+    "updatedAt": 1760000000, "sessionCount": 3, "running": false }
+] }
+
+// POST /api/research/projects  { "kind": "review", "name": "可选" }
+{ "id": "p2", "name": "新项目", "kind": "review" }
+
+// GET /api/research/projects/p1/files
+{ "items": [
+  { "id": "f1", "parentId": null, "kind": "folder", "name": "文献", "path": "文献" },
+  { "id": "f2", "parentId": "f1", "kind": "paper", "name": "HCC 2024.pdf",
+    "path": "文献/HCC 2024.pdf", "mime": "application/pdf", "size": 2381900 }
+] }
+```
+
+- 错误：`404` 项目不存在、`409` 已归档、`400` kind 非法；统一 `{code,message}`。
+- 归档只从侧栏消失，可从“已归档”入口恢复；v1 不做硬删除。
+
+### 22.7 验收
+
+1. 研究页侧栏只出现 `research` 项目，写综述页只出现 `review` 项目，任何状态下侧栏都没有会话行。
+2. `+` 新建后落到项目页，标题可编辑；刷新后名称、侧栏顺序、项目页 tab 都保持。
+3. 会话 tab 显示相对时间；`+` 只打开空 composer；首条消息发出后会话出现在列表顶部，无需刷新。
+4. 文件 tab 可展开/折叠文件夹；上传后立即出现；点击 PDF 打开阅读器，返回回到项目页。
+5. 返回按钮按 `kind` 回到对应首页，侧栏高亮正确。
+6. `/`、`/?p=` 与现有文献库、阅读页完全不变。
+
+### 22.8 对既有设计的影响
+
+- 取代 §10.4 中“研究区内部二级导航”的设想；不改变 DSH、工具、SSE 的任何契约。
+- 项目从“研究功能内部实体”升级为两条业务线共享的实体；新增业务线只需新增 `kind` 和首页，不复用会话列表。
+- A3 拆成 **A3a 侧栏项目分区** 与 **A3b 项目页左栏**，两者都以 A1 的 `projects.kind` 和文件表为前置。

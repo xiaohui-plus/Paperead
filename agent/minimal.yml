@@ -54,3 +54,6 @@
 
 - id: research-tools
   name: '@paperead/dsh-research/tools'
+  config:
+    apiBase: !!js process.env.PAPEREAD_API_BASE || 'http://127.0.0.1:8010'
+    token: !!js process.env.PAPEREAD_INTERNAL_TOKEN || ''

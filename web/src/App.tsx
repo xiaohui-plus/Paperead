@@ -2,24 +2,53 @@ import { useEffect, useState } from 'react'
 import { LibraryPage } from './components/LibraryPage'
 import { ReaderView } from './components/ReaderView'
 import { ScholarPage } from './components/ScholarPage'
+import type { NavKey } from './components/Sidebar'
 import { SpikePage } from './research/SpikePage'
+import { ResearchShell } from './research/ResearchShell'
+import { ResearchHome } from './research/ResearchHome'
+import { ProjectPage } from './research/ProjectPage'
+import type { ProjectKind } from './lib/researchApi'
 
 /**
  * 极简路由：用 query 参数而不是 hash，把 hash 留给 `#b0013` 这种块级深链。
- *   /                  → 文献库
- *   /?v=search&q=...   → 文献检索
- *   /?p=demo           → 阅读页
- *   /?research=spike   → A0 研究 agent 冒烟页（临时）
- * 阅读页优先于视图：从检索页导入后会带着 `v=search` 进阅读页，返回时自然回到检索结果。
+ *   /                       → 文献库
+ *   /?v=search&q=...        → 文献检索
+ *   /?p=demo                → 阅读页
+ *   /?view=research         → 研究首页
+ *   /?view=review           → 写综述报告首页
+ *   /?view=project&id=...   → 项目页（可带 sid / rename）
+ *   /?research=spike        → A0 冒烟页（临时）
+ * 阅读页优先于所有视图。
  */
-type View = 'library' | 'search'
+type View = 'library' | 'search' | 'research' | 'review' | 'project'
+
+interface Route {
+  view: View
+  projectId: string | null
+  sessionId: string | null
+  rename: boolean
+}
+
+function readRoute(): Route {
+  const params = new URLSearchParams(window.location.search)
+  const raw = params.get('view')
+  const projectId = params.get('id')
+  const sessionId = params.get('sid')
+  const rename = params.get('rename') === '1'
+  if (raw === 'project' && projectId) {
+    return { view: 'project', projectId, sessionId, rename }
+  }
+  if (raw === 'research' || raw === 'review') {
+    return { view: raw, projectId: null, sessionId: null, rename: false }
+  }
+  if (params.get('v') === 'search') {
+    return { view: 'search', projectId: null, sessionId: null, rename: false }
+  }
+  return { view: 'library', projectId: null, sessionId: null, rename: false }
+}
 
 function currentPaperId(): string | null {
   return new URLSearchParams(window.location.search).get('p')
-}
-
-function currentView(): View {
-  return new URLSearchParams(window.location.search).get('v') === 'search' ? 'search' : 'library'
 }
 
 function currentSpike(): boolean {
@@ -28,72 +57,152 @@ function currentSpike(): boolean {
 
 export default function App() {
   const [paperId, setPaperId] = useState<string | null>(currentPaperId)
-  const [view, setView] = useState<View>(currentView)
   const [spike, setSpike] = useState(currentSpike)
+  const [route, setRoute] = useState<Route>(readRoute)
+  // 首页发出的首条消息：不进 URL（刷新不应重发），只随本次导航传给会话页。
+  const [initialText, setInitialText] = useState<string | null>(null)
 
   useEffect(() => {
     const onPop = () => {
       setPaperId(currentPaperId())
-      setView(currentView())
       setSpike(currentSpike())
+      setRoute(readRoute())
+      setInitialText(null)
     }
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
   }, [])
 
-  const navigate = (id: string | null) => {
+  // 站内页面（文献库/检索/研究/综述/项目）在窄屏取消 120% 缩放，阅读页保持原样。
+  useEffect(() => {
+    if (paperId) delete document.documentElement.dataset.surface
+    else document.documentElement.dataset.surface = 'app'
+  }, [paperId])
+
+  const navigatePaper = (id: string | null) => {
     const url = new URL(window.location.href)
     if (id) url.searchParams.set('p', id)
     else url.searchParams.delete('p')
     if (!id) url.hash = ''
     window.history.pushState({}, '', url)
     setPaperId(id)
-    // 从阅读页返回时保留 `v=search`，这样回到的是检索结果而不是文献库
-    setView(currentView())
+    setRoute(readRoute())
+    setInitialText(null)
     if (id) window.scrollTo(0, 0)
   }
 
-  const goView = (next: View) => {
+  const goView = (view: Exclude<View, 'project'>) => {
     const url = new URL(window.location.href)
-    if (next === 'search') {
+    url.searchParams.delete('p')
+    url.searchParams.delete('id')
+    url.searchParams.delete('sid')
+    url.searchParams.delete('rename')
+    url.hash = ''
+    if (view === 'search') {
       url.searchParams.set('v', 'search')
-      // 从侧栏进检索页时回到结果列表，而不是上次停留的详情页
+      url.searchParams.delete('view')
       url.searchParams.delete('pid')
+    } else if (view === 'library') {
+      url.searchParams.delete('v')
+      url.searchParams.delete('view')
     } else {
+      url.searchParams.set('view', view)
       url.searchParams.delete('v')
     }
-    url.searchParams.delete('p')
-    url.hash = ''
     window.history.pushState({}, '', url)
     setPaperId(null)
-    setView(next)
+    setRoute(readRoute())
+    setInitialText(null)
+  }
+
+  const openProject = (
+    projectId: string,
+    options?: { rename?: boolean; sessionId?: string; initialText?: string },
+  ) => {
+    const url = new URL(window.location.href)
+    url.searchParams.set('view', 'project')
+    url.searchParams.set('id', projectId)
+    url.searchParams.delete('v')
+    url.searchParams.delete('p')
+    url.hash = ''
+    if (options?.sessionId) url.searchParams.set('sid', options.sessionId)
+    else url.searchParams.delete('sid')
+    if (options?.rename) url.searchParams.set('rename', '1')
+    else url.searchParams.delete('rename')
+    window.history.pushState({}, '', url)
+    setPaperId(null)
+    setRoute(readRoute())
+    setInitialText(options?.initialText ?? null)
+    window.scrollTo(0, 0)
+  }
+
+  const selectSession = (sessionId: string | null) => {
+    const url = new URL(window.location.href)
+    if (sessionId) url.searchParams.set('sid', sessionId)
+    else url.searchParams.delete('sid')
+    window.history.pushState({}, '', url)
+    setRoute(readRoute())
+    setInitialText(null)
+  }
+
+  const onNav = (key: NavKey) => {
+    if (key === 'library') goView('library')
+    else if (key === 'search') goView('search')
+    else goView(key)
   }
 
   if (paperId) {
-    return <ReaderView key={paperId} paperId={paperId} onBack={() => navigate(null)} />
+    return <ReaderView key={paperId} paperId={paperId} onBack={() => navigatePaper(null)} />
   }
 
   if (spike) {
     return <SpikePage />
   }
 
-  if (view === 'search') {
+  if (route.view === 'project' && route.projectId) {
+    return (
+      <ProjectPage
+        key={route.projectId}
+        projectId={route.projectId}
+        sessionId={route.sessionId}
+        initialRename={route.rename}
+        initialText={initialText}
+        onInitialTextConsumed={() => setInitialText(null)}
+        onBack={(kind: ProjectKind) => goView(kind)}
+        onSelectSession={selectSession}
+      />
+    )
+  }
+
+  if (route.view === 'research' || route.view === 'review') {
+    const kind: ProjectKind = route.view
+    return (
+      <ResearchShell
+        kind={kind}
+        active={kind}
+        onNav={onNav}
+        onOpenProject={openProject}
+      >
+        {(projects, start) => (
+          <ResearchHome kind={kind} projects={projects} onStart={start} />
+        )}
+      </ResearchShell>
+    )
+  }
+
+  if (route.view === 'search') {
     return (
       <ScholarPage
-        onOpenPaper={(id) => navigate(id)}
-        onNav={(key) => {
-          if (key === 'library') goView('library')
-        }}
+        onOpenPaper={(id) => navigatePaper(id)}
+        onNav={onNav}
       />
     )
   }
 
   return (
     <LibraryPage
-      onOpenPaper={(id) => navigate(id)}
-      onNav={(key) => {
-        if (key === 'search') goView('search')
-      }}
+      onOpenPaper={(id) => navigatePaper(id)}
+      onNav={onNav}
     />
   )
 }

@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass, replace
 from urllib.parse import quote
 
+from paperead.env import env
+
 from .http import (
     CONTACT_EMAIL,
     TTL_DETAIL,
@@ -31,28 +33,63 @@ from .http import (
 from .models import Paper
 from .sources import (
     ARXIV_API,
+    CORE_API,
     EPMC_API,
     OPENALEX_API,
     OPENALEX_SELECT,
     PUBMED_EUTILS,
+    S2_FIELDS,
+    SEMANTIC_SCHOLAR_API,
     arxiv_url,
+    core_doi_url,
+    core_url,
     epmc_detail_query,
     europe_pmc_url,
     openalex_url,
     parse_arxiv_entries,
+    parse_core,
     parse_europe_pmc,
     parse_openalex_works,
     parse_pubmed_abstract_xml,
+    parse_pubmed_abstracts,
     parse_pubmed_summary,
+    parse_semantic_scholar,
     pubmed_urls,
+    semantic_scholar_url,
     unpaywall_url,
 )
 
 log = logging.getLogger(__name__)
 
-SOURCE_KEYS = ("arxiv", "pubmed", "openalex", "europepmc")
+SOURCE_KEYS = ("arxiv", "pubmed", "openalex", "europepmc", "semanticscholar", "core")
 SORT_KEYS = ("rel", "new", "updated")
 FIELD_KEYS = ("all", "title", "abstract", "author")
+
+
+def s2_api_key() -> str:
+    return env("PAPEREAD_S2_API_KEY", "") or ""
+
+
+def core_api_key() -> str:
+    return env("PAPEREAD_CORE_API_KEY", "") or ""
+
+
+def _s2_headers() -> dict[str, str] | None:
+    key = s2_api_key()
+    return {"x-api-key": key} if key else None
+
+
+def _core_headers() -> dict[str, str] | None:
+    key = core_api_key()
+    return {"Authorization": f"Bearer {key}"} if key else None
+
+
+def unavailable_sources() -> dict[str, str]:
+    """当前配置下不可用的数据源及原因，供前端置灰。"""
+    disabled: dict[str, str] = {}
+    if not core_api_key():
+        disabled["core"] = "CORE 检索需要配置 PAPEREAD_CORE_API_KEY。"
+    return disabled
 
 
 @dataclass
@@ -140,7 +177,13 @@ async def _search_pubmed(data: SearchInput) -> SearchResult:
     if not ids:
         return SearchResult([], total, None)
     summaries = await _pubmed_summaries(ids)
-    return SearchResult([parse_pubmed_summary(s) for s in summaries], total, None)
+    # esummary 只给题录，摘要要靠一次批量 efetch 补齐，否则列表页全是空摘要。
+    abstracts = await _pubmed_abstracts(ids)
+    papers = [
+        parse_pubmed_summary(s, *abstracts.get(str(s.get("uid")), ("", [])))
+        for s in summaries
+    ]
+    return SearchResult(papers, total, None)
 
 
 async def _search_openalex(data: SearchInput) -> SearchResult:
@@ -158,6 +201,38 @@ async def _search_openalex(data: SearchInput) -> SearchResult:
     payload = json.loads(await fetch_text(url))
     total = int((payload.get("meta") or {}).get("count") or 0)
     return SearchResult(parse_openalex_works(payload), total, None)
+
+
+async def _search_semantic_scholar(data: SearchInput) -> SearchResult:
+    # 该接口只支持相关度排序，field / sort 两个筛选在这里不生效。
+    url = semantic_scholar_url(
+        data.q,
+        phrase=data.phrase,
+        from_year=data.from_year,
+        to_year=data.to_year,
+        page=data.page,
+        per_page=data.per_page,
+    )
+    payload = json.loads(await fetch_text(url, headers=_s2_headers()))
+    total = int(payload.get("total") or 0)
+    return SearchResult(parse_semantic_scholar(payload), total, None)
+
+
+async def _search_core(data: SearchInput) -> SearchResult:
+    if not core_api_key():
+        raise FriendlyError("CORE 检索需要先配置 PAPEREAD_CORE_API_KEY。", False)
+    url = core_url(
+        data.q,
+        field=data.field,
+        phrase=data.phrase,
+        from_year=data.from_year,
+        to_year=data.to_year,
+        page=data.page,
+        per_page=data.per_page,
+    )
+    payload = json.loads(await fetch_text(url, headers=_core_headers()))
+    total = int(payload.get("totalHits") or 0)
+    return SearchResult(parse_core(payload), total, None)
 
 
 async def _search_europe_pmc(data: SearchInput) -> SearchResult:
@@ -193,6 +268,8 @@ async def search(data: SearchInput) -> tuple[SearchResult, str, bool]:
         "pubmed": _search_pubmed,
         "openalex": _search_openalex,
         "europepmc": _search_europe_pmc,
+        "semanticscholar": _search_semantic_scholar,
+        "core": _search_core,
     }[data.source]
     return await runner(data), used_query, translated
 
@@ -213,6 +290,10 @@ async def get_paper(paper_id: str) -> Paper | None:
             return await _detail_europepmc(raw_id)
         if source == "pubmed":
             return await _detail_pubmed(raw_id)
+        if source == "semanticscholar":
+            return await _detail_semantic_scholar(raw_id)
+        if source == "core":
+            return await _detail_core(raw_id)
     except FriendlyError:
         raise
     except Exception as exc:  # 解析异常也当作「没有这条记录」，避免 500
@@ -287,6 +368,29 @@ async def _detail_pubmed(raw_id: str) -> Paper | None:
     return parse_pubmed_summary(summaries[0], abstract, keywords)
 
 
+async def _detail_semantic_scholar(raw_id: str) -> Paper | None:
+    url = (
+        f"{SEMANTIC_SCHOLAR_API}/paper/{quote(raw_id, safe='')}"
+        f"?fields={quote(S2_FIELDS, safe=',')}"
+    )
+    payload = json.loads(
+        await fetch_text(url, ttl=TTL_DETAIL, headers=_s2_headers())
+    )
+    papers = parse_semantic_scholar({"data": [payload]})
+    return papers[0] if papers else None
+
+
+async def _detail_core(raw_id: str) -> Paper | None:
+    if not core_api_key():
+        return None
+    url = f"{CORE_API}/works/{quote(raw_id, safe='')}"
+    payload = json.loads(
+        await fetch_text(url, ttl=TTL_DETAIL, headers=_core_headers())
+    )
+    papers = parse_core({"results": [payload]})
+    return papers[0] if papers else None
+
+
 async def _pubmed_summaries(ids: list[str]) -> list[dict]:
     if not ids:
         return []
@@ -297,6 +401,21 @@ async def _pubmed_summaries(ids: list[str]) -> list[dict]:
     payload = json.loads(await fetch_text(url))
     result = payload.get("result") or {}
     return [result[i] for i in ids if isinstance(result.get(i), dict)]
+
+
+async def _pubmed_abstracts(ids: list[str]) -> dict[str, tuple[str, list[str]]]:
+    """整页一次 efetch 取摘要。摘要只是增强信息，失败时降级为仅题录。"""
+    if not ids:
+        return {}
+    url = (
+        f"{PUBMED_EUTILS}/efetch.fcgi?db=pubmed&retmode=xml"
+        f"&id={quote(','.join(ids), safe=',')}"
+    )
+    try:
+        return parse_pubmed_abstracts(await fetch_text(url))
+    except Exception as exc:  # noqa: BLE001 —— 任何失败都不该让列表页整体报错
+        log.info("PubMed 摘要批量获取失败，降级为仅题录：%s", exc)
+        return {}
 
 
 # ── 开放获取全文 ────────────────────────────────────────────
@@ -345,8 +464,65 @@ async def find_free_full_text(doi: str) -> dict:
     return {**data, "error": None}
 
 
+def _bare_doi(doi: str) -> str:
+    return re.sub(r"^https?://(dx\.)?doi\.org/", "", (doi or "").strip(), flags=re.I)
+
+
+async def find_s2_open_pdf(doi: str) -> str | None:
+    """Semantic Scholar 自己整理的开放获取 PDF（常见于机构库与预印本副本）。"""
+    bare = _bare_doi(doi)
+    if not bare:
+        return None
+    url = (
+        f"{SEMANTIC_SCHOLAR_API}/paper/DOI:{quote(bare, safe='')}"
+        "?fields=openAccessPdf"
+    )
+
+    async def run() -> str:
+        response = await fetch_once(url, headers=_s2_headers())
+        if response.status_code == 404:
+            return json.dumps({"pdf_url": None})
+        if response.status_code >= 400:
+            raise FriendlyError(
+                f"Semantic Scholar 暂时不可用（{response.status_code}）。",
+                response.status_code in {429, 500, 502, 503, 504},
+            )
+        payload = response.json()
+        return json.dumps({"pdf_url": (payload.get("openAccessPdf") or {}).get("url")})
+
+    data = json.loads(await cache.get(url, TTL_UNPAYWALL, run))
+    return data.get("pdf_url")
+
+
+async def find_core_pdf(doi: str) -> str | None:
+    """CORE 聚合的机构库全文；未配置 API Key 时直接跳过。"""
+    if not core_api_key():
+        return None
+    bare = _bare_doi(doi)
+    if not bare:
+        return None
+    url = core_doi_url(bare)
+
+    async def run() -> str:
+        response = await fetch_once(url, headers=_core_headers())
+        if response.status_code == 404:
+            return json.dumps({"pdf_url": None})
+        if response.status_code >= 400:
+            raise FriendlyError(
+                f"CORE 暂时不可用（{response.status_code}）。",
+                response.status_code in {429, 500, 502, 503, 504},
+            )
+        results = (response.json() or {}).get("results") or []
+        return json.dumps(
+            {"pdf_url": (results[0].get("downloadUrl") if results else None) or None}
+        )
+
+    data = json.loads(await cache.get(url, TTL_UNPAYWALL, run))
+    return data.get("pdf_url")
+
+
 async def resolve_pdf_urls(paper: Paper) -> list[str]:
-    """详情页「导入文献库」用：题录自带 PDF 优先，其次 Unpaywall 的多个开放获取位置。"""
+    """详情页「导入文献库」用：题录自带 PDF → Unpaywall → S2 → CORE。"""
     candidates: list[str] = []
 
     def add(url: str | None) -> None:
@@ -363,6 +539,13 @@ async def resolve_pdf_urls(paper: Paper) -> list[str]:
         for url in found.get("pdf_urls") or []:
             add(url)
         add(found.get("pdf_url"))
+
+        # Unpaywall 只认登记过的 OA 版本；S2 / CORE 常能补上机构库与预印本副本。
+        for lookup in (find_s2_open_pdf, find_core_pdf):
+            try:
+                add(await lookup(paper.doi))
+            except Exception as exc:  # noqa: BLE001 —— 兜底源失败不该影响已有候选
+                log.info("%s 查询失败（%s）：%s", lookup.__name__, paper.doi, exc)
     return candidates
 
 
@@ -435,7 +618,9 @@ async def to_english_query(q: str) -> tuple[str, bool]:
 
 
 def pdf_filename(paper: Paper) -> str:
-    bare = re.sub(r"^(arxiv|openalex|pubmed|europepmc):", "", paper.id)
+    bare = re.sub(
+        r"^(arxiv|openalex|pubmed|europepmc|semanticscholar|core):", "", paper.id
+    )
     slug = "-".join((paper.title or "").split()[:6])
     slug = re.sub(r"[^\w\u4e00-\u9fff-]", "", slug)[:60]
     safe_id = re.sub(r"[^\w.-]", "_", bare)

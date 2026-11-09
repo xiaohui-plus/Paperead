@@ -6,6 +6,10 @@ interface Props {
   onOpen: (id: string) => void
   onDelete: (paper: PaperRow) => void
   onReparse: (paper: PaperRow) => void
+  draggable?: boolean
+  dragging?: boolean
+  onDragStart?: (paper: PaperRow) => void
+  onDragEnd?: () => void
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -21,7 +25,17 @@ function sizeLabel(bytes: number): string {
   return mb >= 1 ? `${mb.toFixed(1)} MB` : `${Math.round(bytes / 1024)} KB`
 }
 
-export function PaperCard({ paper, view, onOpen, onDelete, onReparse }: Props) {
+export function PaperCard({
+  paper,
+  view,
+  onOpen,
+  onDelete,
+  onReparse,
+  draggable = false,
+  dragging = false,
+  onDragStart,
+  onDragEnd,
+}: Props) {
   const busy = paper.status === 'parsing'
   const hasTranslation = paper.translated > 0
   const failed = paper.status === 'failed'
@@ -31,6 +45,15 @@ export function PaperCard({ paper, view, onOpen, onDelete, onReparse }: Props) {
       className={`paper-card ${view === 'list' ? 'is-list' : ''}`}
       onClick={() => onOpen(paper.id)}
       title={paper.title}
+      draggable={draggable}
+      data-dragging={dragging}
+      onDragStart={(event) => {
+        if (!draggable) return
+        event.dataTransfer.effectAllowed = 'move'
+        event.dataTransfer.setData('text/plain', paper.id)
+        onDragStart?.(paper)
+      }}
+      onDragEnd={() => onDragEnd?.()}
     >
       <div className="paper-cover">
         {paper.thumb_url ? (

@@ -264,8 +264,19 @@ function EquationBody({ block }: { block: Block }) {
     )
   }
 
+  // 裁图分辨率变了，但显示宽度要按 PDF 里的实际宽度算（约 2.8px/pt，
+  // 与原来的 200dpi 观感一致），否则窄公式会被放大成巨幅。
+  const bbox = block.bbox
+  const pts = bbox && bbox.length >= 4 ? bbox[2] - bbox[0] : 0
+  const width = Number.isFinite(pts) && pts > 0 ? Math.round(pts * 2.8) : 0
+
   return block.image_path ? (
-    <img src={block.image_path} alt="equation" loading="lazy" />
+    <img
+      src={block.image_path}
+      alt="equation"
+      loading="lazy"
+      style={width ? { width: `min(100%, ${width}px)` } : undefined}
+    />
   ) : (
     <pre>{block.text}</pre>
   )

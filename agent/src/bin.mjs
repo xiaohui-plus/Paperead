@@ -1,10 +1,10 @@
 /**
  * Paperead research agent entry point.
  *
- * Default: A0 minimal composition (`minimal.yml`).
- * PAPEREAD_AGENT_COMPOSE=full: dsh-base + @paperead/dsh-research patches
- * on an empty root config. This is the production shape; it exists now so the
- * full composition can be debugged before A1.
+ * Default: full composition — dsh-base + @paperead/dsh-research patches on an
+ * empty root config, which brings skills, todo and compaction into the agent.
+ * PAPEREAD_AGENT_COMPOSE=minimal: A0 minimal composition (`minimal.yml`), kept
+ * for transport-level smoke tests only.
  *
  * The profile path (`dsh --profile`) is avoided on Node 24/Windows: it heals
  * per-package junctions under `$DSH_HOME/profiles/node_modules`, and Node 24
@@ -25,7 +25,10 @@ for (const [key, value] of Object.entries(process.env)) {
   if (process.env[next] === undefined) process.env[next] = value
 }
 
-const full = process.env.PAPEREAD_AGENT_COMPOSE === 'full'
+// 内置技能目录随 agent 一起分发；显式注入，避免依赖启动时的 cwd。
+process.env.PAPEREAD_SKILLS_DIR ||= join(agentDir, 'skills')
+
+const full = process.env.PAPEREAD_AGENT_COMPOSE !== 'minimal'
 
 let ctx
 if (full) {

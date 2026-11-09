@@ -67,6 +67,7 @@ export function apply(ctx, config = {}) {
   const agents = new Map()
   const streams = new Map()
   const history = new Map()
+  const callNames = new Map()
 
   const authorized = (req) => {
     if (!token) return true
@@ -119,7 +120,10 @@ export function apply(ctx, config = {}) {
         }
         break
       }
-      case 'tool/call':
+      case 'tool/call': {
+        const names = callNames.get(sid) ?? new Map()
+        names.set(event.data.callId, event.data.name)
+        callNames.set(sid, names)
         emit(sid, {
           type: 'tool.start',
           turn: event.data.turn,
@@ -129,15 +133,20 @@ export function apply(ctx, config = {}) {
           input: safeJson(event.data.arguments) ?? event.data.arguments,
         })
         break
+      }
       case 'tool/result': {
-        const message = event.data.message
-        const first = message?.content?.[0]
+        // `tool/result` itself carries no callId: the pairing lives on the
+        // tool-result content blocks, and a result may contain more than one.
+        const blocks = Array.isArray(event.data.message?.content) ? event.data.message.content : []
+        const block = blocks.find((item) => item && typeof item === 'object' && item.toolCallId)
+        const callId = block?.toolCallId
         emit(sid, {
           type: 'tool.end',
           turn: event.data.turn,
           step: event.data.step,
-          callId: first?.toolCallId,
-          isError: Boolean(event.data.error) || first?.isError === true,
+          callId,
+          name: callId ? callNames.get(sid)?.get(callId) : undefined,
+          isError: Boolean(event.data.error) || block?.isError === true,
           error: event.data.error,
           meta: event.data.meta,
         })
@@ -147,7 +156,11 @@ export function apply(ctx, config = {}) {
         emit(sid, { type: 'plan.update', items: event.data.todos })
         break
       case 'session/title':
-        emit(sid, { type: 'title.update', title: event.data.title })
+        emit(sid, {
+          type: 'title.update',
+          title: event.data.title,
+          source: event.data.source?.kind,
+        })
         break
       default:
         break
@@ -233,7 +246,14 @@ export function apply(ctx, config = {}) {
 
       if (pathname === '/v1/sessions' && req.method === 'GET') {
         return json(res, 200, {
-          sessions: ctx.agents.roots().map((agent) => ({ sessionId: agent.id, status: agent.status, title: agent.session?.header?.id })),
+          sessions: ctx.agents.roots().map((agent) => {
+            const titles = (history.get(agent.id) ?? []).filter((event) => event.type === 'title.update')
+            return {
+              sessionId: agent.id,
+              status: agent.status,
+              title: titles.at(-1)?.title,
+            }
+          }),
         })
       }
 

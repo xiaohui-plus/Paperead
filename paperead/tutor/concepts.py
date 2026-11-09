@@ -27,6 +27,14 @@ _STOPWORDS = {
 _ACRONYM_RE = re.compile(r"\b[A-Z]{2,6}\b")
 _DATASET_RE = re.compile(r"\b(?:ogbl|ogbn|ogbg)-[a-z0-9]+\b|\b[A-Z][A-Za-z]+(?:Net|DB)\b")
 
+# 表格/图注里常见的大写词，不是需要解释的专业术语
+_ACRONYM_STOP = {
+    "DRUG", "DRUGS", "GRA", "NEW", "ALL", "EACH", "MORE", "LESS", "HIGH", "LOW",
+    "YES", "NO", "ONE", "TWO", "THREE", "TYPE", "TYPES", "NUMBER", "TOTAL",
+    "DATA", "SET", "SETS", "TEST", "TRAIN", "VALID", "VALUE", "VALUES",
+    "FIG", "FIGS", "TAB", "TABLE", "TABLES", "THE", "AND", "FOR", "WITH", "FROM",
+}
+
 _METHOD_HINTS = ("net", "former", "gnn", "cnn", "rnn", "lstm", "bert", "gan", "vae")
 
 
@@ -68,6 +76,8 @@ def extract(blocks: list[Block], glossary: dict[str, str] | None = None,
 
     def add(name: str, en: str, kind: str, weight: float) -> None:
         if not en or en.lower() in _STOPWORDS:
+            return
+        if en.isupper() and en.upper() in _ACRONYM_STOP:
             return
         n = _count(en, texts)
         if n < 2:
