@@ -15,7 +15,7 @@ const SOURCE_LABEL: Record<'en' | 'zh', string> = {
   zh: '译文',
 }
 
-/** 把高亮和笔记导出为 Markdown，方便粘进综述或 Zotero 笔记。 */
+/** 把批注和高亮导出为 Markdown，方便粘进综述或 Zotero 笔记。 */
 export function downloadNotes(paper: Paper, annotations: Annotation[]): void {
   const pageOf = new Map(paper.blocks.map((b) => [b.id, b.page]))
   const lines: string[] = [`# ${paper.title || '论文'} · 笔记`, '']
@@ -25,7 +25,8 @@ export function downloadNotes(paper: Paper, annotations: Annotation[]): void {
       a.start - b.start,
   )
   for (const item of ordered) {
-    lines.push(`- P${pageOf.get(item.block_id) ?? '?'} · ${SOURCE_LABEL[item.source]}`)
+    const label = item.kind === 'comment' ? '批注' : '高亮'
+    lines.push(`- P${pageOf.get(item.block_id) ?? '?'} · ${SOURCE_LABEL[item.source]} · ${label}`)
     lines.push(`  > ${item.quote.replace(/\n+/g, ' ')}`)
     if (item.note.trim()) lines.push(`  ${item.note.trim().replace(/\n+/g, '\n  ')}`)
   }
@@ -38,27 +39,33 @@ export function downloadNotes(paper: Paper, annotations: Annotation[]): void {
   URL.revokeObjectURL(url)
 }
 
-export function NotesPanel({ paper, annotations, onJump, onUpdate, onDelete }: Props) {
+/**
+ * 批注栏：正文里划词点「批注」产生的下划线标注，按页码排序。
+ * 荧光笔高亮不进这里，统一收在「阅读重点」的我的荧光笔分组里。
+ */
+export function CommentsPanel({ paper, annotations, onJump, onUpdate, onDelete }: Props) {
   const pageOf = useMemo(
     () => new Map(paper.blocks.map((b) => [b.id, b.page])),
     [paper.blocks],
   )
-  const ordered = useMemo(
+  const comments = useMemo(
     () =>
-      [...annotations].sort(
-        (a, b) =>
-          (pageOf.get(a.block_id) ?? 0) - (pageOf.get(b.block_id) ?? 0) ||
-          a.start - b.start,
-      ),
+      annotations
+        .filter((item) => item.kind === 'comment')
+        .sort(
+          (a, b) =>
+            (pageOf.get(a.block_id) ?? 0) - (pageOf.get(b.block_id) ?? 0) ||
+            a.start - b.start,
+        ),
     [annotations, pageOf],
   )
 
-  if (!annotations.length) {
+  if (!comments.length) {
     return (
       <div className="tab-body">
         <div className="notes-empty">
-          <p>在正文里划词即可高亮。</p>
-          <p>点已有高亮可以改颜色、写笔记；所有笔记只存在本机，也能一键导出 Markdown。</p>
+          <p>在正文里选中一句话，点工具栏的「批注」，这句话下面就会出现彩色下划线。</p>
+          <p>批注只在你本机，点下划线可以改颜色、补内容或删除；想整段标色？用荧光笔，高亮会出现在「阅读重点」里。</p>
         </div>
       </div>
     )
@@ -67,18 +74,16 @@ export function NotesPanel({ paper, annotations, onJump, onUpdate, onDelete }: P
   return (
     <div className="tab-body notes-panel">
       <div className="notes-head">
-        <span>
-          {annotations.length} 条标注 · {annotations.filter((a) => a.note.trim()).length} 条笔记
-        </span>
+        <span>{comments.length} 条批注</span>
         <button className="link-btn" onClick={() => downloadNotes(paper, annotations)}>
           导出 Markdown
         </button>
       </div>
 
-      {ordered.map((item) => (
+      {comments.map((item) => (
         <article className="note-card" key={`${item.id}-${item.updated_at}`}>
           <div className="note-meta">
-            <span className={`hl-dot hl-${item.color}`} aria-hidden />
+            <span className={`cm-swatch cm-${item.color}`} aria-hidden />
             <span>P{pageOf.get(item.block_id) ?? '?'}</span>
             <span>{SOURCE_LABEL[item.source]}</span>
             <button className="link-btn note-jump" onClick={() => onJump(item.block_id)}>
@@ -89,7 +94,7 @@ export function NotesPanel({ paper, annotations, onJump, onUpdate, onDelete }: P
           <textarea
             className="note-input"
             defaultValue={item.note}
-            placeholder="写点笔记…"
+            placeholder="写下你的批注…"
             rows={2}
             onBlur={(event) => {
               const next = event.target.value
@@ -100,7 +105,7 @@ export function NotesPanel({ paper, annotations, onJump, onUpdate, onDelete }: P
             <button
               className="link-btn danger"
               onClick={() => {
-                if (window.confirm('删除这条标注？')) void onDelete(item.id)
+                if (window.confirm('删除这条批注？')) void onDelete(item.id)
               }}
             >
               删除

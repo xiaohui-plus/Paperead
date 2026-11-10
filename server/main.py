@@ -957,6 +957,8 @@ async def block_provenance(paper_id: str, block_id: str) -> dict:
 # ── 标注 / 笔记 ──────────────────────────────────────────
 
 ANNOTATION_COLORS = {"yellow", "green", "blue", "pink"}
+# highlight = 荧光笔填色；comment = 彩色下划线批注
+ANNOTATION_KINDS = {"highlight", "comment"}
 
 
 class AnnotationIn(BaseModel):
@@ -966,6 +968,7 @@ class AnnotationIn(BaseModel):
     end: int = Field(..., ge=0)
     quote: str = Field("", max_length=4000)
     color: str = Field("yellow", max_length=20)
+    kind: str = Field("highlight", max_length=20)
     note: str = Field("", max_length=5000)
 
 
@@ -1007,6 +1010,7 @@ async def add_annotation(paper_id: str, req: AnnotationIn) -> dict:
     text = _annotation_text(blocks, req.block_id, req.source)
     _check_range(req.start, req.end, text)
     color = req.color if req.color in ANNOTATION_COLORS else "yellow"
+    kind = req.kind if req.kind in ANNOTATION_KINDS else "highlight"
     return store.add_annotation(
         paper_id,
         {
@@ -1016,6 +1020,7 @@ async def add_annotation(paper_id: str, req: AnnotationIn) -> dict:
             "end": req.end,
             "quote": req.quote,
             "color": color,
+            "kind": kind,
             "note": req.note,
         },
     )

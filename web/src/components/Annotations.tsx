@@ -1,7 +1,14 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from 'react'
 import type {
   Annotation,
   AnnotationColor,
+  AnnotationKind,
   HighlightCategory,
   ReadingHighlight,
 } from '../lib/library'
@@ -33,7 +40,8 @@ export interface AnnotationActions {
     end: number
     quote: string
     color: AnnotationColor
-  }) => Promise<void>
+    kind: AnnotationKind
+  }) => Promise<Annotation | void>
   update: (
     id: string,
     patch: { color?: AnnotationColor; note?: string },
@@ -206,19 +214,35 @@ export function RichText({
       )
     } else if (span.kind === 'hl' && span.annotation) {
       const annotation = span.annotation
+      const spanText = text.slice(span.start, span.end)
+      const isComment = annotation.kind === 'comment'
+      const title = annotation.note || (isComment ? '点击编辑这条批注' : '点击编辑这条高亮')
+      const onPick = (e: ReactMouseEvent<HTMLElement>) => {
+        e.stopPropagation()
+        onAnnotationClick?.(annotation, (e.target as HTMLElement).getBoundingClientRect())
+      }
       nodes.push(
-        <mark
-          key={`h${span.start}`}
-          className={`hl hl-${annotation.color}`}
-          data-aid={annotation.id}
-          title={annotation.note || '点击编辑这条标注'}
-          onClick={(e) => {
-            e.stopPropagation()
-            onAnnotationClick?.(annotation, (e.target as HTMLElement).getBoundingClientRect())
-          }}
-        >
-          {text.slice(span.start, span.end)}
-        </mark>,
+        isComment ? (
+          <span
+            key={`h${span.start}`}
+            className={`cm cm-${annotation.color}`}
+            data-aid={annotation.id}
+            title={title}
+            onClick={onPick}
+          >
+            {spanText}
+          </span>
+        ) : (
+          <mark
+            key={`h${span.start}`}
+            className={`hl hl-${annotation.color}`}
+            data-aid={annotation.id}
+            title={title}
+            onClick={onPick}
+          >
+            {spanText}
+          </mark>
+        ),
       )
     } else if (span.kind === 'auto' && span.highlight) {
       const category = span.highlight.category
@@ -249,14 +273,16 @@ export function RichText({
   )
 }
 
-/** 划词后浮在选区上方的颜色条。 */
+/** 划词后浮在选区上方的工具条：荧光笔填色，或加一份下划线批注。 */
 export function SelectionToolbar({
   rect,
   onPick,
+  onComment,
   onClose,
 }: {
   rect: DOMRect
   onPick: (color: AnnotationColor) => void
+  onComment: () => void
   onClose: () => void
 }) {
   useEffect(() => {
@@ -267,7 +293,7 @@ export function SelectionToolbar({
     return () => document.removeEventListener('pointerdown', onPointerDown)
   }, [onClose])
 
-  const width = 188
+  const width = 250
   const left = Math.min(
     window.innerWidth - width - 12,
     Math.max(12, rect.left + rect.width / 2 - width / 2),
@@ -280,7 +306,7 @@ export function SelectionToolbar({
       style={{ left, top }}
       onMouseDown={(e) => e.preventDefault()}
     >
-      <span className="hl-toolbar-label">标记</span>
+      <span className="hl-toolbar-label">荧光笔</span>
       {HL_COLORS.map((c) => (
         <button
           key={c.key}
@@ -290,6 +316,11 @@ export function SelectionToolbar({
           onClick={() => onPick(c.key)}
         />
       ))}
+      <span className="hl-toolbar-sep" aria-hidden />
+      <button type="button" className="hl-toolbar-comment" onClick={onComment}>
+        <span className="cm-preview" aria-hidden />
+        批注
+      </button>
       <button type="button" className="hl-toolbar-close" onClick={onClose} title="取消">
         ×
       </button>
@@ -297,7 +328,7 @@ export function SelectionToolbar({
   )
 }
 
-/** 点击已有高亮：改颜色、写笔记或删除。 */
+/** 点击已有高亮/批注：改颜色、写内容或删除。 */
 export function AnnotationPopover({
   annotation,
   rect,
@@ -313,6 +344,7 @@ export function AnnotationPopover({
 }) {
   const [color, setColor] = useState<AnnotationColor>(annotation.color)
   const [note, setNote] = useState(annotation.note)
+  const isComment = annotation.kind === 'comment'
 
   useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {
@@ -334,6 +366,7 @@ export function AnnotationPopover({
   return (
     <div className="hl-editor" style={{ left, top, width }} onMouseDown={(e) => e.stopPropagation()}>
       <div className="hl-editor-head">
+        <span className="hl-editor-kind">{isComment ? '批注' : '高亮'}</span>
         <span className="hl-editor-quote" title={annotation.quote}>
           “{annotation.quote}”
         </span>
@@ -356,7 +389,7 @@ export function AnnotationPopover({
       <textarea
         className="hl-editor-note"
         value={note}
-        placeholder="写点笔记…（留空则只保留高亮）"
+        placeholder={isComment ? '写下你的批注…' : '写点笔记…（留空则只保留高亮）'}
         onChange={(e) => setNote(e.target.value)}
         rows={3}
       />

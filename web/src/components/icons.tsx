@@ -281,6 +281,15 @@ export function IconPdf() {
   )
 }
 
+export function IconComment() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <path d="M21 11.5a8 8 0 0 1-8 8H7l-4 3V11.5a8 8 0 0 1 8-8h2a8 8 0 0 1 8 8Z" />
+      <path d="M8 11h8M8 15h5" />
+    </svg>
+  )
+}
+
 export function IconBook() {
   return (
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">

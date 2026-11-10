@@ -6,15 +6,31 @@ import type { Annotation, AnnotationColor, ReadingHighlight } from '../lib/libra
 import { tourBus } from '../tour/tourBus'
 import { ChatPanel } from './ChatPanel'
 import { PaperAttachments } from './PaperAttachments'
+import { CommentsPanel } from './CommentsPanel'
 import { OutlinePanel } from './OutlinePanel'
 import { KeyPointsPanel } from './KeyPointsPanel'
 import { FiguresPanel } from './FiguresPanel'
 import { GuidePanel } from './GuidePanel'
 import { LineagePanel } from './LineagePanel'
-import { NotesPanel } from './NotesPanel'
-import { IconBook, IconChat, IconFolder, IconImage, IconKey, IconList, IconSpark } from './icons'
+import {
+  IconChat,
+  IconComment,
+  IconFolder,
+  IconImage,
+  IconKey,
+  IconList,
+  IconSpark,
+} from './icons'
 
-export type TabKey = 'guide' | 'chat' | 'files' | 'outline' | 'key' | 'lineage' | 'figures' | 'notes'
+export type TabKey =
+  | 'guide'
+  | 'chat'
+  | 'files'
+  | 'outline'
+  | 'key'
+  | 'comments'
+  | 'lineage'
+  | 'figures'
 
 export interface PanelProps {
   paperId: string
@@ -46,8 +62,8 @@ export const PANEL_TABS: { key: TabKey; label: string; icon: ReactNode }[] = [
   { key: 'outline', label: '目录', icon: <IconList /> },
   { key: 'lineage', label: '脉络', icon: <IconKey /> },
   { key: 'key', label: '阅读重点', icon: <IconKey /> },
+  { key: 'comments', label: '批注', icon: <IconComment /> },
   { key: 'figures', label: '图表', icon: <IconImage /> },
-  { key: 'notes', label: '笔记', icon: <IconBook /> },
 ]
 
 function initialTab(): TabKey {
@@ -93,9 +109,9 @@ export function PanelBody({
     return <PaperAttachments paperId={paperId} />
   }
 
-  if (tab === 'notes') {
+  if (tab === 'comments') {
     return (
-      <NotesPanel
+      <CommentsPanel
         paper={paper}
         annotations={annotations}
         onJump={onJump}
@@ -125,7 +141,12 @@ export function PanelBody({
         <OutlinePanel items={outline} activeId={activeId} onJump={onJump} />
       )}
       {tab === 'key' && (
-        <KeyPointsPanel highlights={highlights} points={points} onJump={onJump} />
+        <KeyPointsPanel
+          highlights={highlights}
+          points={points}
+          annotations={annotations}
+          onJump={onJump}
+        />
       )}
       {tab === 'figures' && <FiguresPanel blocks={paper.blocks} onJump={onJump} />}
     </div>

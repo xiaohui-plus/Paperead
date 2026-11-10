@@ -1,21 +1,28 @@
+import { useMemo } from 'react'
 import type { KeyPoint } from '../lib/assistant'
-import type { HighlightCategory, ReadingHighlight } from '../lib/library'
+import type { Annotation, HighlightCategory, ReadingHighlight } from '../lib/library'
 import { HIGHLIGHT_LABELS } from './Annotations'
 
 interface Props {
   highlights: ReadingHighlight[]
   points: KeyPoint[]
+  annotations?: Annotation[]
   onJump: (id: string) => void
 }
 
 const ORDER: HighlightCategory[] = ['objective', 'method', 'conclusion']
 
 /**
- * 阅读重点：正文翻译完成后自动抽出的研究目标 / 方法 / 结论，
- * 按类别分组，原文和译文并排摘录；点击回到原文位置。
+ * 阅读重点：正文翻译完成后自动抽出的研究目标 / 方法 / 结论，按类别分组；
+ * 用户自己的荧光笔高亮也收在这里的「我的荧光笔」分组。批注不在这里。
  */
-export function KeyPointsPanel({ highlights, points, onJump }: Props) {
-  if (!highlights.length) {
+export function KeyPointsPanel({ highlights, points, annotations = [], onJump }: Props) {
+  const mine = useMemo(
+    () => annotations.filter((item) => item.kind === 'highlight'),
+    [annotations],
+  )
+
+  if (!highlights.length && !mine.length) {
     return (
       <div className="kp-empty">
         <p>读完当前页并完成翻译后，这里会自动按「研究目标 / 研究方法 / 主要结论」摘录重点。</p>
@@ -38,9 +45,11 @@ export function KeyPointsPanel({ highlights, points, onJump }: Props) {
 
   return (
     <div className="kp-panel">
-      <p className="quick-label kp-intro">
-        翻译完成一页就自动标一页；正文里的颜色和这里一一对应。
-      </p>
+      {highlights.length > 0 && (
+        <p className="quick-label kp-intro">
+          翻译完成一页就自动标一页；正文里的颜色和这里一一对应。
+        </p>
+      )}
       {ORDER.map((category) => {
         const items = highlights
           .filter((item) => item.category === category)
@@ -71,6 +80,33 @@ export function KeyPointsPanel({ highlights, points, onJump }: Props) {
           </section>
         )
       })}
+
+      {mine.length > 0 && (
+        <section className="kp-group">
+          <div className="kp-group-head">
+            <span className="kp-swatch kp-swatch-user" aria-hidden />
+            <h3>我的荧光笔</h3>
+            <span className="kp-count">{mine.length}</span>
+          </div>
+          {[...mine]
+            .sort((a, b) => a.block_id.localeCompare(b.block_id) || a.start - b.start)
+            .map((item) => (
+              <button
+                key={`${item.id}-${item.updated_at}`}
+                className="kp-card kp-card-user"
+                onClick={() => onJump(item.block_id)}
+                title="跳到原文"
+              >
+                <div className="kp-card-meta">
+                  <span className={`kp-swatch cm-${item.color}`} aria-hidden />
+                  <span>{item.source === 'en' ? '原文' : '译文'}</span>
+                </div>
+                <p className="kp-card-en">{item.quote}</p>
+                {item.note.trim() && <p className="kp-card-zh">{item.note}</p>}
+              </button>
+            ))}
+        </section>
+      )}
     </div>
   )
 }
