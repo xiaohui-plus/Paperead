@@ -189,17 +189,30 @@ Gitee 只传这六个：安装包、安装包 zip、`pandoc-2.19.2-windows-x86_6
 
 > ⚠️ **不要在 Gitee 描述里写死 GitHub 的直链**。Gitee 的安装包应上传到 Gitee 自身，避免国内用户访问 GitHub 附件失败。
 
+### 更新链路：用户从哪里拉
+
+已装用户的「更新」不是重新下载安装包，而是走自动更新链路。每一段从哪个平台拉，发布前要心里有数：
+
+| 环节 | 从哪拉 | 说明 |
+| --- | --- | --- |
+| 检查新版本 | `latest.json` 清单 | 内置端点是 GitHub Releases（ghproxy 镜像兜底），可用 `PAPEREAD_UPDATE_ENDPOINT` 环境变量覆盖 |
+| 下载新安装包 | `latest.json` 里内嵌的 `url` | CI（tauri-action）自动生成时指向 GitHub；手动重签名生成时用 `make_latest_json.py --url`，国内用户建议指向 Gitee 安装包直链 |
+| pandoc 首次启动下载 | **Gitee 优先**，ghproxy / GitHub 兜底 | 顺序写在 `pandoc_setup.py` 里；Gitee 漏传 `pandoc-*.zip`，国内用户导出会一直失败 |
+
+> 结论：**Gitee 是国内用户的拉取主通道**。发布时 Gitee 附件必须齐全、及时，否则国内用户「装得上、更不动、导不出」。
+
 ### 发布后核对
 
 - [ ] GitHub Release 已可见，附件可下载
 - [ ] Gitee Release 已可见，附件可下载
 - [ ] 两边版本号、更新说明一字不差
 - [ ] 安装包与便携版是同一次构建的产物
+- [ ] `latest.json` 可访问、内嵌下载 url 有效（已装用户的自动更新依赖它）
 
 ### 别忘了
 
 - README 顶部两条下载链接（GitHub + Gitee）已同步
-- `make_latest_json.py` 里的 `--url` 指向新 tag
+- `make_latest_json.py` 里的 `--url` 指向 **Gitee 安装包直链**（国内拉取主通道），例如 `https://gitee.com/deng_xiaohui/paperead/releases/download/v0.1.7/Paperead_0.1.7_x64-setup.exe`
 - 图标改动用 `npx tauri icon src-tauri/icons/app-icon.svg`，资源管理器还显示旧图就 `ie4uinit.exe -show`
 
 ---
@@ -218,6 +231,7 @@ Gitee 只传这六个：安装包、安装包 zip、`pandoc-2.19.2-windows-x86_6
 - [ ] GitHub draft 已转为正式 release 并设为 latest
 - [ ] Gitee 发行版已创建，附件齐全、下载链接返回 200
 - [ ] **两个平台版本号、更新说明、安装包完全一致**
+- [ ] `latest.json` 可访问、内嵌下载 url 有效（国内拉取主通道）
 - [ ] README 下载链接（GitHub + Gitee）已同步
 
 ---
