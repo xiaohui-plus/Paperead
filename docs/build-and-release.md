@@ -3,6 +3,10 @@
 > 这份手册只解决一件事：**把能用的东西装进安装包，并且让它出现在下载页上。**
 > 每次发版前照着走一遍，能避开我们踩过的所有坑。
 
+> ⚠️ **核心原则：所有版本必须同时发布到 GitHub 和 Gitee。**
+> 两个平台的版本号、更新说明、安装包要完全一致，不能先发一个再补另一个。
+> README 顶部的下载链接用 `releases/latest` 自动指向最新版，不用每次手动改。
+
 ---
 
 ## 一、先记住一句话
@@ -150,9 +154,12 @@ LaTeX 相关单元测试：
 
 ---
 
-## 五、发布：GitHub 自动，Gitee 手动
+## 五、发布：双平台同步，缺一不可
 
-### GitHub
+**原则：GitHub 和 Gitee 必须在同一次发布动作里都更新，版本号、更新说明、附件完全一致。**
+只发一个平台等于漏发一半用户。
+
+### GitHub（自动构建 + 手动转正）
 
 1. 推 tag：`git push origin v0.1.5`
 2. Actions 跑完会生成 **draft** release
@@ -169,18 +176,29 @@ Invoke-RestMethod -Uri "https://api.github.com/repos/xiaohui-plus/Paperead/relea
   -Method Patch -Headers $h -ContentType "application/json" -Body $body
 ```
 
-### Gitee
+GitHub 附件：安装包、便携版、`pandoc-*.zip`、源码 zip、`latest.json`、`SHA256SUMS.txt`。
+
+### Gitee（手动）
 
 1. 先推 tag 和分支：`git push gitee v0.1.5`、`git push gitee feat/desktop-m0:master`
 2. 建发行版：`POST https://gitee.com/api/v5/repos/deng_xiaohui/paperead/releases`
 3. 传附件：`POST .../releases/{id}/attach_files?access_token=...`，multipart 字段名固定是 `file`
 
 Gitee 只传这六个：安装包、安装包 zip、`pandoc-2.19.2-windows-x86_64.zip`、源码 zip、`latest.json`、`SHA256SUMS.txt`。
-便携版走 GitHub。pandoc 那个 zip 是安装包首次启动的下载源，漏传的话用户导出会一直失败。
+便携版走 GitHub（> 100 MB 超 Gitee 限制）。pandoc 那个 zip 是安装包首次启动的下载源，漏传的话用户导出会一直失败。
+
+> ⚠️ **不要在 Gitee 描述里写死 GitHub 的直链**。Gitee 的安装包应上传到 Gitee 自身，避免国内用户访问 GitHub 附件失败。
+
+### 发布后核对
+
+- [ ] GitHub Release 已可见，附件可下载
+- [ ] Gitee Release 已可见，附件可下载
+- [ ] 两边版本号、更新说明一字不差
+- [ ] 安装包与便携版是同一次构建的产物
 
 ### 别忘了
 
-- README 顶部三条下载链接同步到新版本号
+- README 顶部两条下载链接（GitHub + Gitee）已同步
 - `make_latest_json.py` 里的 `--url` 指向新 tag
 - 图标改动用 `npx tauri icon src-tauri/icons/app-icon.svg`，资源管理器还显示旧图就 `ie4uinit.exe -show`
 
@@ -198,8 +216,9 @@ Gitee 只传这六个：安装包、安装包 zip、`pandoc-2.19.2-windows-x86_6
 - [ ] 代码已推到 GitHub `main` 和 Gitee `master`
 - [ ] tag 指向**最终** commit
 - [ ] GitHub draft 已转为正式 release 并设为 latest
-- [ ] Gitee 发行版附件齐全、下载链接返回 200
-- [ ] README 下载链接已更新
+- [ ] Gitee 发行版已创建，附件齐全、下载链接返回 200
+- [ ] **两个平台版本号、更新说明、安装包完全一致**
+- [ ] README 下载链接（GitHub + Gitee）已同步
 
 ---
 
