@@ -140,11 +140,6 @@ export function ResearchHome({ kind, projects, onStart }: Props) {
           {kind === 'research' ? <IconSpark /> : <IconList />}
           {kind === 'research' ? '研究' : '写综述报告'}
         </span>
-        <h1>
-          {kind === 'research'
-            ? '快速开始，或切换项目继续研究'
-            : '今天想研究点什么？'}
-        </h1>
         <p>
           {kind === 'research'
             ? '从文献库或学术库出发，检索、精读、整理，再让 agent 接着往下做。'

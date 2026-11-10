@@ -81,10 +81,10 @@ export function ToolchainPanel() {
   const [copied, setCopied] = useState(false)
   const [startingPandoc, setStartingPandoc] = useState(false)
 
-  const load = useCallback(async (silent = false) => {
+  const load = useCallback(async (silent = false, refresh = false) => {
     if (!silent) setLoading(true)
     try {
-      const res = await fetch('/api/toolchain')
+      const res = await fetch(`/api/toolchain${refresh ? '?refresh=1' : ''}`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       setStatus((await res.json()) as ToolchainStatus)
       setError('')
@@ -118,7 +118,7 @@ export function ToolchainPanel() {
         const data = (await res.json()) as InstallJob
         if (!alive) return
         setJob(data)
-        if (data.status !== 'running') void load()
+        if (data.status !== 'running') void load(false, true)
       } catch {
         /* 网络抖动不打断轮询 */
       }
@@ -139,7 +139,7 @@ export function ToolchainPanel() {
       if (data.jobId) {
         setJob({ id: data.jobId, status: 'running', log: [], exitCode: null, error: null })
       } else {
-        await load()
+        await load(false, true)
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : '启动安装失败')
@@ -189,7 +189,11 @@ export function ToolchainPanel() {
             导出 PDF 还需要本机的 LaTeX 引擎，可以在下面一键安装。
           </p>
         </div>
-        <button className="btn small" onClick={() => void load()} disabled={loading}>
+        <button
+          className="btn small"
+          onClick={() => void load(false, true)}
+          disabled={loading}
+        >
           <IconRefresh /> {loading ? '检测中…' : '重新检测'}
         </button>
       </section>

@@ -509,9 +509,28 @@ def bib_stem(directory: Path) -> str | None:
     return None
 
 
+def _hidden_kwargs() -> dict[str, Any]:
+    """Windows 下让子进程不弹控制台窗口。
+
+    自检会在后台悄悄跑 ``--version``；如果父进程没有控制台，控制台子程序默认
+    会新开一个黑色终端窗口，用户会看到窗口一闪而过。
+    """
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "startupinfo": startupinfo,
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    }
+
+
 def _probe_version(command: list[str], timeout: int = 8) -> str:
     try:
-        proc = subprocess.run(command, capture_output=True, timeout=timeout)
+        proc = subprocess.run(
+            command, capture_output=True, timeout=timeout, **_hidden_kwargs()
+        )
     except (OSError, subprocess.TimeoutExpired):
         return ""
     raw = (proc.stdout or proc.stderr).decode("utf-8", "replace").strip()
