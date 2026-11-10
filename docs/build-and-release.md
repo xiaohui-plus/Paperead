@@ -159,6 +159,26 @@ LaTeX 相关单元测试：
 **原则：GitHub 和 Gitee 必须在同一次发布动作里都更新，版本号、更新说明、附件完全一致。**
 只发一个平台等于漏发一半用户。
 
+### 一条命令收尾（推荐）
+
+构建、验证完成后，直接跑发布脚本：
+
+```powershell
+$env:GITEE_TOKEN = "私人令牌（需要 releases 权限）"
+npm run release:publish -- -Version 0.1.7
+```
+
+脚本（`scripts/release-publish.ps1`）依次做四件事：
+
+1. **GitHub**：把 CI 生成的 draft release 转正并设为 latest；Gitee 描述自动取 GitHub 更新说明，两边一字不差
+2. **Gitee 版本发行版**：不存在就创建（tag 必须先推上去），再上传安装包、`pandoc-*.zip`、`latest.json`、`SHA256SUMS.txt`，同名附件自动替换；可选 `-SourceZip` 补传源码 zip
+3. **Gitee `latest` 固定发行版**：不存在就创建，并把 `latest.json` 附件替换成本次版本
+4. **下载自检**：Gitee 安装包和 latest.json 直链必须返回 200，且 latest.json 内嵌版本一致，否则退出码 1
+
+常用参数：`-SkipGithub` / `-SkipGitee` 只发一边（收尾补漏时用）、`-Notes "说明"` 覆盖更新描述。
+
+下面的手动流程保留作参考（脚本报错时按此排查）：
+
 ### GitHub（自动构建 + 手动转正）
 
 1. 推 tag：`git push origin v0.1.5`
@@ -187,7 +207,7 @@ GitHub 附件：安装包、便携版、`pandoc-*.zip`、源码 zip、`latest.js
 Gitee 只传这六个：安装包、安装包 zip、`pandoc-2.19.2-windows-x86_64.zip`、源码 zip、`latest.json`、`SHA256SUMS.txt`。
 便携版走 GitHub（> 100 MB 超 Gitee 限制）。pandoc 那个 zip 是安装包首次启动的下载源，漏传的话用户导出会一直失败。
 
-**另外必须维护一个固定 tag 为 `latest` 的发行版**（创建一次，长期存在）：
+**另外必须维护一个固定 tag 为 `latest` 的发行版**（脚本会自动创建和替换）：
 Gitee 没有 `releases/latest/download/` 永久直链，应用的更新检查端点第一位就是
 `https://gitee.com/deng_xiaohui/paperead/releases/download/latest/latest.json`。
 每次发版后把它的 `latest.json` 附件替换成本次版本，漏更新的话已装用户永远检查不到新版本：
