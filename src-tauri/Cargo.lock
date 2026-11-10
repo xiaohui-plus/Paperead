@@ -2590,7 +2590,7 @@ dependencies = [
 
 [[package]]
 name = "paperead-desktop"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "futures-util",
  "rand 0.8.8",

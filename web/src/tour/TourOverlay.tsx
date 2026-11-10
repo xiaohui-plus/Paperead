@@ -39,10 +39,17 @@ const TAB_LABEL: Record<string, string> = {
   lineage: '脉络',
   files: '文件',
   sessions: '会话',
+  comments: '批注',
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+/** 界面整体做了 CSS zoom（--ui-zoom），锚点坐标要换算回布局像素才不会飘出窗口。 */
+function uiZoom(): number {
+  const value = Number.parseFloat(getComputedStyle(document.documentElement).zoom)
+  return Number.isFinite(value) && value > 0 ? value : 1
 }
 
 function currentParam(name: string): string | null {
@@ -97,6 +104,9 @@ export function TourOverlay({
   const [covered, setCovered] = useState(false)
   const [narrow, setNarrow] = useState(
     () => typeof window !== 'undefined' && window.innerWidth < 720,
+  )
+  const [zoom, setZoom] = useState(() =>
+    typeof window === 'undefined' ? 1 : uiZoom(),
   )
   const [bubblePos, setBubblePos] = useState<CSSProperties>({})
   const [side, setSide] = useState<Side>('right')
@@ -213,11 +223,13 @@ export function TourOverlay({
     }
     if (cancelled()) return
     const box = element.getBoundingClientRect()
+    const scale = uiZoom()
+    setZoom(scale)
     setRect({
-      top: box.top,
-      left: box.left,
-      width: box.width,
-      height: box.height,
+      top: box.top / scale,
+      left: box.left / scale,
+      width: box.width / scale,
+      height: box.height / scale,
     })
     setMissing(false)
   }, [])
@@ -264,11 +276,13 @@ export function TourOverlay({
       const element = document.querySelector<HTMLElement>(step.selector)
       if (!element) return
       const box = element.getBoundingClientRect()
+      const scale = uiZoom()
+      setZoom(scale)
       setRect({
-        top: box.top,
-        left: box.left,
-        width: box.width,
-        height: box.height,
+        top: box.top / scale,
+        left: box.left / scale,
+        width: box.width / scale,
+        height: box.height / scale,
       })
       setMissing(false)
     }
@@ -339,8 +353,9 @@ export function TourOverlay({
     if (!bubble) return
     const width = bubble.offsetWidth
     const height = bubble.offsetHeight
-    const viewportW = window.innerWidth
-    const viewportH = window.innerHeight
+    // rect 已换算成布局像素，窗口尺寸也要按同样的比例换算
+    const viewportW = window.innerWidth / zoom
+    const viewportH = window.innerHeight / zoom
     const preferred = step?.placement ?? 'right'
     const order: Side[] = [preferred, 'right', 'bottom', 'left', 'top']
     const seen = new Set<Side>()
@@ -398,16 +413,31 @@ export function TourOverlay({
       left: EDGE,
       top: Math.round(clamp(rect.top + rect.height + GAP, EDGE, viewportH - height - EDGE)),
     })
-  }, [rect, narrow, missing, step, done, visitedTabs, fallbackReady])
+  }, [rect, zoom, narrow, missing, step, done, visitedTabs, fallbackReady])
 
-  // Esc 退出；不拦截其它按键，避免影响正常操作
+  // Esc 退出；← / → 切换步骤；不影响输入框里的正常按键
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
+      if (event.key === 'Escape') {
+        onClose()
+        return
+      }
+      const target = event.target as HTMLElement | null
+      const typing =
+        target?.tagName === 'INPUT' ||
+        target?.tagName === 'TEXTAREA' ||
+        Boolean(target?.isContentEditable)
+      if (typing) return
+      if (event.key === 'ArrowRight') {
+        setIndex((prev) => Math.min(prev + 1, steps.length - 1))
+      }
+      if (event.key === 'ArrowLeft') {
+        setIndex((prev) => Math.max(0, prev - 1))
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  }, [onClose, steps.length])
 
   useEffect(() => () => clearAdvance(), [])
 
@@ -421,9 +451,10 @@ export function TourOverlay({
           <h2>第一遍走完了</h2>
           <p>{step.body}</p>
           <ul className="tour-complete-list">
-            <li>读一篇论文：导读、问答、目录与图表</li>
+            <li>读一篇论文：对照翻译、导读、问答、批注与附件</li>
+            <li>接一次 Zotero：双向同步文献、PDF 和分类</li>
             <li>找一次文献：检索、筛选、加入文献库</li>
-            <li>做一个研究项目：附件、会话、产物</li>
+            <li>做一个研究项目：会话、文件、产物</li>
             <li>写一篇综述：大纲、初稿、引用审计与导出</li>
           </ul>
           <div className="tour-complete-actions">

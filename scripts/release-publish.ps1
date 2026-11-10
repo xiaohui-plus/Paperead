@@ -26,6 +26,7 @@ $tag = "v$Version"
 
 $installer    = Join-Path $root "release\Paperead_${Version}_x64-setup.exe"
 $installerZip = Join-Path $root "release\Paperead_${Version}_x64-setup.zip"
+$android      = Get-ChildItem (Join-Path $root "release\Paperead_${Version}_android-*.apk") -ErrorAction SilentlyContinue | Select-Object -First 1
 $pandoc       = Get-ChildItem (Join-Path $root "release\pandoc-*.zip") -ErrorAction SilentlyContinue | Select-Object -First 1
 $latestJson   = Join-Path $root "release\latest.json"
 $sums         = Join-Path $root "release\SHA256SUMS.txt"
@@ -36,6 +37,7 @@ foreach ($f in @($installer, $latestJson, $sums)) {
     if (-not (Test-Path $f)) { $missing += $f }
 }
 if (-not $pandoc) { $missing += "release\pandoc-*.zip" }
+if (-not $android) { $missing += "release\Paperead_${Version}_android-*.apk（先跑 build:android）" }
 if ($missing.Count -gt 0) {
     throw "缺少发布物料：`n  " + ($missing -join "`n  ")
 }
@@ -68,6 +70,18 @@ if (-not $SkipGithub) {
         throw "GitHub 上找不到 $tag（先推 tag 并等 CI 构建完）。$($_.Exception.Message)"
     }
     if ($rel.draft) {
+        # 安卓 APK 是本地构建的，CI 手里没有：转正前先补传到同一个 release
+        $apkName = Split-Path -Leaf $android.FullName
+        if (-not (@($rel.assets) | Where-Object { $_.name -eq $apkName })) {
+            $upload = $rel.upload_url -replace '\{.*\}$', ''
+            $uri = "$upload?name=$([uri]::EscapeDataString($apkName))"
+            Invoke-RestMethod -Method Post -Uri $uri `
+                -Headers @{ Authorization = "Bearer $tok"; Accept = "application/vnd.github+json" } `
+                -ContentType "application/octet-stream" -InFile $android.FullName | Out-Null
+            Write-Host "GitHub: 已补传 $apkName"
+        } else {
+            Write-Host "GitHub: $apkName 已存在，跳过"
+        }
         Invoke-RestMethod -Method Patch -Uri "https://api.github.com/repos/$GithubRepo/releases/$($rel.id)" @gh `
             -ContentType "application/json" -Body '{"draft":false,"prerelease":false,"make_latest":"true"}'
         Write-Host "GitHub: $tag 已转正并设为 latest"
@@ -146,7 +160,7 @@ if (-not $SkipGitee) {
         Write-Host "Gitee: 发行版 $tag 已存在，补齐附件（描述如需修改请手动编辑）"
     }
 
-    $files = @($installer, $sums, $latestJson, $pandoc.FullName)
+    $files = @($installer, $android.FullName, $sums, $latestJson, $pandoc.FullName)
     if (Test-Path $installerZip) { $files += $installerZip }
     if ($SourceZip -and (Test-Path $SourceZip)) { $files += $SourceZip }
     else { Write-Host "  提示：未提供源码 zip（-SourceZip），跳过" }
@@ -170,6 +184,7 @@ Write-Host ""
 Write-Host "==== 下载自检 ===="
 $checks = @(
     "https://gitee.com/$GiteeRepo/releases/download/$tag/$(Split-Path -Leaf $installer)",
+    "https://gitee.com/$GiteeRepo/releases/download/$tag/$(Split-Path -Leaf $android.FullName)",
     "https://gitee.com/$GiteeRepo/releases/download/latest/latest.json"
 )
 $failed = 0

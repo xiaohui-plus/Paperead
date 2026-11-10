@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { tourSteps } from './tourSteps'
 
 interface Props {
   onStart: () => void
@@ -37,8 +38,14 @@ export function TourGate({ onStart, onSkip }: Props) {
             跳过，先自己看看
           </button>
         </div>
+        <ul className="tour-gate-list">
+          <li>读一篇：对照翻译、导读、问答、批注与附件</li>
+          <li>接 Zotero：文献、PDF 和分类双向同步</li>
+          <li>找文献 / 做研究：四源检索、项目、会话与产物</li>
+          <li>写综述：大纲、初稿、引用审计与导出</li>
+        </ul>
         <p className="tour-gate-note">
-          只会在首次启动时出现一次。之后可在「设置 → 新手教程」重新打开。
+          共 {tourSteps.length} 步，随时可以退出，进度会自动记住。之后可在「设置 → 新手教程」重新打开。
         </p>
       </div>
     </div>

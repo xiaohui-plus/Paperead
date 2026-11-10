@@ -91,18 +91,35 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "Paperead ${{ github.ref_name }}"
           releaseBody: |
-            Windows 10/11 x64 安装包。
+            ## 本次更新
 
-            - 安装包：`Paperead_*_x64-setup.exe`
-            - 便携版：`Paperead_*_portable_x64.zip`（自带 pandoc，完全离线）
+            - 手机端「设备同步」新增**导入并拉取**：把电脑上学术阅读（Scholaread）已下载的文献一次导入文库并同步到手机；它自带的新手说明 PDF 不再混进文献库
+            - 手机端请求统一携带访问口令，修掉配对后部分接口 403、图片和 PDF 打不开的问题
+            - 新手引导补上 Zotero 同步、批注、附件三站，手机上按可视区域自适应
+            - arXiv 限流时给出明确提示，不再显示成「0 条结果」；PubMed 请求之间自动错峰
+
+            ## Windows 10/11 x64
+
+            - 安装包：`Paperead_*_x64-setup.exe`（推荐，per-user 安装，不弹 UAC）
+            - 便携版：`Paperead_*_portable_x64.zip`（自带 pandoc，解压后双击「启动.cmd」，完全离线）
+            - 自动更新清单：`latest.json`（仅 Windows 使用）
             - pandoc 下载源：`pandoc-2.19.2-windows-x86_64.zip`
-            - 源码：`Paperead_*_source.zip`
-            - 自动更新清单：`latest.json`（随 Release 发布）
 
-            安装包不再内置 pandoc：首次启动会在后台自动下载一次（约 24MB），
+            安装包不内置 pandoc：首次启动会在后台自动下载一次（约 24MB），
             之后离线可用；也可以在「设置 → 写作工具」里手动重试。
-            首次启动会引导填写模型 API Key；PDF 与阅读数据默认保存在
-            `%LOCALAPPDATA%\\paperead-data`。
+            PDF 与阅读数据默认保存在 `%LOCALAPPDATA%\\paperead-data`。
+
+            ## Android（arm64）
+
+            - APK：`Paperead_*_android-arm64.apk`（Android 8.0 / API 24 及以上，arm64 设备）
+            - 手机端是「内置前端 + 连电脑后端」：先在电脑上运行 Paperead 桌面版，
+              手机与电脑在同一个局域网，打开 App 后填写电脑地址（或扫桌面端二维码配对）。
+            - 手机端支持文献库、阅读、离线缓存与设备同步；研究与写综述仍在电脑端完成。
+
+            ## 通用
+
+            - 源码：`Paperead_*_source.zip`
+            - 首次启动会引导填写模型 API Key；手机端配对后沿用电脑上的模型配置。
           releaseDraft: true
           prerelease: false
           includeUpdaterJson: true

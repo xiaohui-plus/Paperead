@@ -11,11 +11,14 @@ import { Format, requestPermissions, scan } from '@tauri-apps/plugin-barcode-sca
 import {
   buildSyncCode,
   fetchRemotePapers,
+  fetchScholarReadInfo,
   fetchServerModelSettings,
   fetchSyncInfo,
+  importScholarReadLibrary,
   parseSyncCode,
   syncFromServer,
   type RemotePaper,
+  type ScholarReadInfo,
   type SyncInfo,
   type SyncMode,
   type SyncReport,
@@ -196,6 +199,8 @@ export function MobileDeviceSyncPanel({ onDone }: { onDone?: () => void } = {}) 
 
   const [remote, setRemote] = useState<RemotePaper[]>([])
   const [local, setLocal] = useState<OfflineSummary[]>([])
+  const [scholar, setScholar] = useState<ScholarReadInfo | null>(null)
+  const [importing, setImporting] = useState(false)
   const [loadingRemote, setLoadingRemote] = useState(false)
   const [remoteError, setRemoteError] = useState('')
   const [view, setView] = useState<SyncView>('main')
@@ -229,6 +234,8 @@ export function MobileDeviceSyncPanel({ onDone }: { onDone?: () => void } = {}) 
         // 本机离线库也读不到时保持原样
       }
     } finally {
+      // 学术阅读是可选能力：检测失败不影响正常同步
+      setScholar(await fetchScholarReadInfo().catch(() => null))
       setLoadingRemote(false)
     }
   }, [])
@@ -318,6 +325,43 @@ export function MobileDeviceSyncPanel({ onDone }: { onDone?: () => void } = {}) 
     [loadRemote],
   )
 
+  /** 让电脑先把 Scholaread 里已下载的文献导入文库，再合并到手机。 */
+  const importAndSync = useCallback(async () => {
+    setImporting(true)
+    setRunning(true)
+    setReport(null)
+    setError('')
+    setNotice('')
+    setProgress({ done: 0, total: 0, title: '' })
+    try {
+      const imported = await importScholarReadLibrary()
+      const result = await syncFromServer({ mode: 'merge', onProgress: setProgress })
+      setReport({
+        ...result,
+        scholaread: {
+          imported: imported.imported,
+          linked: imported.linked,
+          skippedNoPdf: imported.skippedNoPdf,
+        },
+      })
+      if (imported.errors.length > 0) {
+        setError(imported.errors.slice(0, 3).join('；'))
+      }
+      if (imported.running) {
+        setNotice('学术阅读正在电脑上运行，本次只导入，不改动它的数据')
+      }
+      setView('main')
+      setChecked(new Set())
+      await loadRemote()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '从电脑端学术阅读导入失败')
+    } finally {
+      setProgress(null)
+      setRunning(false)
+      setImporting(false)
+    }
+  }, [loadRemote])
+
   const toggle = (paperId: string) => {
     setChecked((prev) => {
       const next = new Set(prev)
@@ -374,6 +418,25 @@ export function MobileDeviceSyncPanel({ onDone }: { onDone?: () => void } = {}) 
                   手机本机 <b>{local.length}</b> 篇
                 </span>
               </div>
+
+              {scholar?.ok && scholar.total > 0 && (
+                <div className="sync-scholaread">
+                  <div className="sync-scholaread-meta">
+                    <b>学术阅读（Scholaread）</b>
+                    <span>
+                      电脑上已下载 {scholar.total} 篇，其中 {scholar.withPdf} 篇可导入
+                      {scholar.running ? ' · 它正在运行，只导入不改动' : ''}
+                    </span>
+                  </div>
+                  <button
+                    className="mini-btn"
+                    onClick={() => void importAndSync()}
+                    disabled={running || importing || scholar.withPdf === 0}
+                  >
+                    {importing ? '导入中…' : '导入并拉取'}
+                  </button>
+                </div>
+              )}
 
               <div className="sync-mode-grid">
                 <button
@@ -530,6 +593,16 @@ export function MobileDeviceSyncPanel({ onDone }: { onDone?: () => void } = {}) 
                 {report.skipped ? `，跳过已有 ${report.skipped} 篇` : ''}
                 {report.removed ? `，删除本机多余 ${report.removed} 篇` : ''}。
               </p>
+              {report.scholaread && (
+                <p>
+                  学术阅读导入 {report.scholaread.imported} 篇
+                  {report.scholaread.linked ? `，关联已有 ${report.scholaread.linked} 篇` : ''}
+                  {report.scholaread.skippedNoPdf
+                    ? `，${report.scholaread.skippedNoPdf} 篇缺少本机 PDF`
+                    : ''}
+                  。新导入的文献电脑端还要解析，解析完成的会在下次「并集合并」时拉到手机。
+                </p>
+              )}
               {report.failed.length > 0 && (
                 <ul>
                   {report.failed.slice(0, 5).map((item) => (

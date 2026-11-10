@@ -827,7 +827,7 @@ export function SettingsDialog({
                   onClick={() => setTab('scholaread')}
                 >
                   <IconRefresh />
-                  <span>学术阅读同步</span>
+                  <span>Scholaread 同步</span>
                 </button>
                 <button
                   className="library-nav-item"

@@ -44,6 +44,13 @@ MAX_PDF_BYTES = 200 * 1024 * 1024
 BACKUP_KEEP = 10
 MAX_ERRORS = 20
 
+# Scholaread 客户端自带的新手说明 PDF，不是用户的文献，同步时跳过
+WELCOME_TITLES = {"scholaread: read me", "read me"}
+
+
+def _is_welcome_doc(title: Any) -> bool:
+    return str(title or "").strip().lower() in WELCOME_TITLES
+
 
 class SyncReq(BaseModel):
     data_dir: str = ""
@@ -263,6 +270,9 @@ def _pull(
 
     for row in rows:
         title = str(row.get("title") or row.get("name") or "").strip()
+        if _is_welcome_doc(title):
+            result["scanned"] -= 1
+            continue
         try:
             key = _reading_key(row)
             doi = str(row.get("doi") or "").strip()
@@ -523,13 +533,14 @@ def _status(data_dir: Path) -> dict[str, Any]:
             if not out["schema_ok"]:
                 out["error"] = "学术阅读数据库版本不兼容"
                 return out
-            out["total"] = int(
-                con.execute("select count(*) from reading_list").fetchone()[0]
-            )
-            out["with_pdf"] = sum(
-                1
+            rows = [
+                dict(row)
                 for row in con.execute("select * from reading_list")
-                if _pdf_path(data_dir, dict(row)) is not None
+                if not _is_welcome_doc(row["title"] if "title" in row.keys() else "")
+            ]
+            out["total"] = len(rows)
+            out["with_pdf"] = sum(
+                1 for row in rows if _pdf_path(data_dir, row) is not None
             )
             try:
                 out["notes"] = int(

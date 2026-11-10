@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, replace
 from urllib.parse import quote
 
@@ -155,7 +157,11 @@ async def _search_arxiv(data: SearchInput) -> SearchResult:
     )
     xml = await arxiv_fetch(url)
     match = re.search(r"<opensearch:totalResults[^>]*>(\d+)", xml)
-    total = int(match.group(1)) if match else 0
+    if not match:
+        # 没有 totalResults 说明拿到的不是正常 feed（限流页 / 网关错误页），
+        # 不能当成「0 条结果」，否则用户会以为这个源坏了。
+        raise FriendlyError("arXiv 接口暂时没有响应，通常是限流，请稍后重试。", True)
+    total = int(match.group(1))
     return SearchResult(parse_arxiv_entries(xml), total, None)
 
 
@@ -391,9 +397,24 @@ async def _detail_core(raw_id: str) -> Paper | None:
     return papers[0] if papers else None
 
 
+# NCBI E-utilities 未配 API Key 时限制 3 次/秒，而一次 PubMed 检索要连发
+# esearch → esummary → efetch，首屏很容易撞上限流；这里把三次请求错开。
+_PUBMED_GAP_S = 0.4
+_pubmed_last = 0.0
+
+
+async def _pubmed_pause() -> None:
+    global _pubmed_last
+    wait = _PUBMED_GAP_S - (time.monotonic() - _pubmed_last)
+    if wait > 0:
+        await asyncio.sleep(wait)
+    _pubmed_last = time.monotonic()
+
+
 async def _pubmed_summaries(ids: list[str]) -> list[dict]:
     if not ids:
         return []
+    await _pubmed_pause()
     url = (
         f"{PUBMED_EUTILS}/esummary.fcgi?db=pubmed&retmode=json"
         f"&id={quote(','.join(ids), safe=',')}"
@@ -407,6 +428,7 @@ async def _pubmed_abstracts(ids: list[str]) -> dict[str, tuple[str, list[str]]]:
     """整页一次 efetch 取摘要。摘要只是增强信息，失败时降级为仅题录。"""
     if not ids:
         return {}
+    await _pubmed_pause()
     url = (
         f"{PUBMED_EUTILS}/efetch.fcgi?db=pubmed&retmode=xml"
         f"&id={quote(','.join(ids), safe=',')}"

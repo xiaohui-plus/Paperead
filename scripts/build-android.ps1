@@ -64,9 +64,9 @@ $built = Get-ChildItem (Join-Path $androidDir "app\build\outputs\apk") -Recurse 
   Select-Object -First 1
 if (-not $built) { throw "未找到构建产物 APK" }
 
-$outDir = Join-Path (Split-Path -Parent $root) "android"
+$outDir = Join-Path $root "release"
 New-Item -ItemType Directory -Force $outDir | Out-Null
 $label = if ($Target -eq "aarch64") { "arm64" } else { $Target }
-$outFile = Join-Path $outDir "Paperead-$version-$label.apk"
+$outFile = Join-Path $outDir "Paperead_${version}_android-$label.apk"
 Copy-Item $built.FullName $outFile -Force
 Write-Host "APK: $outFile ($([math]::Round((Get-Item $outFile).Length / 1MB, 2)) MB)"

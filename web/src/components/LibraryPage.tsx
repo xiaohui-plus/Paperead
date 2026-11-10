@@ -604,6 +604,7 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
             {!mobile && (
               <button
                 className="btn ghost"
+                data-tour="zotero-sync"
                 onClick={() => setZoteroSyncOpen(true)}
                 title="与 Zotero 云端双向同步文献、分类和 PDF"
               >

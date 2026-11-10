@@ -79,6 +79,22 @@ export function apiUrl(path: string): string {
 }
 
 /**
+ * 直连服务器的 fetch：自动补 token 头。
+ *
+ * `installMobileFetch` 只改写以 `/api` 开头的相对路径；用 `apiUrl()` 拼成绝对
+ * 地址的请求会绕过它，所以这些地方必须走 apiFetch，否则桌面临时口令校验会 403。
+ */
+export function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+  const { base, token } = loadMobileServer()
+  const url = base ? `${base}${path.startsWith('/') ? path : `/${path}`}` : path
+  const headers = new Headers(init?.headers || {})
+  if (token && !headers.has('X-Paperead-Token')) {
+    headers.set('X-Paperead-Token', token)
+  }
+  return fetch(url, { ...init, headers })
+}
+
+/**
  * 媒体地址（图片 / PDF / 缩略图）：`<img src>`、pdf.js 都带不了自定义头，
  * 所以把 token 放进查询参数，由服务端 guard 放行。
  */

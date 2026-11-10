@@ -4445,6 +4445,40 @@ body.col-resizing * {
   gap: 8px;
 }
 
+.sync-scholaread {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-soft);
+}
+
+.sync-scholaread-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sync-scholaread-meta b {
+  font-size: 12.5px;
+  color: var(--ink);
+}
+
+.sync-scholaread-meta span {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.sync-scholaread .mini-btn {
+  flex: none;
+}
+
 .sync-mode-card {
   display: flex;
   flex-direction: column;

@@ -2,7 +2,7 @@
  * 设备同步：电脑端把「服务器地址 + 访问口令 + 模型配置」做成二维码，
  * 手机端扫码后直接写入本机，之后就能独立同步数据、离线阅读。
  */
-import { apiUrl, normalizeServerBase } from './mobile'
+import { apiFetch, normalizeServerBase } from './mobile'
 import { deleteOffline, downloadPaper, listOffline } from './offlineStore'
 
 export interface SyncInfo {
@@ -24,7 +24,7 @@ export interface SyncPayload {
 }
 
 export async function fetchSyncInfo(): Promise<SyncInfo> {
-  const response = await fetch(apiUrl('/api/sync/info'))
+  const response = await apiFetch('/api/sync/info')
   if (!response.ok) throw new Error(`读取同步信息失败（HTTP ${response.status}）`)
   const data = (await response.json()) as Record<string, unknown>
   return {
@@ -42,7 +42,7 @@ export async function fetchSyncInfo(): Promise<SyncInfo> {
 /** 电脑端已保存的模型配置；读不到时二维码里不带配置，手机仍可正常配对。 */
 export async function fetchServerModelSettings(): Promise<Record<string, unknown> | null> {
   try {
-    const response = await fetch(apiUrl('/api/settings/models'))
+    const response = await apiFetch('/api/settings/models')
     if (!response.ok) return null
     const data = (await response.json()) as { settings?: unknown }
     return data.settings && typeof data.settings === 'object'
@@ -129,7 +129,7 @@ export interface RemotePaper {
 
 /** 电脑端文献列表（只读，用于选择要拉取哪些）。 */
 export async function fetchRemotePapers(): Promise<RemotePaper[]> {
-  const response = await fetch(apiUrl('/api/papers'))
+  const response = await apiFetch('/api/papers')
   if (!response.ok) throw new Error(`读取电脑端文献失败（HTTP ${response.status}）`)
   const data = (await response.json().catch(() => ({}))) as { papers?: unknown }
   if (!Array.isArray(data.papers)) return []
@@ -151,12 +151,76 @@ export async function fetchRemotePapers(): Promise<RemotePaper[]> {
 
 export type SyncMode = 'full' | 'select' | 'merge'
 
+/** 电脑上 Scholaread（学术阅读）的数据概况，用于手机端提示可导入多少篇。 */
+export interface ScholarReadInfo {
+  ok: boolean
+  total: number
+  withPdf: number
+  running: boolean
+  error: string
+}
+
+/** 查询电脑上的 Scholaread 是否可用、有多少篇已下载的文献。 */
+export async function fetchScholarReadInfo(): Promise<ScholarReadInfo> {
+  const response = await apiFetch('/api/scholaread/status')
+  if (!response.ok) throw new Error(`检测电脑端学术阅读失败（HTTP ${response.status}）`)
+  const data = (await response.json().catch(() => ({}))) as Record<string, unknown>
+  return {
+    ok: data.ok === true,
+    total: Number(data.total ?? 0),
+    withPdf: Number(data.with_pdf ?? 0),
+    running: data.running === true,
+    error: String(data.error ?? ''),
+  }
+}
+
+export interface ScholarReadImport {
+  imported: number
+  linked: number
+  skippedNoPdf: number
+  running: boolean
+  errors: string[]
+}
+
+/**
+ * 让电脑把 Scholaread 里已下载的文献导入 Paperead 文库。
+ * 只拉不推：手机端永远不改动电脑上 Scholaread 的数据和阅读进度。
+ */
+export async function importScholarReadLibrary(): Promise<ScholarReadImport> {
+  const response = await apiFetch('/api/scholaread/sync', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pull: true, push: false, limit: 1000 }),
+  })
+  if (!response.ok) {
+    throw new Error(`从电脑端学术阅读导入失败（HTTP ${response.status}）`)
+  }
+  const data = (await response.json().catch(() => ({}))) as Record<string, unknown>
+  if (data.ok === false && data.error) throw new Error(String(data.error))
+  const pull = (data.pull ?? {}) as Record<string, unknown>
+  const errors = Array.isArray(pull.errors)
+    ? pull.errors.map((item) => {
+        const row = item as Record<string, unknown>
+        return `${String(row.title ?? '未知文献')}：${String(row.error ?? '导入失败')}`
+      })
+    : []
+  return {
+    imported: Number(pull.imported ?? 0),
+    linked: Number(pull.linked ?? 0),
+    skippedNoPdf: Number(pull.skipped_no_pdf ?? 0),
+    running: data.running === true,
+    errors,
+  }
+}
+
 export interface SyncReport {
   mode: SyncMode
   downloaded: number
   skipped: number
   removed: number
   failed: { id: string; title: string; reason: string }[]
+  /** 本次同步前从电脑端学术阅读导入的数量（手机端「导入并拉取」） */
+  scholaread?: { imported: number; linked: number; skippedNoPdf: number }
 }
 
 export interface SyncOptions {

@@ -19,11 +19,19 @@ $asset = "pandoc-$PandocVersion-windows-x86_64.zip"
 $zip = Join-Path $cache $asset
 $target = Join-Path $cache "pandoc.exe"
 
+$publish = Join-Path $release $asset
+
 if (-not (Test-Path $zip)) {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $url = "https://github.com/jgm/pandoc/releases/download/$PandocVersion/$asset"
-    Write-Host "DOWNLOAD $url"
-    Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+    if (Test-Path $publish) {
+        # 上一版留下的下载源就是同一个文件，直接复用，免得被墙 / 断网卡住构建
+        Write-Host "REUSE $publish"
+        Copy-Item $publish $zip -Force
+    } else {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $url = "https://github.com/jgm/pandoc/releases/download/$PandocVersion/$asset"
+        Write-Host "DOWNLOAD $url"
+        Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+    }
 }
 
 if (-not (Test-Path $target)) {
@@ -36,7 +44,6 @@ if (-not (Test-Path $target)) {
 }
 
 # 安装包首次启动时按这个文件名下载，文件名和 sha256 都写死在 server/research/pandoc_setup.py。
-$publish = Join-Path $release $asset
 if (-not (Test-Path $publish)) { Copy-Item $zip $publish -Force }
 
 $version = & $target --version | Select-Object -First 1

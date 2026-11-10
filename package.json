@@ -1,7 +1,7 @@
 {
   "name": "paperead-desktop",
   "private": true,
-  "version": "0.1.6",
+  "version": "0.1.7",
   "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
@@ -18,6 +18,7 @@
     "build:sidecar": "powershell -ExecutionPolicy Bypass -File scripts/build-sidecar.ps1",
     "build:installer": "powershell -ExecutionPolicy Bypass -File scripts/build-installer.ps1",
     "build:portable": "powershell -ExecutionPolicy Bypass -File scripts/build-portable.ps1",
+    "build:android": "powershell -ExecutionPolicy Bypass -File scripts/build-android.ps1",
     "verify:release": "powershell -ExecutionPolicy Bypass -File scripts/verify-release.ps1",
     "release:publish": "powershell -ExecutionPolicy Bypass -File scripts/release-publish.ps1",
     "stage:sidecar": "powershell -ExecutionPolicy Bypass -File scripts/stage-sidecar.ps1"

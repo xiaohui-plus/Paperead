@@ -43,6 +43,9 @@ npm run build:portable
 
 # 3) 发版前体检（版本号、签名、SHA256、pytest）
 npm run verify:release
+
+# 4) 安卓 APK（arm64，release 签名）
+npm run build:android
 ```
 
 产物在这里：
@@ -52,12 +55,15 @@ npm run verify:release
 | 安装包 | `src-tauri/target/release/bundle/nsis/Paperead_x.y.z_x64-setup.exe` | 70 MB 左右（不含 pandoc） |
 | 更新签名 | 同目录 `.exe.sig` | 1 KB |
 | 便携版 | `release/Paperead_x.y.z_portable_x64.zip` | 190 MB 左右（自带 pandoc） |
+| 安卓 APK | `release/Paperead_x.y.z_android-arm64.apk` | 11 MB 左右 |
 | pandoc 下载源 | `release/pandoc-2.19.2-windows-x86_64.zip` | 24 MB |
 | 校验和 | `release/SHA256SUMS.txt` | 1 KB |
 
+> 安装包还要复制成 `release/Paperead_x.y.z_x64-setup.exe`（连 `.sig` 一起），`release-publish.ps1` 从这里取物料。
+
 ---
 
-## 三、最容易翻车的五个地方
+## 三、最容易翻车的六个地方
 
 ### 坑 1：`tauri build` 不会重建 Python sidecar
 
@@ -126,6 +132,23 @@ Error: EISDIR: illegal operation on a directory, lstat 'C:'
 - 已经发出去就别 force 改 tag，直接发下一个 patch 版本（0.1.5 → 0.1.6）
 - 本地构建和 CI 构建可能体积不同，功能一致即可，不必强行对齐
 
+### 坑 6：安卓构建链是本地私有的
+
+**症状**：`npm run build:android` 报找不到 JDK / SDK / NDK，或 Kotlin 编译报中文路径乱码。
+**原因**：安卓工具链不在 CI 里，全靠本机；`JAVA_HOME` 这类系统变量还可能是失效路径（例如指向已删除的 `D:\java`）。
+**解法**：`scripts/build-android.ps1` 会先校验目录是否存在，失效就回落到 `F:\Agent\toolchains\` 下的固定工具链：
+
+| 东西 | 路径 |
+| --- | --- |
+| JDK | `F:\Agent\toolchains\jdk\jdk-17.0.21+9` |
+| Android SDK | `F:\Agent\toolchains\android-sdk`（platform 35/36/37、build-tools 35/36/37） |
+| NDK | `F:\Agent\toolchains\android-sdk\ndk\27.2.12479018` |
+| CARGO_HOME | `F:\Agent\toolchains\cargo-home`（纯 ASCII，避开中文用户名） |
+
+- Rust 需要 `aarch64-linux-android` 等 target：`rustup target add aarch64-linux-android`
+- 签名密钥在 `src-tauri/gen/android/paperead-release.keystore` 与 `keystore.properties`（都被 gitignore），**务必离线备份**，换密钥会导致老用户无法覆盖升级
+- APK 只出 arm64（`Paperead_x.y.z_android-arm64.apk`，约 11 MB），模拟器/其他架构要自己加 `-Target`
+
 ---
 
 ## 四、验证：不看日志不算数
@@ -171,7 +194,7 @@ npm run release:publish -- -Version 0.1.7
 脚本（`scripts/release-publish.ps1`）依次做四件事：
 
 1. **GitHub**：把 CI 生成的 draft release 转正并设为 latest；Gitee 描述自动取 GitHub 更新说明，两边一字不差
-2. **Gitee 版本发行版**：不存在就创建（tag 必须先推上去），再上传安装包、`pandoc-*.zip`、`latest.json`、`SHA256SUMS.txt`，同名附件自动替换；可选 `-SourceZip` 补传源码 zip
+2. **Gitee 版本发行版**：不存在就创建（tag 必须先推上去），再上传安装包、安卓 APK、`pandoc-*.zip`、`latest.json`、`SHA256SUMS.txt`，同名附件自动替换；可选 `-SourceZip` 补传源码 zip
 3. **Gitee `latest` 固定发行版**：不存在就创建，并把 `latest.json` 附件替换成本次版本
 4. **下载自检**：Gitee 安装包和 latest.json 直链必须返回 200，且 latest.json 内嵌版本一致，否则退出码 1
 
@@ -196,7 +219,8 @@ Invoke-RestMethod -Uri "https://api.github.com/repos/xiaohui-plus/Paperead/relea
   -Method Patch -Headers $h -ContentType "application/json" -Body $body
 ```
 
-GitHub 附件：安装包、便携版、`pandoc-*.zip`、源码 zip、`latest.json`、`SHA256SUMS.txt`。
+GitHub 附件：安装包、便携版、**安卓 APK**、`pandoc-*.zip`、源码 zip、`latest.json`、`SHA256SUMS.txt`。
+其中安卓 APK 是本地构建的，CI 手里没有：`release-publish.ps1` 在把 draft 转正之前会先补传，所以 **先跑 `npm run build:android` 再发版**。
 
 ### Gitee（手动）
 
@@ -204,7 +228,7 @@ GitHub 附件：安装包、便携版、`pandoc-*.zip`、源码 zip、`latest.js
 2. 建发行版：`POST https://gitee.com/api/v5/repos/deng_xiaohui/paperead/releases`
 3. 传附件：`POST .../releases/{id}/attach_files?access_token=...`，multipart 字段名固定是 `file`
 
-Gitee 只传这六个：安装包、安装包 zip、`pandoc-2.19.2-windows-x86_64.zip`、源码 zip、`latest.json`、`SHA256SUMS.txt`。
+Gitee 只传这六个：安装包、**安卓 APK**、安装包 zip、`pandoc-2.19.2-windows-x86_64.zip`、源码 zip、`latest.json`、`SHA256SUMS.txt`。
 便携版走 GitHub（> 100 MB 超 Gitee 限制）。pandoc 那个 zip 是安装包首次启动的下载源，漏传的话用户导出会一直失败。
 
 **另外必须维护一个固定 tag 为 `latest` 的发行版**（脚本会自动创建和替换）：
@@ -260,6 +284,7 @@ Invoke-RestMethod -Method Delete `
 - [ ] 版本号 `0.1.x` 已用 `scripts/set_version.py` 改完
 - [ ] `npm run build:installer` 成功，安装包 < 100 MB
 - [ ] `npm run build:portable` 成功（自带 pandoc）
+- [ ] `npm run build:android` 成功，`release/Paperead_x.y.z_android-arm64.apk` 已生成
 - [ ] `npm run verify:release` 通过
 - [ ] 装一遍：进程在、agent ready、pandoc 自动下载成功、docx/latex 导出成功
 - [ ] `release/pandoc-2.19.2-windows-x86_64.zip` 已随发行版上传（GitHub + Gitee）
