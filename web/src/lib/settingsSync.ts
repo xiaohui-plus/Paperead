@@ -35,6 +35,37 @@ export function pushModelSettings(settings: unknown): void {
 }
 
 /**
+ * 桌面端启动时先恢复一次模型配置。
+ *
+ * 主窗口是 `http://127.0.0.1:<port>`，旧版本端口随机，localStorage 会跟着换
+ * 命名空间；数据目录里的 model-settings.json 才是稳定副本。本地为空时从后端
+ * 拉回来，升级 / 换端口后不用重新填 Key。
+ */
+export async function restoreModelSettings(): Promise<boolean> {
+  if (isMobileShell()) return false;
+  if (typeof window === 'undefined') return false;
+  try {
+    const text = localStorage.getItem(STORAGE_KEY);
+    if (text) {
+      try {
+        const parsed = JSON.parse(text) as { models?: unknown };
+        if (Array.isArray(parsed?.models) && parsed.models.length > 0) return false;
+      } catch {
+        // 坏数据继续走恢复流程
+      }
+    }
+    const response = await fetch(apiUrl('/api/settings/models'));
+    if (!response.ok) return false;
+    const remote = readRemote(await response.json());
+    if (!remote) return false;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(remote));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 手机端启动时调用：把服务器上的配置写回本地。
  * 返回 true 表示本地有变化，调用方需要刷新一次让组件读到新配置。
  */

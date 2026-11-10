@@ -11,7 +11,7 @@ import { syncResearchModel } from './lib/researchModel'
 import { syncScholarConfig } from './lib/scholarConfig'
 import { autoCheckUpdate, isDesktopApp } from './lib/update'
 import { hasMobileServer, installMobileFetch, isMobileShell } from './lib/mobile'
-import { pullModelSettings } from './lib/settingsSync'
+import { pullModelSettings, restoreModelSettings } from './lib/settingsSync'
 
 const TourRoot = lazy(() =>
   import('./tour/TourRoot').then((module) => ({ default: module.TourRoot })),
@@ -33,18 +33,40 @@ if (mobile && hasMobileServer()) {
 }
 
 migrateLegacyStorage()
-if (!mobile || hasMobileServer()) {
-  // 解析阶段识别公式需要识图模型配置；启动时先同步一次，避免要先打开设置页
-  void syncVisionConfig()
-  // 文献检索（Semantic Scholar / CORE）的 API Key 存在浏览器里，启动时同步给服务
-  void syncScholarConfig()
+
+async function boot() {
+  if (!mobile) {
+    // 旧版本端口随机导致 localStorage 换命名空间，先从后端恢复模型配置再渲染
+    await restoreModelSettings()
+  }
+  if (!mobile || hasMobileServer()) {
+    // 解析阶段识别公式需要识图模型配置；启动时先同步一次，避免要先打开设置页
+    void syncVisionConfig()
+    // 文献检索（Semantic Scholar / CORE）的 API Key 存在浏览器里，启动时同步给服务
+    void syncScholarConfig()
+  }
+  if (!mobile) {
+    // 研究 agent 通过本地代理调用模型，启动时把当前选择同步过去
+    void syncResearchModel()
+    // 每天自动检查一次新版本；设置页里也能随时手动检查
+    void autoCheckUpdate()
+  }
+
+  createRoot(document.getElementById('root')!).render(
+    <React.StrictMode>
+      <ErrorBoundary title="应用渲染失败" hint="刷新页面可以恢复；如果反复出现，请把这段错误信息反馈给我们。">
+        <App />
+        {isDesktopApp() && (
+          <Suspense fallback={null}>
+            <TourRoot />
+          </Suspense>
+        )}
+      </ErrorBoundary>
+    </React.StrictMode>,
+  )
 }
-if (!mobile) {
-  // 研究 agent 通过本地代理调用模型，启动时把当前选择同步过去
-  void syncResearchModel()
-  // 每天自动检查一次新版本；设置页里也能随时手动检查
-  void autoCheckUpdate()
-}
+
+void boot()
 
 // 滚动时给容器短暂加 is-scrolling，让全局滚动条只在滑动期间出现
 const scrollTimers = new WeakMap<Element, number>()

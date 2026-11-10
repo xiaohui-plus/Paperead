@@ -36,7 +36,7 @@ impl Sidecar {
     /// without a handshake file on disk.
     pub fn start(app: &AppHandle, agent: Option<(u16, String)>) -> Result<Self, String> {
         let data_dir = paths::ensure_data_dir(app);
-        let port = free_port()?;
+        let port = stable_port()?;
         let token = random_token();
         let executable = paths::sidecar_path(app)?;
 
@@ -137,6 +137,32 @@ fn free_port() -> Result<u16, String> {
         .port();
     drop(listener);
     Ok(port)
+}
+
+/// 主窗口来自 `http://127.0.0.1:<port>`，而 localStorage 按「协议 + 主机 + 端口」
+/// 隔离。端口每次随机会让模型配置等设置落到新的命名空间，表现为升级/重启后
+/// 设置全部丢失，所以优先用固定端口，被占用时顺着往后找几个。
+const PREFERRED_PORT: u16 = 17321;
+
+fn port_available(port: u16) -> bool {
+    TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+fn stable_port() -> Result<u16, String> {
+    if let Some(raw) = paths::var("PAPEREAD_PORT") {
+        if let Ok(port) = raw.trim().parse::<u16>() {
+            if port > 0 && port_available(port) {
+                return Ok(port);
+            }
+        }
+    }
+    for offset in 0..10 {
+        let port = PREFERRED_PORT + offset;
+        if port_available(port) {
+            return Ok(port);
+        }
+    }
+    free_port()
 }
 
 fn random_token() -> String {
