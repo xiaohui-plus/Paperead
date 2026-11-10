@@ -67,20 +67,28 @@ if (-not $SkipGithub) {
     try {
         $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$GithubRepo/releases/tags/$tag" @gh
     } catch {
-        throw "GitHub 上找不到 $tag（先推 tag 并等 CI 构建完）。$($_.Exception.Message)"
+        # draft（未发布）不会出现在 tags 端点，只能从列表里翻
+        $list = Invoke-RestMethod -Uri "https://api.github.com/repos/$GithubRepo/releases?per_page=20" @gh
+        $rel = @($list) | Where-Object { $_.tag_name -eq $tag } | Select-Object -First 1
+        if (-not $rel) {
+            throw "GitHub 上找不到 $tag（先推 tag 并等 CI 构建完）。$($_.Exception.Message)"
+        }
     }
     if ($rel.draft) {
-        # 安卓 APK 是本地构建的，CI 手里没有：转正前先补传到同一个 release
-        $apkName = Split-Path -Leaf $android.FullName
-        if (-not (@($rel.assets) | Where-Object { $_.name -eq $apkName })) {
+        # 安卓 APK 与校验和是本地产出的，CI 手里没有：转正前先补传到同一个 release
+        foreach ($extra in @($android.FullName, $sums)) {
+            $name = Split-Path -Leaf $extra
+            if (@($rel.assets) | Where-Object { $_.name -eq $name }) {
+                Write-Host "GitHub: $name 已存在，跳过"
+                continue
+            }
             $upload = $rel.upload_url -replace '\{.*\}$', ''
-            $uri = "$upload?name=$([uri]::EscapeDataString($apkName))"
+            # 注意：必须用 ${upload}，否则 PowerShell 会把 "?name" 当成变量名的一部分
+            $uri = "${upload}?name=$([uri]::EscapeDataString($name))"
             Invoke-RestMethod -Method Post -Uri $uri `
                 -Headers @{ Authorization = "Bearer $tok"; Accept = "application/vnd.github+json" } `
-                -ContentType "application/octet-stream" -InFile $android.FullName | Out-Null
-            Write-Host "GitHub: 已补传 $apkName"
-        } else {
-            Write-Host "GitHub: $apkName 已存在，跳过"
+                -ContentType "application/octet-stream" -InFile $extra | Out-Null
+            Write-Host "GitHub: 已补传 $name"
         }
         Invoke-RestMethod -Method Patch -Uri "https://api.github.com/repos/$GithubRepo/releases/$($rel.id)" @gh `
             -ContentType "application/json" -Body '{"draft":false,"prerelease":false,"make_latest":"true"}'
@@ -98,7 +106,10 @@ if (-not $SkipGitee) {
 
     function Get-GiteeRelease([string]$TagName) {
         try {
-            return Invoke-RestMethod -Uri "$giteeApi/releases/tags/$TagName"
+            $res = Invoke-RestMethod -Uri "$giteeApi/releases/tags/$TagName"
+            # Gitee 对不存在的 tag 有时返回空数组而不是 404，没有 id 一律当作不存在
+            if (-not $res -or -not $res.id) { return $null }
+            return $res
         } catch {
             $code = 0
             try { $code = [int]$_.Exception.Response.StatusCode } catch {}
@@ -107,11 +118,12 @@ if (-not $SkipGitee) {
         }
     }
 
-    function New-GiteeRelease([string]$TagName, [string]$Name, [string]$Body) {
+    function New-GiteeRelease([string]$TagName, [string]$Name, [string]$Body, [string]$Commitish) {
+        # Gitee 建发行版必须给 target_commitish，否则报 "target_commitish is missing"
         Invoke-RestMethod -Method Post `
             -Uri "$giteeApi/releases?access_token=$GiteeToken" `
             -ContentType "application/json" `
-            -Body (@{ tag_name = $TagName; name = $Name; body = $Body } | ConvertTo-Json)
+            -Body (@{ tag_name = $TagName; name = $Name; body = $Body; target_commitish = $Commitish } | ConvertTo-Json)
     }
 
     function Add-GiteeFile([int]$ReleaseId, [string]$Path) {
@@ -139,9 +151,18 @@ if (-not $SkipGitee) {
             -Uri "$giteeApi/releases/$ReleaseId/attach_files/$AttachId`?access_token=$GiteeToken"
     }
 
+    function Get-GiteeAttachments([int]$ReleaseId) {
+        # 发行版详情里的 assets 只有名字没有 id，附件列表接口才带 id / size
+        try {
+            return @(Invoke-RestMethod -Uri "$giteeApi/releases/$ReleaseId/attach_files?access_token=$GiteeToken" -TimeoutSec 60)
+        } catch {
+            return @()
+        }
+    }
+
     function Publish-GiteeFile($Release, [string]$Path) {
         $name = Split-Path -Leaf $Path
-        $old = @($Release.assets.attachments) | Where-Object { $_.name -eq $name } | Select-Object -First 1
+        $old = Get-GiteeAttachments $Release.id | Where-Object { $_.name -eq $name } | Select-Object -First 1
         if ($old) {
             Write-Host "  替换同名附件 $name"
             Remove-GiteeFile -ReleaseId $Release.id -AttachId $old.id
@@ -155,7 +176,9 @@ if (-not $SkipGitee) {
     $rel = Get-GiteeRelease $tag
     if (-not $rel) {
         Write-Host "Gitee: 创建发行版 $tag"
-        $rel = New-GiteeRelease -TagName $tag -Name $tag -Body $body
+        $targetSha = (git rev-parse "$tag^{commit}")
+        if (-not $targetSha) { $targetSha = (git rev-parse HEAD) }
+        $rel = New-GiteeRelease -TagName $tag -Name $tag -Body $body -Commitish $targetSha
     } else {
         Write-Host "Gitee: 发行版 $tag 已存在，补齐附件（描述如需修改请手动编辑）"
     }
@@ -172,7 +195,7 @@ if (-not $SkipGitee) {
     $latest = Get-GiteeRelease "latest"
     if (-not $latest) {
         Write-Host "Gitee: 首次创建 latest 固定发行版"
-        $latest = New-GiteeRelease -TagName "latest" -Name "最新版本" `
+        $latest = New-GiteeRelease -TagName "latest" -Name "最新版本" -Commitish (git rev-parse HEAD) `
             -Body "固定发行版：始终存放最新版的 latest.json，应用自动更新从这里检查。"
     }
     Write-Host "Gitee: 更新 latest 固定发行版的 latest.json"
@@ -200,7 +223,7 @@ foreach ($u in $checks) {
 }
 
 try {
-    $checkJson = Invoke-RestMethod -Uri $checks[1]
+    $checkJson = Invoke-RestMethod -Uri $checks[2]
     if ($checkJson.version -ne $Version) {
         Write-Host "FAIL latest.json 内容版本 $($checkJson.version) != $Version" -ForegroundColor Red
         $failed++
