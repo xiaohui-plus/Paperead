@@ -8707,13 +8707,14 @@ html.mobile-shell #root {
 
 /* ---------- 安卓端：连接服务器 ---------- */
 .mobile-setup {
-  min-height: var(--app-h);
+  height: var(--app-h);
   display: flex;
   align-items: safe center;
   justify-content: center;
   padding: 20px;
   background: var(--bg-soft);
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .mobile-setup-card .modal-body {
