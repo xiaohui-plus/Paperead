@@ -290,6 +290,9 @@ Invoke-RestMethod -Method Delete `
 - [ ] `release/pandoc-2.19.2-windows-x86_64.zip` 已随发行版上传（GitHub + Gitee）
 - [ ] 桌面快捷方式图标是蓝底白 P
 - [ ] 代码已推到 GitHub `main` 和 Gitee `master`
+- [ ] 主窗口端口没动过：`src-tauri/src/sidecar.rs` 的 `PREFERRED_PORT = 17321`
+      （前端跑在 `http://127.0.0.1:<端口>`，localStorage 按端口隔离；端口一变，
+      模型配置等设置就像「升级后丢了」，虽然会自动从数据目录恢复，但主题等其它偏好会重置）
 - [ ] tag 指向**最终** commit
 - [ ] GitHub draft 已转为正式 release 并设为 latest
 - [ ] Gitee 发行版已创建，附件齐全、下载链接返回 200
