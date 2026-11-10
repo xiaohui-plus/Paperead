@@ -142,15 +142,8 @@
   letter-spacing: 0.6px;
 }
 
-.research-hero h1 {
-  margin: 10px 0 8px;
-  font-size: 27px;
-  line-height: 1.35;
-  font-weight: 650;
-}
-
 .research-hero p {
-  margin: 0;
+  margin: 8px 0 0;
   color: var(--muted);
   font-size: 14px;
   line-height: 1.7;
@@ -2325,10 +2318,6 @@
 @media (max-width: 640px) {
   .research-main {
     padding: 22px 16px 64px;
-  }
-
-  .research-hero h1 {
-    font-size: 22px;
   }
 
   .research-actions {
