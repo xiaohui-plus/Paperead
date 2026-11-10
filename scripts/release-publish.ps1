@@ -120,9 +120,10 @@ if (-not $SkipGitee) {
 
     function New-GiteeRelease([string]$TagName, [string]$Name, [string]$Body, [string]$Commitish) {
         # Gitee 建发行版必须给 target_commitish，否则报 "target_commitish is missing"
+        # ContentType 必须带 charset=utf-8：PowerShell 5.1 不带 charset 时按 ASCII 发，中文全变 "?"
         Invoke-RestMethod -Method Post `
             -Uri "$giteeApi/releases?access_token=$GiteeToken" `
-            -ContentType "application/json" `
+            -ContentType "application/json; charset=utf-8" `
             -Body (@{ tag_name = $TagName; name = $Name; body = $Body; target_commitish = $Commitish } | ConvertTo-Json)
     }
 
