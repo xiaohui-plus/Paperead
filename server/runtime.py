@@ -86,5 +86,5 @@ def allowed_origins(port: int) -> set[str]:
 
 
 def bind_host() -> str:
-    """监听地址：桌面壳保持 127.0.0.1，独立部署时可设为 0.0.0.0。"""
+    """监听地址：默认回环；桌面壳为设备同步会设为 0.0.0.0，独立部署同理。"""
     return read_env("PAPEREAD_HOST", "127.0.0.1")

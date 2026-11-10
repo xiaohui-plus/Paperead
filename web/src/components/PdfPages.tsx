@@ -13,6 +13,8 @@ interface Props {
   /** 面板里点目录/重点/图表时滚到对应页；token 变化即触发 */
   jump: { page: number; token: number } | null
   onPageChange: (page: number) => void
+  /** 离线页图（页码 → blob URL）；有值时不再请求服务器 */
+  pageUrls?: Record<number, string>
 }
 
 // 服务端按这个宽度渲染，前端只做等比缩放；再大对公式也没有额外增益。
@@ -33,6 +35,7 @@ export function PdfPages({
   width,
   jump,
   onPageChange,
+  pageUrls,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const jumped = useRef(false)
@@ -91,9 +94,12 @@ export function PdfPages({
                 style={{ width: `min(${width}px, 100%)`, aspectRatio: ratio }}
               >
                 <img
-                  src={mediaUrl(
-                    `/api/papers/${encodeURIComponent(paperId)}/page/${page}.png?width=${RENDER_WIDTH}`,
-                  )}
+                  src={
+                    pageUrls?.[page] ??
+                    mediaUrl(
+                      `/api/papers/${encodeURIComponent(paperId)}/page/${page}.png?width=${RENDER_WIDTH}`,
+                    )
+                  }
                   alt={`第 ${page} 页`}
                   loading={Math.abs(page - initialPage) <= 1 ? 'eager' : 'lazy'}
                   onLoad={() => {

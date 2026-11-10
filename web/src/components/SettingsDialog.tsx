@@ -33,10 +33,19 @@ import {
   type ProviderPreset,
 } from '../lib/settings'
 import { Katex } from './Katex'
+import { ScholarReadPanel } from './ScholarReadPanel'
 import { ReviewTemplatePanel } from './ReviewTemplatePanel'
 import { ToolchainPanel } from './ToolchainPanel'
 import { MobileServerPanel } from './MobileSetup'
+import { DesktopDeviceSyncPanel, MobileDeviceSyncPanel } from './DeviceSync'
 import { isMobileShell } from '../lib/mobile'
+import {
+  deleteOffline,
+  formatBytes,
+  listOffline,
+  offlineUsage,
+  type OfflineSummary,
+} from '../lib/offlineStore'
 import { loadScholarSettings, saveScholarSettings } from '../lib/scholarConfig'
 import {
   getOnboarding,
@@ -209,11 +218,14 @@ export function SettingsDialog({
     | 'translation'
     | 'reading'
     | 'scholar'
+    | 'scholaread'
     | 'tools'
     | 'review'
     | 'tour'
     | 'update'
     | 'server'
+    | 'sync'
+    | 'offline'
   >('models')
   const [editor, setEditor] = useState<EditorState | null>(null)
   const [showKey, setShowKey] = useState(false)
@@ -677,7 +689,9 @@ export function SettingsDialog({
           ? '自动阅读'
           : tab === 'scholar'
             ? '文献检索'
-            : tab === 'tools'
+            : tab === 'scholaread'
+              ? '学术阅读同步'
+              : tab === 'tools'
               ? '写作工具'
               : tab === 'review'
                 ? '综述模板'
@@ -685,7 +699,11 @@ export function SettingsDialog({
                   ? '新手教程'
                   : tab === 'server'
                     ? '服务器连接'
-                    : '检查版本更新'
+                    : tab === 'sync'
+                      ? '设备同步'
+                      : tab === 'offline'
+                        ? '离线库'
+                        : '检查版本更新'
   const pageHint =
     tab === 'models'
       ? '回答模型负责问答与翻译，识图模型负责论文里的图片识别；两者可以分开配置，修改会自动保存在本机。'
@@ -694,16 +712,22 @@ export function SettingsDialog({
         : tab === 'reading'
           ? '控制阅读时是否自动提取研究目标、研究方法和主要结论。关闭后不再发起额外的模型调用，已经生成的重点仍会保留。'
           : tab === 'scholar'
-        ? '这里配置 Semantic Scholar 与 CORE 的检索密钥；密钥只保存在本机，不会上传到服务器。'
-        : tab === 'tools'
-          ? '导出 PDF 需要本机的 LaTeX 引擎；这里可以检测并快速安装。只检测本机工具，不会上传任何文件。'
+            ? '这里配置 Semantic Scholar 与 CORE 的检索密钥；密钥只保存在本机，不会上传到服务器。'
+            : tab === 'scholaread'
+              ? '手动从本机学术阅读拉取论文与阅读进度，学术阅读退出后可把 Paperead 的进度写回去。目录会自动定位，通常不需要配置。'
+              : tab === 'tools'
+              ? '导出 PDF 需要本机的 LaTeX 引擎；这里可以检测并快速安装。只检测本机工具，不会上传任何文件。'
           : tab === 'review'
             ? '设定写综述时用的章节骨架：可以用系统默认、上传自己的模板，或从文献库选一篇综述。模板不会上传文献或密钥。'
             : tab === 'tour'
               ? '只在桌面客户端首次启动时自动出现一次。之后可以在这里重新观看或继续上次的进度。'
               : tab === 'server'
                 ? '手机端通过这里连接运行 Paperead 后端的电脑或服务器。地址和口令只保存在本机。'
-                : '应用每天自动检查一次新版本，也可以随时手动检查。'
+                : tab === 'sync'
+                  ? '手机扫描电脑上的二维码即可完成配对，服务器地址、访问口令和模型配置会一起同步到本机。'
+                  : tab === 'offline'
+                  ? '下载到本机的论文、从 StoryReader 导入的书都存在这里。离开电脑后仍可阅读，译文和问答会直接调用模型。'
+                  : '应用每天自动检查一次新版本，也可以随时手动检查。'
 
   return (
     <div
@@ -759,17 +783,51 @@ export function SettingsDialog({
               <span>文献检索</span>
             </button>
             {mobile && (
-              <button
-                className="library-nav-item"
-                data-active={tab === 'server'}
-                onClick={() => setTab('server')}
-              >
-                <IconRefresh />
-                <span>服务器连接</span>
-              </button>
+              <>
+                <button
+                  className="library-nav-item"
+                  data-active={tab === 'sync'}
+                  onClick={() => setTab('sync')}
+                >
+                  <IconSpark />
+                  <span>设备同步</span>
+                </button>
+                <button
+                  className="library-nav-item"
+                  data-active={tab === 'server'}
+                  onClick={() => setTab('server')}
+                >
+                  <IconRefresh />
+                  <span>服务器连接</span>
+                </button>
+                <button
+                  className="library-nav-item"
+                  data-active={tab === 'offline'}
+                  onClick={() => setTab('offline')}
+                >
+                  <IconDownload />
+                  <span>离线库</span>
+                </button>
+              </>
             )}
             {!mobile && (
               <>
+                <button
+                  className="library-nav-item"
+                  data-active={tab === 'sync'}
+                  onClick={() => setTab('sync')}
+                >
+                  <IconSpark />
+                  <span>设备同步</span>
+                </button>
+                <button
+                  className="library-nav-item"
+                  data-active={tab === 'scholaread'}
+                  onClick={() => setTab('scholaread')}
+                >
+                  <IconRefresh />
+                  <span>学术阅读同步</span>
+                </button>
                 <button
                   className="library-nav-item"
                   data-active={tab === 'tools'}
@@ -1218,6 +1276,8 @@ export function SettingsDialog({
       <ReadingPanel />
     ) : tab === 'scholar' ? (
       <ScholarConfigPanel />
+    ) : tab === 'scholaread' ? (
+      <ScholarReadPanel />
     ) : tab === 'tools' ? (
       <ToolchainPanel />
     ) : tab === 'review' ? (
@@ -1226,6 +1286,10 @@ export function SettingsDialog({
       <TourPanel onClose={requestClose} onDismissed={hideTour} />
     ) : tab === 'server' ? (
       <MobileServerPanel />
+    ) : tab === 'sync' ? (
+      mobile ? <MobileDeviceSyncPanel /> : <DesktopDeviceSyncPanel />
+    ) : tab === 'offline' ? (
+      <OfflineLibraryPanel />
     ) : (
               <div className="modal-body update-panel" ref={bodyRef}>
                 <section className="update-current">
@@ -1648,6 +1712,70 @@ function ReadingPanel() {
         <p className="hint">
           这个开关只影响自动标记；你自己划词的高亮和笔记不受影响。
         </p>
+      </section>
+    </div>
+  )
+}
+
+/** 设置 → 离线库：查看占用、删除本机副本。 */
+function OfflineLibraryPanel() {
+  const [items, setItems] = useState<OfflineSummary[]>([])
+  const [usage, setUsage] = useState({ count: 0, bytes: 0 })
+  const [loading, setLoading] = useState(true)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      setItems(await listOffline())
+      setUsage(await offlineUsage())
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  return (
+    <div className="modal-body">
+      <section className="model-section">
+        <div className="section-head">
+          <h3>本机离线库</h3>
+        </div>
+        <p className="model-empty">
+          共 {usage.count} 项，占用 {formatBytes(usage.bytes)}。下载的论文包含解析文本和各页图片；
+          从 StoryReader 导入的书只有文本。
+        </p>
+        {loading ? (
+          <p className="hint">读取中…</p>
+        ) : items.length === 0 ? (
+          <p className="hint">还没有本机内容。在文献库里点「下载」，或从 StoryReader 导入。</p>
+        ) : (
+          <ul className="offline-list">
+            {items.map((item) => (
+              <li key={item.id}>
+                <div className="offline-item-meta">
+                  <b>{item.title || '未命名'}</b>
+                  <span>
+                    {item.source === 'storyreader' ? '导入' : '已下载'} ·{' '}
+                    {formatBytes(item.bytes)} · {item.pages} 页
+                  </span>
+                </div>
+                <button
+                  className="mini-btn danger"
+                  onClick={async () => {
+                    if (!window.confirm(`删除本机上的《${item.title || '未命名'}》？`)) return
+                    await deleteOffline(item.id)
+                    await load()
+                  }}
+                >
+                  删除
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
     </div>
   )

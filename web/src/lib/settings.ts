@@ -4,9 +4,11 @@
  * - 回答模型（answer）：论文问答、翻译、导读、脉络等所有文字任务。
  * - 识图模型（vision）：论文阅读里的图片理解（公式裁图 → LaTeX）。
  *
- * 两套配置可以指向不同服务商；密钥只存在本机 localStorage，随请求以 body
- * 发给本地服务，服务端不落盘。
+ * 两套配置可以指向不同服务商；密钥存在本机 localStorage，保存时同步一份到
+ * 数据目录，手机离开电脑后靠它自己调模型（见 settingsSync.ts）。
  */
+
+import { pushModelSettings } from './settingsSync'
 
 export type ModelKind = 'answer' | 'vision'
 
@@ -599,6 +601,8 @@ export function saveModelSettings(settings: ModelSettings): void {
   } catch {
     // 配额满或隐私模式：保持内存状态可用，但下次打开会丢配置
   }
+  // 桌面端顺手推一份到后端，手机连上来就能拿到同样的服务商与密钥
+  pushModelSettings(settings)
 }
 
 /** 某个角色当前选中的模型（可能还没填 Key）。 */

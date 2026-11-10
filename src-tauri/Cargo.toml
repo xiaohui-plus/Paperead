@@ -29,6 +29,16 @@ ureq = { version = "2", default-features = false, features = ["json"] }
 rand = "0.8"
 url = "2"
 
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+# 手机端直连模型（流式）；桌面端走本机 sidecar，不需要这些
+serde = { version = "1", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+futures-util = "0.3"
+# 设备同步：扫描电脑上的二维码（原生相机 + 权限处理）
+# 该插件的 build.rs 会把 tauri-api 复制到 crate 自己的 android/.tauri，
+# 而 crates.io 缓存目录在本机不可写（拒绝访问），所以内置一份到 third_party。
+tauri-plugin-barcode-scanner = { path = "../third_party/tauri-plugin-barcode-scanner" }
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 

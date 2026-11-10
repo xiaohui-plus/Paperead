@@ -4,5 +4,5 @@
   "description": "Paperead Android capability",
   "windows": ["main"],
   "platforms": ["android", "iOS"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "barcode-scanner:default"]
 }

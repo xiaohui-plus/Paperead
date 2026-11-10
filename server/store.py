@@ -191,7 +191,13 @@ class LibraryStore:
             None,
         )
 
-    def create_folder(self, name: str) -> dict[str, Any]:
+    def create_folder(
+        self,
+        name: str,
+        *,
+        zotero_key: str = "",
+        zotero_name: str = "",
+    ) -> dict[str, Any]:
         cleaned = self._clean_folder_name(name)
         with self._lock:
             folders = self._read_folders()
@@ -202,9 +208,40 @@ class LibraryStore:
                 "name": cleaned,
                 "created_at": time.time(),
             }
+            if zotero_key:
+                folder["zotero_key"] = zotero_key
+                folder["zotero_name"] = zotero_name or cleaned
             folders.append(folder)
             self._write_folders(folders)
         return {**folder, "paper_count": 0}
+
+    def update_folder(
+        self, folder_id: str, **patch: Any
+    ) -> dict[str, Any] | None:
+        """更新文件夹的同步元数据（Zotero key / 名称快照等）。"""
+        with self._lock:
+            folders = self._read_folders()
+            target = next(
+                (row for row in folders if row["id"] == folder_id),
+                None,
+            )
+            if target is None:
+                return None
+            target.update(patch)
+            self._write_folders(folders)
+        return target
+
+    def find_folder_by_zotero(self, zotero_key: str) -> dict[str, Any] | None:
+        if not zotero_key:
+            return None
+        return next(
+            (
+                row
+                for row in self._read_folders()
+                if row.get("zotero_key") == zotero_key
+            ),
+            None,
+        )
 
     def rename_folder(self, folder_id: str, name: str) -> dict[str, Any] | None:
         cleaned = self._clean_folder_name(name)

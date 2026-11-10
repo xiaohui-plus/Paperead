@@ -21,6 +21,7 @@ import logging
 import mimetypes
 import os
 import re
+import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,6 +76,8 @@ from server.store import (
     LibraryStore,
 )
 from server.scholar_api import build_router as build_scholar_router
+from server.scholaread import build_router as build_scholaread_router
+from server import zotero_web
 from server.research import ResearchStore
 from server.research import build_router as build_research_router
 from server.research.abstracts import fill_one as fill_abstract
@@ -145,6 +148,7 @@ app.include_router(
 )
 app.include_router(toolchain_router)
 app.include_router(build_onboarding_router(onboarding_store, _has_user_data))
+app.include_router(build_scholaread_router(store, _schedule_parse))
 
 # 研究 agent 的工具接口：本机调用，自带 token，不走 /api 的 cookie 鉴权。
 app.include_router(
@@ -190,7 +194,11 @@ async def guard(request: Request, call_next):
         # 前端更新后 index.html 引用的是新 hash；禁止缓存 HTML，
         # 避免用户刷新后仍加载旧的 assets/*.js。
         response.headers["Cache-Control"] = "no-store, must-revalidate"
-        if TOKEN and "pr_token" not in request.cookies:
+        # 只有本机窗口才下发口令 cookie。对局域网开放后，同网段的其它设备
+        # 也能打开首页，但不能自动拿到 token（手机是靠扫二维码配对的）。
+        client_host = request.client.host if request.client else ""
+        local = client_host in {"127.0.0.1", "::1", "localhost", "testclient"}
+        if TOKEN and local and "pr_token" not in request.cookies:
             response.set_cookie(
                 "pr_token", TOKEN, httponly=True, samesite="strict", path="/"
             )
@@ -232,6 +240,13 @@ class FolderIn(BaseModel):
     name: str = ""
 
 
+class ZoteroWebIn(BaseModel):
+    api_key: str = ""
+    user_id: str = ""
+    library_type: str = "user"
+    group_id: str = ""
+
+
 class PaperFolderIn(BaseModel):
     folder_id: str | None = None
 
@@ -254,6 +269,54 @@ async def health() -> dict:
         "version": __version__,
         "frozen": is_frozen(),
         "data": str(DATA_DIR),
+    }
+
+
+def _lan_ipv4() -> list[str]:
+    """本机的局域网 IPv4（去掉回环），用于生成手机可连的地址。"""
+    found: list[str] = []
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # 不会真的发包，只让系统选出默认出口网卡
+        probe.connect(("8.8.8.8", 80))
+        found.append(probe.getsockname()[0])
+    except OSError:
+        pass
+    finally:
+        probe.close()
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip not in found:
+                found.append(ip)
+    except OSError:
+        pass
+    return [ip for ip in found if not ip.startswith("127.")]
+
+
+@app.get("/api/sync/info")
+async def sync_info(request: Request) -> dict:
+    """设备同步：给电脑端生成二维码的内容。
+
+    token 只回给本机请求，局域网里的其它设备拿不到；手机扫码后用它配置连接。
+    电脑端默认只监听 127.0.0.1，此时 `exposed` 为 false，界面会提示如何对外开放。
+    """
+    client = request.client.host if request.client else ""
+    local = client in {"127.0.0.1", "::1", "localhost", "testclient"}
+    host = bind_host()
+    exposed = host not in {"127.0.0.1", "localhost", "::1"}
+    ips = _lan_ipv4() if local else []
+    base = f"http://{ips[0]}:{PORT}" if exposed and ips else f"http://127.0.0.1:{PORT}"
+    return {
+        "ok": True,
+        "base": base,
+        "token": TOKEN if local else "",
+        "port": PORT,
+        "host": host,
+        "exposed": bool(exposed and ips),
+        "lan_ips": ips,
+        "name": socket.gethostname(),
+        "version": __version__,
     }
 
 
@@ -645,6 +708,80 @@ async def delete_folder(folder_id: str) -> dict:
     if result is None:
         raise HTTPException(status_code=404, detail="文件夹不存在")
     return result
+
+
+_zotero_syncing = False
+
+
+@app.get("/api/zotero/web")
+async def get_zotero_web() -> dict:
+    return zotero_web.public_config(DATA_DIR)
+
+
+@app.put("/api/zotero/web")
+async def put_zotero_web(req: ZoteroWebIn) -> dict:
+    current = zotero_web.load_config(DATA_DIR)
+    api_key = req.api_key.strip() or str(current.get("api_key") or "")
+    library_type = "group" if req.library_type == "group" else "user"
+    if not api_key:
+        raise HTTPException(status_code=400, detail="请填写 Zotero API Key")
+    if library_type == "group" and not req.group_id.strip():
+        raise HTTPException(status_code=400, detail="群组库需要填写群组 ID")
+    config = {
+        **current,
+        "api_key": api_key,
+        "user_id": req.user_id.strip(),
+        "library_type": library_type,
+        "group_id": req.group_id.strip(),
+    }
+    try:
+        async with zotero_web.ZoteroWebClient(config) as client:
+            info = await client.verify()
+    except zotero_web.ZoteroWebError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    # 用户 ID 以 API Key 返回的账号为准，用户不用自己去查数字 ID。
+    reported_user = str(info.get("userID") or "")
+    if reported_user:
+        config["user_id"] = reported_user
+    elif not config["user_id"]:
+        raise HTTPException(
+            status_code=400,
+            detail="无法从 API Key 读取用户 ID，请手动填写用户 ID",
+        )
+    zotero_web.save_config(DATA_DIR, config)
+    return {**zotero_web.public_config(DATA_DIR), "username": info.get("username")}
+
+
+@app.post("/api/zotero/web/test")
+async def test_zotero_web() -> dict:
+    config = zotero_web.load_config(DATA_DIR)
+    try:
+        async with zotero_web.ZoteroWebClient(config) as client:
+            info = await client.verify()
+    except zotero_web.ZoteroWebError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {
+        "ok": True,
+        "user_id": info.get("userID"),
+        "username": info.get("username"),
+        "access": info.get("access"),
+    }
+
+
+@app.post("/api/zotero/web/sync")
+async def sync_zotero_web() -> dict:
+    global _zotero_syncing
+    if _zotero_syncing:
+        raise HTTPException(status_code=409, detail="同步正在进行，请稍后再试")
+    _zotero_syncing = True
+    try:
+        return await zotero_web.sync_library(
+            DATA_DIR, store, _schedule_parse
+        )
+    except zotero_web.ZoteroWebError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    finally:
+        _zotero_syncing = False
 
 
 @app.get("/api/papers")
@@ -2629,6 +2766,45 @@ app.include_router(build_scholar_router(store, _add_scholar_pdf, _public))
 app.include_router(
     build_tools_router(research_store, store, _add_scholar_pdf, _public)
 )
+
+
+# ── 模型配置同步（桌面 → 手机） ──────────────────────────────────────────
+#
+# 手机离开电脑后要能自己调模型翻译/问答，需要拿到同一份服务商配置。
+# 桌面端保存设置时把整个 `paperead.models` 推上来，手机连上后拉取覆盖本地。
+# 密钥因此会落在数据目录里，仅适用于自己的机器/服务器。
+
+MODEL_SETTINGS_PATH = DATA_DIR / "model-settings.json"
+
+
+def _read_model_settings() -> dict:
+    try:
+        raw = MODEL_SETTINGS_PATH.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+@app.get("/api/settings/models")
+def get_model_settings() -> dict:
+    return _read_model_settings()
+
+
+@app.put("/api/settings/models")
+def put_model_settings(payload: dict) -> dict:
+    settings = payload.get("settings")
+    if not isinstance(settings, dict):
+        raise HTTPException(status_code=400, detail="settings 必须是对象")
+    data = {
+        "settings": settings,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    MODEL_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = MODEL_SETTINGS_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, MODEL_SETTINGS_PATH)
+    return {"ok": True, "updated_at": data["updated_at"]}
 
 
 if WEB_DIST.exists():

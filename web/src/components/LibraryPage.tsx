@@ -18,9 +18,19 @@ import { Sidebar } from './Sidebar'
 import type { NavKey } from './Sidebar'
 import { SettingsDialog } from './SettingsDialog'
 import { ZoteroImportDialog } from './ZoteroImportDialog'
-import { IconBack, IconFolder, IconGrid, IconRows, IconSettings, IconUpload } from './icons'
+import { ZoteroSyncDialog } from './ZoteroSyncDialog'
+import { IconBack, IconFolder, IconGrid, IconRefresh, IconRows, IconSettings, IconUpload } from './icons'
 import { LibraryFolders } from './LibraryFolders'
 import { tourBus } from '../tour/tourBus'
+import { isMobileShell } from '../lib/mobile'
+import {
+  deleteOffline,
+  downloadPaper,
+  listOffline,
+  type OfflineSummary,
+} from '../lib/offlineStore'
+import { importStoryFile } from '../lib/storyImport'
+import { SCHOLAREAD_SYNCED } from '../lib/scholareadSync'
 
 type Filter = 'all' | 'ready' | 'reading' | 'unread' | 'finished' | 'untranslated' | 'failed'
 type Sort = 'recent' | 'read' | 'title' | 'pages'
@@ -43,6 +53,7 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
   // 设置只由用户点齿轮/侧栏打开；刷新页面不自动弹
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [zoteroOpen, setZoteroOpen] = useState(false)
+  const [zoteroSyncOpen, setZoteroSyncOpen] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [folders, setFolders] = useState<Folder[]>([])
   const [foldersLoading, setFoldersLoading] = useState(true)
@@ -59,6 +70,12 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
   const postDragFolder = useRef<string | null | undefined>(undefined)
   const suppressClick = useRef(false)
   const inputRef = useRef<HTMLInputElement>(null)
+  const storyInputRef = useRef<HTMLInputElement>(null)
+  const mobile = isMobileShell()
+  const [offlineItems, setOfflineItems] = useState<OfflineSummary[]>([])
+  const [offlineMode, setOfflineMode] = useState(false)
+  const [downloads, setDownloads] = useState<Record<string, { done: number; total: number }>>({})
+  const [importing, setImporting] = useState(false)
 
   const errorText = (error: unknown) =>
     error instanceof Error ? error.message : '操作失败，请重试'
@@ -69,10 +86,12 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
   }, [])
 
   const refresh = useCallback(async () => {
+    let serverOk = false
     try {
       const rows = await listPapers()
       setPapers(rows)
       setDemoMode(false)
+      serverOk = true
       try {
         setFolders(await listFolders())
         setFolderError(null)
@@ -80,19 +99,32 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
         setFolderError(errorText(error))
       }
     } catch {
-      // 后端没起：退回内置示例，页面依然可看
-      setPapers([DEMO_PAPER])
-      setDemoMode(true)
+      // 手机离开电脑后：不塞示例，改由下面的本机离线库撑起页面
+      setPapers(isMobileShell() ? [] : [DEMO_PAPER])
+      setDemoMode(!isMobileShell())
       setFolders([])
       setFolderError(null)
     } finally {
       setLoading(false)
       setFoldersLoading(false)
     }
+    setOfflineMode(!serverOk)
+    try {
+      setOfflineItems(await listOffline())
+    } catch {
+      setOfflineItems([])
+    }
   }, [])
 
   useEffect(() => {
     void refresh()
+  }, [refresh])
+
+  // 学术阅读同步导入新论文后，文献库自动刷新
+  useEffect(() => {
+    const onSynced = () => void refresh()
+    window.addEventListener(SCHOLAREAD_SYNCED, onSynced)
+    return () => window.removeEventListener(SCHOLAREAD_SYNCED, onSynced)
   }, [refresh])
 
   // 有解析/翻译中的任务时轮询
@@ -105,6 +137,10 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
   }, [papers, demoMode, refresh])
 
   const doUpload = async (files: File[]) => {
+    if (offlineMode) {
+      notify('当前连不上电脑端，暂时不能上传新论文', 'err')
+      return
+    }
     const pdfs = files.filter((f) => f.name.toLowerCase().endsWith('.pdf'))
     if (!pdfs.length) {
       notify('只支持 PDF 文件', 'err')
@@ -130,14 +166,71 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
   }
 
   const onDelete = async (paper: PaperRow) => {
+    // 本机副本：只删手机上的，服务器上的论文不受影响
+    if (paper.offline && offlineMode) {
+      const label = paper.local_source === 'storyreader' ? '导入的书' : '本机副本'
+      if (!window.confirm(`删除《${paper.title}》的${label}？电脑上的原文件不受影响。`)) return
+      try {
+        await deleteOffline(paper.id)
+        await refresh()
+        notify('已删除本机副本')
+      } catch (e) {
+        notify(errorText(e), 'err')
+      }
+      return
+    }
     if (!window.confirm(`删除《${paper.title}》？`)) return
     try {
-      await deletePaper(paper.id)
+      if (!paper.offline) await deletePaper(paper.id)
+      // 服务器可达时一并清掉本机副本，避免下次仍能离线打开
+      await deleteOffline(paper.id).catch(() => undefined)
       await refresh()
       notify('已删除')
     } catch (e) {
       notify(e instanceof Error ? e.message : '删除失败', 'err')
     }
+  }
+
+  /** 把论文（解析结果 + 各页图片）下载到本机，离开电脑后仍可阅读。 */
+  const onDownload = async (paper: PaperRow) => {
+    setDownloads((prev) => ({ ...prev, [paper.id]: { done: 0, total: 1 } }))
+    try {
+      await downloadPaper(paper.id, (progress) => {
+        setDownloads((prev) => ({
+          ...prev,
+          [paper.id]: { done: progress.done, total: Math.max(progress.total, 1) },
+        }))
+      })
+      await refresh()
+      notify('已下载到本机，离线也能阅读')
+    } catch (e) {
+      notify(e instanceof Error ? e.message : '下载失败', 'err')
+    } finally {
+      setDownloads((prev) => {
+        const next = { ...prev }
+        delete next[paper.id]
+        return next
+      })
+    }
+  }
+
+  const onStoryFiles = async (files: File[]) => {
+    if (!files.length) return
+    setImporting(true)
+    let imported = 0
+    let failure = ''
+    for (const file of files) {
+      try {
+        await importStoryFile(file)
+        imported += 1
+      } catch (e) {
+        failure = e instanceof Error ? e.message : '导入失败'
+      }
+    }
+    await refresh()
+    setImporting(false)
+    if (imported) notify(`已从 StoryReader 导入 ${imported} 个文件`)
+    else notify(failure || '没有可导入的内容', 'err')
   }
 
   const onReparse = async (paper: PaperRow) => {
@@ -150,15 +243,48 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
     }
   }
 
+  // 服务器列表 + 本机离线库：下载过的论文合并成一条，导入的书单独补进来
+  const allPapers = useMemo(() => {
+    const localById = new Map(offlineItems.map((item) => [item.id, item]))
+    const rows: PaperRow[] = papers.map((paper) => {
+      const local = localById.get(paper.id)
+      return local
+        ? { ...paper, offline: true, local_source: local.source }
+        : paper
+    })
+    const seen = new Set(papers.map((paper) => paper.id))
+    for (const item of offlineItems) {
+      if (seen.has(item.id)) continue
+      rows.push({
+        id: item.id,
+        title: item.title || '未命名',
+        authors: item.authors,
+        filename: '',
+        pages: item.pages,
+        size: item.bytes,
+        created_at: item.updatedAt,
+        status: 'ready',
+        error: '',
+        translated: 0,
+        blocks: 0,
+        thumb_url: null,
+        file_url: '',
+        offline: true,
+        local_source: item.source,
+      })
+    }
+    return rows
+  }, [papers, offlineItems])
+
   const folderCounts = useMemo(() => {
     const counts = new Map<string, number>()
-    for (const paper of papers) {
+    for (const paper of allPapers) {
       if (paper.folder_id) {
         counts.set(paper.folder_id, (counts.get(paper.folder_id) ?? 0) + 1)
       }
     }
     return counts
-  }, [papers])
+  }, [allPapers])
 
   const folderRows = useMemo(
     () =>
@@ -175,9 +301,9 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
   const folderPapers = useMemo(
     () =>
       activeFolderId
-        ? papers.filter((paper) => paper.folder_id === activeFolderId)
-        : papers,
-    [papers, activeFolderId],
+        ? allPapers.filter((paper) => paper.folder_id === activeFolderId)
+        : allPapers,
+    [allPapers, activeFolderId],
   )
 
   useEffect(() => {
@@ -370,7 +496,7 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase()
-    let rows = papers.filter((p) => {
+    let rows = allPapers.filter((p) => {
       if (
         activeFolderId &&
         p.folder_id !== activeFolderId &&
@@ -379,7 +505,7 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
         return false
       }
       if (q) {
-        const hay = `${p.title} ${p.authors} ${p.filename}`.toLowerCase()
+        const hay = `${p.title} ${p.authors} ${p.filename ?? ''}`.toLowerCase()
         if (!hay.includes(q)) return false
       }
       if (filter === 'ready') return p.status === 'ready'
@@ -400,7 +526,7 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
       return b.created_at - a.created_at
     })
     return rows
-  }, [papers, query, filter, sort, activeFolderId, dragPaper?.id])
+  }, [allPapers, query, filter, sort, activeFolderId, dragPaper?.id])
 
   return (
     <div
@@ -422,13 +548,13 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
     >
       <Sidebar
         active="library"
-        count={papers.length}
+        count={allPapers.length}
         onNav={onNav}
         onSettings={() => setSettingsOpen(true)}
         folderSection={
           <LibraryFolders
             folders={folderRows}
-            totalCount={papers.length}
+            totalCount={allPapers.length}
             activeFolderId={activeFolderId}
             loading={foldersLoading}
             error={folderError}
@@ -466,14 +592,52 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
             )}
           </div>
           <div className="library-head-actions">
+            {!mobile && (
+              <button
+                className="btn ghost"
+                onClick={() => setZoteroOpen(true)}
+                title="从本机 Zotero 选择带 PDF 的条目导入"
+              >
+                从 Zotero 导入
+              </button>
+            )}
+            {!mobile && (
+              <button
+                className="btn ghost"
+                onClick={() => setZoteroSyncOpen(true)}
+                title="与 Zotero 云端双向同步文献、分类和 PDF"
+              >
+                Zotero 同步
+              </button>
+            )}
+            {mobile && (
+              <button
+                className="btn ghost"
+                onClick={() => storyInputRef.current?.click()}
+                disabled={importing}
+                title="导入 StoryReader 导出的 JSON / TXT / Markdown"
+              >
+                {importing ? '导入中…' : '从 StoryReader 导入'}
+              </button>
+            )}
+            <input
+              ref={storyInputRef}
+              type="file"
+              accept=".json,.txt,.md,.markdown,application/json,text/plain"
+              multiple
+              hidden
+              onChange={(e) => {
+                void onStoryFiles(Array.from(e.target.files ?? []))
+                e.target.value = ''
+              }}
+            />
             <button
-              className="btn ghost"
-              onClick={() => setZoteroOpen(true)}
-              title="从本机 Zotero 选择带 PDF 的条目导入"
+              className="btn primary"
+              data-tour="library-upload"
+              onClick={() => inputRef.current?.click()}
+              disabled={uploading || offlineMode}
+              title={offlineMode ? '连上电脑端后才能上传新论文' : undefined}
             >
-              从 Zotero 导入
-            </button>
-            <button className="btn primary" data-tour="library-upload" onClick={() => inputRef.current?.click()} disabled={uploading}>
               <IconUpload /> {uploading ? '上传中…' : '添加文章'}
             </button>
             <input
@@ -494,6 +658,13 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
           <div className="library-notice">
             本地服务未启动，当前展示内置示例。
             启动方式：<code>python -m server.main</code>（另开终端）
+          </div>
+        )}
+
+        {offlineMode && (
+          <div className="library-notice">
+            已进入本机模式：连不上电脑端，这里显示已下载和导入的内容。
+            翻译和问答会直接调用你配置的模型（需要联网）。
           </div>
         )}
 
@@ -539,20 +710,35 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
           <button className="tool icon-only" onClick={() => setSettingsOpen(true)} title="设置">
             <IconSettings />
           </button>
+          {mobile && (
+            <button
+              className="tool icon-only"
+              onClick={() => setZoteroSyncOpen(true)}
+              title="Zotero 双向同步"
+            >
+              <IconRefresh />
+            </button>
+          )}
         </div>
 
         {loading ? (
           <div className="library-empty">正在加载…</div>
         ) : visible.length === 0 ? (
           <div className="library-empty">
-            {papers.length === 0 ? (
-              <>
+            {allPapers.length === 0 ? (
+              offlineMode ? (
+                <div className="folder-empty">
+                  <IconFolder />
+                  <b>本机还没有内容</b>
+                  <span>连上电脑后把论文「下载」到本机；也可以从 StoryReader 导入。</span>
+                </div>
+              ) : (
                 <div className="dropzone" onClick={() => inputRef.current?.click()}>
                   <IconUpload />
                   <b>把 PDF 拖到这里，或点击上传</b>
                   <span>支持多选。上传后会自动解析版面、图表和公式，随后可一键翻译。</span>
                 </div>
-              </>
+              )
             ) : selectedFolder && folderPapers.length === 0 ? (
               <div className="folder-empty">
                 <IconFolder />
@@ -580,20 +766,24 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
                 onOpen={openPaper}
                 onDelete={onDelete}
                 onReparse={onReparse}
-                draggable={!demoMode}
+                draggable={!demoMode && !offlineMode && !p.offline}
                 dragging={dragPaper?.id === p.id}
                 onDragStart={handlePaperDragStart}
                 onDragEnd={handlePaperDragEnd}
+                downloadProgress={downloads[p.id] ?? null}
+                onDownload={offlineMode ? undefined : onDownload}
               />
             ))}
-            <button
-              className="paper-card add-card"
-              onClick={() => inputRef.current?.click()}
-              title="添加文章"
-            >
-              <IconUpload />
-              <span>添加文章</span>
-            </button>
+            {!offlineMode && (
+              <button
+                className="paper-card add-card"
+                onClick={() => inputRef.current?.click()}
+                title="添加文章"
+              >
+                <IconUpload />
+                <span>添加文章</span>
+              </button>
+            )}
           </div>
         )}
 
@@ -617,8 +807,20 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
 
       <SettingsDialog
         open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
+        onClose={() => {
+          setSettingsOpen(false)
+          // 设置里可能刚联机并拉取了文献，关闭时刷新本机离线库
+          void refresh()
+        }}
         onSaved={() => notify('模型配置已更新')}
+      />
+
+      <ZoteroSyncDialog
+        open={zoteroSyncOpen}
+        onClose={() => setZoteroSyncOpen(false)}
+        onSynced={() => {
+          void refresh()
+        }}
       />
 
       <ZoteroImportDialog

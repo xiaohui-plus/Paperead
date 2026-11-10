@@ -63,6 +63,9 @@ impl Sidecar {
             .env("PAPEREAD_PORT", port.to_string())
             .env("PAPEREAD_DATA", &data_dir)
             .env("PAPEREAD_TOKEN", &token)
+            // 局域网开放：手机扫「设置 → 设备同步」的二维码后要能连上这台电脑。
+            // 所有 /api 请求仍要求随机 token（二维码里带的那个），同网段设备拿不到 token。
+            .env("PAPEREAD_HOST", "0.0.0.0")
             .env("PYTHONUTF8", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))

@@ -25,6 +25,9 @@ export interface PaperRow {
   read_page?: number
   read_at?: number
   annotation_count?: number
+  /** 本机离线副本：下载到手机的论文，或从 StoryReader 导入的书 */
+  offline?: boolean
+  local_source?: 'paper' | 'storyreader'
 }
 
 export interface Folder {
@@ -281,6 +284,70 @@ export async function syncZotero(collection = ''): Promise<ZoteroSyncResult> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ collection }),
   })
+}
+
+// ── Zotero Web API 双向同步 ─────────────────────────────
+
+export interface ZoteroWebReport {
+  ok?: boolean
+  started_at: number
+  finished_at: number
+  added: number
+  updated: number
+  pushed: number
+  pdf_uploaded: number
+  pdf_downloaded: number
+  collections_pulled: number
+  collections_pushed: number
+  membership_pushed: number
+  membership_pulled: number
+  remote_deleted: number
+  skipped: number
+  errors: string[]
+}
+
+export interface ZoteroWebStatus {
+  configured: boolean
+  api_key_masked: string
+  user_id: string
+  library_type: 'user' | 'group'
+  group_id: string
+  last_sync: number
+  last_report: ZoteroWebReport | null
+}
+
+export interface ZoteroWebConfigPayload {
+  api_key: string
+  user_id: string
+  library_type: 'user' | 'group'
+  group_id: string
+}
+
+export async function getZoteroWebStatus(): Promise<ZoteroWebStatus> {
+  return jsonFetch('/api/zotero/web')
+}
+
+export async function saveZoteroWebConfig(
+  payload: ZoteroWebConfigPayload,
+): Promise<ZoteroWebStatus & { username?: string }> {
+  return jsonFetch('/api/zotero/web', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function testZoteroWeb(): Promise<{
+  ok: boolean
+  user_id: string
+  username: string
+  access?: Record<string, unknown>
+}> {
+  return jsonFetch('/api/zotero/web/test', { method: 'POST' })
+}
+
+export async function runZoteroWebSync(): Promise<ZoteroWebReport> {
+  return jsonFetch('/api/zotero/web/sync', { method: 'POST' })
 }
 
 // ── 导读 ────────────────────────────────────────────────

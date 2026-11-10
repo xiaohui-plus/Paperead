@@ -53,6 +53,12 @@ export function saveMobileServer(base: string, token: string): MobileServer {
   const normalized = normalizeServerBase(base)
   localStorage.setItem(SERVER_KEY, normalized)
   localStorage.setItem(TOKEN_KEY, token.trim())
+  // 换了服务器要重新拉一次模型配置，否则会继续用旧电脑的 Key
+  try {
+    sessionStorage.removeItem('paperead.models.pulled')
+  } catch {
+    // sessionStorage 不可用时忽略
+  }
   return { base: normalized, token: token.trim() }
 }
 
@@ -88,12 +94,18 @@ export function mediaUrl(path: string | null | undefined): string {
   return `${url}${url.includes('?') ? '&' : '?'}pr_token=${encodeURIComponent(token)}`
 }
 
+let fetchInstalled = false
+
 /**
  * 全局包装 fetch：只在移动壳里生效，把相对 `/api` 请求转到服务器并附 token。
  * 这样不需要改动几十处调用点，桌面版行为完全不变。
+ *
+ * 扫码配对后可以再次调用：只安装一次，避免重复包裹导致请求头叠加。
  */
 export function installMobileFetch(): void {
+  if (fetchInstalled) return
   if (!isMobileShell() || !hasMobileServer()) return
+  fetchInstalled = true
   const original = window.fetch.bind(window)
   window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
     if (typeof input === 'string' && input.startsWith('/api')) {

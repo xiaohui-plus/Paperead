@@ -6,6 +6,9 @@ interface Props {
   onOpen: (id: string) => void
   onDelete: (paper: PaperRow) => void
   onReparse: (paper: PaperRow) => void
+  /** 下载到本机的进度；null 表示不在下载 */
+  downloadProgress?: { done: number; total: number } | null
+  onDownload?: (paper: PaperRow) => void
   draggable?: boolean
   dragging?: boolean
   onDragStart?: (paper: PaperRow) => void
@@ -31,6 +34,8 @@ export function PaperCard({
   onOpen,
   onDelete,
   onReparse,
+  downloadProgress = null,
+  onDownload,
   draggable = false,
   dragging = false,
   onDragStart,
@@ -68,6 +73,11 @@ export function PaperCard({
             {STATUS_LABEL[paper.status] ?? paper.status}
           </span>
         )}
+        {paper.offline && (
+          <span className="paper-local-badge">
+            {paper.local_source === 'storyreader' ? '导入' : '已下载'}
+          </span>
+        )}
       </div>
 
       <div className="paper-body">
@@ -100,6 +110,20 @@ export function PaperCard({
         {failed && (
           <button className="mini-btn" onClick={() => onReparse(paper)}>
             重试
+          </button>
+        )}
+        {!paper.offline && onDownload && paper.status === 'ready' && (
+          <button
+            className="mini-btn"
+            onClick={() => onDownload(paper)}
+            disabled={Boolean(downloadProgress)}
+            title="把解析结果和各页图片存到本机，离线也能读"
+          >
+            {downloadProgress
+              ? `下载 ${downloadProgress.total
+                  ? Math.round((downloadProgress.done / downloadProgress.total) * 100)
+                  : 0}%`
+              : '下载'}
           </button>
         )}
         <button className="mini-btn danger" onClick={() => onDelete(paper)}>

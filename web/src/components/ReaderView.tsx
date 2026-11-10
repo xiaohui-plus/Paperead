@@ -25,6 +25,9 @@ import {
   type ReadingHighlight,
 } from '../lib/library'
 import { mediaUrl } from '../lib/mobile'
+import { canRunLocally, serverReachable } from '../lib/connectivity'
+import { readOffline, saveOfflineBlocks } from '../lib/offlineStore'
+import { translatePagesLocal } from '../lib/localTranslate'
 import type { AnnotationActions } from './Annotations'
 import { loadTargetLang } from '../lib/translation'
 import { loadAutoHighlights } from '../lib/readingPrefs'
@@ -83,9 +86,13 @@ export function ReaderView({ paperId, onBack }: Props) {
   const [visiblePage, setVisiblePage] = useState(1)
   const [settledPage, setSettledPage] = useState(1)
   const [translating, setTranslating] = useState(false)
+  // 本机副本：页图、PDF 直链，以及来源（StoryReader 导入的书没有 PDF）
+  const [pageUrls, setPageUrls] = useState<Record<number, string>>({})
+  const [localKind, setLocalKind] = useState<'none' | 'paper' | 'storyreader'>('none')
+  const [localPdfUrl, setLocalPdfUrl] = useState<string | null>(null)
   // 示例数据只有 paper.json，没有 PDF 可看
-  const pdfHref = mediaUrl(`/api/papers/${encodeURIComponent(paperId)}/file`)
-  const canShowPdf = paperId !== 'demo'
+  const pdfHref = localPdfUrl ?? mediaUrl(`/api/papers/${encodeURIComponent(paperId)}/file`)
+  const canShowPdf = paperId !== 'demo' && localKind !== 'storyreader'
   const [pdfMode, setPdfMode] = useState(
     () =>
       paperId !== 'demo' &&
@@ -272,9 +279,23 @@ export function ReaderView({ paperId, onBack }: Props) {
     setError('')
     setVisiblePage(1)
     setSettledPage(1)
+    setPageUrls({})
+    setLocalKind('none')
+    setLocalPdfUrl(null)
     requested.current.clear()
 
     const attempt = async (n: number) => {
+      // 下载到本机的副本优先：离开电脑后也能直接读电脑解析好的 blocks
+      const local = await readOffline(paperId).catch(() => null)
+      if (!alive) return
+      if (local) {
+        setParsing(false)
+        setPageUrls(local.pageUrls)
+        setLocalPdfUrl(local.pdfUrl)
+        setLocalKind(local.source)
+        setPaper(local.paper)
+        return
+      }
       try {
         const p = await loadPaper(paperId)
         if (!alive) return
@@ -299,6 +320,11 @@ export function ReaderView({ paperId, onBack }: Props) {
       if (timer) window.clearTimeout(timer)
     }
   }, [paperId])
+
+  // StoryReader 导入的书没有 PDF，误带 ?view=pdf 时回到重排阅读
+  useEffect(() => {
+    if (localKind === 'storyreader' && pdfMode) setPdfMode(false)
+  }, [localKind, pdfMode])
 
   useEffect(() => {
     paperRef.current = paper
@@ -518,6 +544,10 @@ export function ReaderView({ paperId, onBack }: Props) {
       })
       if (!need.length) return
 
+      // 服务器不可达时走本机：模型请求由 Rust 发出，逐段流式回填
+      const online = await serverReachable()
+      if (!online && !canRunLocally()) return
+
       need.forEach((pg) => requested.current.add(pg))
       inFlight.current = true
       inFlightPages.current = need
@@ -525,6 +555,43 @@ export function ReaderView({ paperId, onBack }: Props) {
       abortRef.current = ac
       setTranslating(true)
       try {
+        if (!online) {
+          // 本地状态可能还没提交到 paperRef，单独留一份，保证写库不丢译文
+          const translated = new Map<string, string>()
+          const apply = (blockId: string, text: string) => {
+            translated.set(blockId, text)
+            setPaper((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    translation_lang: targetLang,
+                    blocks: prev.blocks.map((b) =>
+                      b.id === blockId ? { ...b, translated: text } : b,
+                    ),
+                  }
+                : prev,
+            )
+          }
+          await translatePagesLocal({
+            paper: current,
+            pages: need,
+            config: { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model: cfg.model },
+            targetLang,
+            signal: ac.signal,
+            onPartial: apply,
+            onBlock: apply,
+            onPageDone: async () => {
+              const snapshot = paperRef.current ?? current
+              const blocks = snapshot.blocks.map((b) =>
+                translated.has(b.id)
+                  ? { ...b, translated: translated.get(b.id) as string }
+                  : b,
+              )
+              await saveOfflineBlocks(paperId, blocks, targetLang).catch(() => undefined)
+            },
+          })
+          return
+        }
         await translateStream(
           paperId,
           toPayload(cfg),
@@ -876,6 +943,7 @@ export function ReaderView({ paperId, onBack }: Props) {
             width={pdfWidth}
             jump={pdfJump}
             onPageChange={setPdfPage}
+            pageUrls={pageUrls}
           />
         ) : (
           <Reader

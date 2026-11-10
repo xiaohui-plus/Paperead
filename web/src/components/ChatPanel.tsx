@@ -17,6 +17,10 @@ import {
   type ModelSettings,
 } from '../lib/settings'
 import { buildAnswer, type AskKind } from '../lib/assistant'
+import { canRunLocally, serverReachable } from '../lib/connectivity'
+import { streamLocalChat } from '../lib/localLlm'
+import { buildLocalContext, buildLocalIndex, retrieveLocal } from '../lib/localSearch'
+import { appendLocalChat, loadLocalChat } from '../lib/offlineStore'
 import { tourBus } from '../tour/tourBus'
 import { Markdown, balanceMarkdown } from './Markdown'
 import { Katex } from './Katex'
@@ -57,6 +61,15 @@ interface Turn {
   /** 后端历史里的轮次 id（恢复来的轮次才有；往前翻页时作为 before） */
   memoryId?: string
 }
+
+/** 本机问答的系统提示：和电脑端 `paperead/tutor/qa.py` 保持一致。 */
+const LOCAL_ANSWER_SYS = `你是论文助教。只根据给定的材料回答，用中文，简洁、分点、不要客套。
+
+规则：
+1. 材料里没有的信息不要编，直接说"论文中没有提到"；
+2. 每一条论断后面必须标注来源，格式：[P3] 第 3 页；
+3. 如果材料之间矛盾，指出矛盾，不要强行统一；
+4. 不要复述问题，直接给答案。`
 
 const QUICK: { key: AskKind; label: string }[] = [
   { key: 'summary', label: '总结论文' },
@@ -179,10 +192,16 @@ export function ChatPanel({
     }
     let alive = true
     setHistoryReady(false)
-    getChat(paperId)
-      .then(({ turns: history }) => {
-        // 旧后端/关闭记忆时可能只有 {messages} 没有 turns，按空历史处理
-        const rows = history ?? []
+
+    const restore = async () => {
+      const restoreRows = (rows: {
+        id: string
+        question: string
+        answer: string
+        sources?: AskSource[]
+        usedWeb?: boolean
+        latency?: number
+      }[]) => {
         if (!alive || rows.length === 0) return
         const restored: Turn[] = rows.map((t): Turn => {
           seq.current += 1
@@ -200,14 +219,37 @@ export function ChatPanel({
         })
         // 恢复只填补空白面板：已经有（或刚发出的）对话就不要再插历史
         setTurns((prev) => (prev.length === 0 ? restored : prev))
-      })
-      .catch((e) => {
+      }
+
+      // 离开电脑后没有服务端历史，改读本机保存的对话
+      if (!(await serverReachable())) {
+        const rows = await loadLocalChat(paperId).catch(() => [])
+        restoreRows(
+          rows.map((row) => ({
+            id: row.id,
+            question: row.question,
+            answer: row.answer,
+            sources: row.sources as AskSource[],
+            usedWeb: row.usedWeb,
+            latency: row.latency,
+          })),
+        )
+        return
+      }
+
+      try {
+        const { turns: history } = await getChat(paperId)
+        // 旧后端/关闭记忆时可能只有 {messages} 没有 turns，按空历史处理
+        restoreRows(history ?? [])
+      } catch (e) {
         // 历史读不出来不影响问答
         console.warn('恢复历史对话失败', e)
-      })
-      .finally(() => {
-        if (alive) setHistoryReady(true)
-      })
+      }
+    }
+
+    void restore().finally(() => {
+      if (alive) setHistoryReady(true)
+    })
     return () => {
       alive = false
     }
@@ -343,6 +385,65 @@ export function ChatPanel({
     }
 
     try {
+      // 服务器不可达时改走本机检索 + 本机直连模型，仍然是流式输出
+      if (!(await serverReachable())) {
+        if (!canRunLocally()) {
+          throw new Error('电脑端服务不可达，本机也没有可用的模型通道')
+        }
+        const index = buildLocalIndex(paper)
+        const hits = retrieveLocal(index, question)
+        // 总结/大纲这类问题可能一个关键词都命中不了：退化为取前几段
+        const chosen = hits.length
+          ? hits
+          : index.docs.slice(0, 6).map((doc) => ({ doc, score: 0 }))
+        const context = buildLocalContext(index, chosen)
+        const sources: AskSource[] = hits.map((hit) => ({
+          type: 'paper',
+          label: `[P${hit.doc.page}]`,
+          page: hit.doc.page,
+          blockId: hit.doc.blockId,
+          snippet: (hit.doc.translated || hit.doc.text).slice(0, 160),
+        }))
+        patch(id, (t) => ({ ...t, sources, status: 'streaming' }))
+
+        const history = await loadLocalChat(paperId).catch(() => [])
+        const recent = history
+          .slice(-6)
+          .map((row) => `用户：${row.question}\n助手：${row.answer.slice(0, 300)}`)
+          .join('\n')
+        const started = performance.now()
+        const answer = await streamLocalChat({
+          config: { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model: cfg.model },
+          messages: [
+            { role: 'system', content: LOCAL_ANSWER_SYS },
+            {
+              role: 'user',
+              content: `${recent ? `【最近对话】\n${recent}\n\n` : ''}【材料】\n${
+                context || '（没有检索到相关段落）'
+              }\n\n【问题】${question}`,
+            },
+          ],
+          temperature: 0.2,
+          maxTokens: 4000,
+          signal: controller.signal,
+          onDelta,
+        })
+        flush()
+        const latency = (performance.now() - started) / 1000
+        patch(id, (t) => ({ ...t, status: 'done', latency }))
+        void appendLocalChat(paperId, {
+          id: clientId,
+          question,
+          answer,
+          sources,
+          usedWeb: false,
+          latency,
+          at: Date.now(),
+        })
+        tourBus.emit('reader:chat-answered', { question, paperId })
+        return
+      }
+
       await askPaperStream(
         paperId,
         toPayload(cfg),

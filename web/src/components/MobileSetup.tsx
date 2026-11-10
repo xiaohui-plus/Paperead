@@ -4,6 +4,7 @@ import {
   saveMobileServer,
   testMobileServer,
 } from '../lib/mobile'
+import { MobileDeviceSyncPanel } from './DeviceSync'
 
 interface FormProps {
   base: string
@@ -43,8 +44,33 @@ function ServerForm({ base, token, onBase, onToken }: FormProps) {
   )
 }
 
-/** 安卓端首次启动：先配置要连接的 Paperead 服务器。 */
+/** 安卓端首次启动：扫码配对，配对后可直接选择同步方式；也可手动填地址。 */
 export function MobileSetupScreen() {
+  return (
+    <div className="mobile-setup">
+      <div className="mobile-setup-card">
+        <div className="mobile-setup-brand">
+          <span className="brand-mark">P</span>
+          <span className="brand-name">Paperead</span>
+        </div>
+        <h1>连接你的文献库</h1>
+        <p>
+          手机和电脑连同一个 Wi-Fi。在电脑上打开「设置 → 设备同步」，扫码配对后即可选择要同步的文献。
+        </p>
+
+        <MobileDeviceSyncPanel onDone={() => window.location.reload()} />
+
+        <details className="mobile-setup-manual">
+          <summary>手动填写服务器地址</summary>
+          <ManualConnect />
+        </details>
+      </div>
+    </div>
+  )
+}
+
+/** 手动连接：公网域名或扫码不方便时使用。 */
+function ManualConnect() {
   const saved = loadMobileServer()
   const [base, setBase] = useState(saved.base)
   const [token, setToken] = useState(saved.token)
@@ -66,27 +92,13 @@ export function MobileSetupScreen() {
   }
 
   return (
-    <div className="mobile-setup">
-      <form className="mobile-setup-card" onSubmit={submit}>
-        <div className="mobile-setup-brand">
-          <span className="brand-mark">P</span>
-          <span className="brand-name">Paperead</span>
-        </div>
-        <h1>连接你的文献库</h1>
-        <p>
-          手机端负责阅读与检索，文献解析、翻译和问答由你的电脑或服务器完成。
-          请填写运行 Paperead 后端的地址。
-        </p>
-        <ServerForm base={base} token={token} onBase={setBase} onToken={setToken} />
-        {error && <p className="mobile-setup-error">{error}</p>}
-        <button className="btn primary mobile-setup-submit" type="submit" disabled={busy}>
-          {busy ? '正在连接…' : '连接'}
-        </button>
-        <p className="mobile-setup-hint">
-          局域网内填电脑的内网 IP；公网使用请填带 https 的域名。
-        </p>
-      </form>
-    </div>
+    <form className="mobile-setup-form" onSubmit={submit}>
+      <ServerForm base={base} token={token} onBase={setBase} onToken={setToken} />
+      {error && <p className="mobile-setup-error">{error}</p>}
+      <button className="btn primary mobile-setup-submit" type="submit" disabled={busy}>
+        {busy ? '正在连接…' : '连接'}
+      </button>
+    </form>
   )
 }
 

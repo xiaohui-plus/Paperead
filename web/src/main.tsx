@@ -11,6 +11,7 @@ import { syncResearchModel } from './lib/researchModel'
 import { syncScholarConfig } from './lib/scholarConfig'
 import { autoCheckUpdate, isDesktopApp } from './lib/update'
 import { hasMobileServer, installMobileFetch, isMobileShell } from './lib/mobile'
+import { pullModelSettings } from './lib/settingsSync'
 
 const TourRoot = lazy(() =>
   import('./tour/TourRoot').then((module) => ({ default: module.TourRoot })),
@@ -23,6 +24,13 @@ if (mobile) {
 }
 // 安卓壳把相对 /api 请求转到用户配置的服务器，并附带访问口令
 installMobileFetch()
+
+if (mobile && hasMobileServer()) {
+  // 连上电脑后自动同步模型配置；有变化就刷新一次，让组件读到新的服务商/密钥
+  void pullModelSettings().then((changed) => {
+    if (changed) window.location.reload()
+  })
+}
 
 migrateLegacyStorage()
 if (!mobile || hasMobileServer()) {
