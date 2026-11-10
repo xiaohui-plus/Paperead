@@ -662,6 +662,11 @@ def _export_latex(
             citation_labels=_citation_labels(text, library) if library is not None else None,
         )
         if error:
+            if find_pandoc() is None:
+                # 导出时才发现 pandoc 没了：作废设置页缓存，下次打开重新检测。
+                from server.toolchain_api import invalidate_cache
+
+                invalidate_cache()
             return {"format": fmt, "files": [], "error": error}
         # 默认 main.tex：ASCII 文件名能让 bibtex 在 Windows 上稳定工作。
         filename = safe_name(body.filename or "main.tex")
@@ -722,6 +727,11 @@ def _export_latex(
         result["error"] = error
     else:
         result["warning"] = error
+    if error and "未检测到 LaTeX 引擎" in error:
+        # 引擎被卸载或 PATH 变化：作废设置页缓存，下次打开重新检测。
+        from server.toolchain_api import invalidate_cache
+
+        invalidate_cache()
     return result
 
 
@@ -1533,6 +1543,9 @@ def build_router(
         )
         exe = find_pandoc()
         if not exe:
+            from server.toolchain_api import invalidate_cache
+
+            invalidate_cache()
             return {
                 "format": "docx",
                 "files": [],
