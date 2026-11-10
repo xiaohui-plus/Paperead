@@ -187,6 +187,24 @@ GitHub 附件：安装包、便携版、`pandoc-*.zip`、源码 zip、`latest.js
 Gitee 只传这六个：安装包、安装包 zip、`pandoc-2.19.2-windows-x86_64.zip`、源码 zip、`latest.json`、`SHA256SUMS.txt`。
 便携版走 GitHub（> 100 MB 超 Gitee 限制）。pandoc 那个 zip 是安装包首次启动的下载源，漏传的话用户导出会一直失败。
 
+**另外必须维护一个固定 tag 为 `latest` 的发行版**（创建一次，长期存在）：
+Gitee 没有 `releases/latest/download/` 永久直链，应用的更新检查端点第一位就是
+`https://gitee.com/deng_xiaohui/paperead/releases/download/latest/latest.json`。
+每次发版后把它的 `latest.json` 附件替换成本次版本，漏更新的话已装用户永远检查不到新版本：
+
+```powershell
+# 1) 按 tag 找到 latest 发行版，记下 release id 和 latest.json 附件的 attach id
+Invoke-RestMethod "https://gitee.com/api/v5/repos/deng_xiaohui/paperead/releases/tags/latest"
+
+# 2) 删掉旧的 latest.json 附件
+Invoke-RestMethod -Method Delete `
+  "https://gitee.com/api/v5/repos/deng_xiaohui/paperead/releases/{release_id}/attach_files/{attach_id}?access_token=$tok"
+
+# 3) 重新上传（同建发行版的 attach_files 接口，multipart 字段名固定是 file）
+```
+
+> 注意：这份 `latest.json` 里内嵌的安装包 `url` 要指向 **Gitee 下载直链**，这样国内用户更新时的下载流量也走 Gitee。
+
 > ⚠️ **不要在 Gitee 描述里写死 GitHub 的直链**。Gitee 的安装包应上传到 Gitee 自身，避免国内用户访问 GitHub 附件失败。
 
 ### 更新链路：用户从哪里拉
@@ -195,7 +213,7 @@ Gitee 只传这六个：安装包、安装包 zip、`pandoc-2.19.2-windows-x86_6
 
 | 环节 | 从哪拉 | 说明 |
 | --- | --- | --- |
-| 检查新版本 | `latest.json` 清单 | 内置端点是 GitHub Releases（ghproxy 镜像兜底），可用 `PAPEREAD_UPDATE_ENDPOINT` 环境变量覆盖 |
+| 检查新版本 | `latest.json` 清单 | **Gitee `latest` 固定发行版优先**，GitHub Releases（ghproxy 镜像兜底）紧随其后；可用 `PAPEREAD_UPDATE_ENDPOINT` 环境变量覆盖 |
 | 下载新安装包 | `latest.json` 里内嵌的 `url` | CI（tauri-action）自动生成时指向 GitHub；手动重签名生成时用 `make_latest_json.py --url`，国内用户建议指向 Gitee 安装包直链 |
 | pandoc 首次启动下载 | **Gitee 优先**，ghproxy / GitHub 兜底 | 顺序写在 `pandoc_setup.py` 里；Gitee 漏传 `pandoc-*.zip`，国内用户导出会一直失败 |
 
@@ -230,6 +248,7 @@ Gitee 只传这六个：安装包、安装包 zip、`pandoc-2.19.2-windows-x86_6
 - [ ] tag 指向**最终** commit
 - [ ] GitHub draft 已转为正式 release 并设为 latest
 - [ ] Gitee 发行版已创建，附件齐全、下载链接返回 200
+- [ ] Gitee `latest` 固定发行版的 `latest.json` 已替换为本次版本（更新检查第一位端点）
 - [ ] **两个平台版本号、更新说明、安装包完全一致**
 - [ ] `latest.json` 可访问、内嵌下载 url 有效（国内拉取主通道）
 - [ ] README 下载链接（GitHub + Gitee）已同步
