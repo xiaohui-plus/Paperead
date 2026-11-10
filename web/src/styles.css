@@ -8946,6 +8946,59 @@ html.mobile-shell #root {
   color: var(--ink);
 }
 
+.mobile-setup-intro {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mobile-setup-steps {
+  list-style: none;
+  counter-reset: setup-step;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mobile-setup-steps li {
+  counter-increment: setup-step;
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  column-gap: 10px;
+}
+
+.mobile-setup-steps li::before {
+  content: counter(setup-step);
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--blue-soft);
+  color: var(--blue-ink);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.mobile-setup-steps b {
+  grid-column: 2;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.4;
+}
+
+.mobile-setup-steps span {
+  grid-column: 2;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
 .mobile-setup-card p {
   margin: 0;
   line-height: 1.6;
@@ -9001,6 +9054,32 @@ html.mobile-shell #root {
   flex-direction: column;
   gap: 14px;
   max-width: 460px;
+}
+
+/* 首次配对页：去掉面板里重复的标题，按钮改成整行大按钮，适配安全区 */
+.model-section.is-bare {
+  margin-top: 0;
+}
+
+.model-section.is-bare .sync-scan-actions {
+  flex-direction: column;
+  gap: 10px;
+}
+
+.model-section.is-bare .sync-scan-actions .btn {
+  width: 100%;
+  height: 46px;
+  font-size: 14px;
+}
+
+html.mobile-shell .mobile-setup {
+  padding: 16px 14px calc(20px + env(safe-area-inset-bottom));
+}
+
+html.mobile-shell .mobile-setup-card {
+  width: 100%;
+  max-width: 430px;
+  padding: 20px 18px;
 }
 
 /* 本机离线副本 / 从 StoryReader 导入 */

@@ -37,7 +37,9 @@ dependencies {
     implementation("androidx.camera:camera-camera2:${camerax_version}")
     implementation("androidx.camera:camera-lifecycle:${camerax_version}")
     implementation("androidx.camera:camera-view:${camerax_version}")
-    implementation("com.google.android.gms:play-services-mlkit-barcode-scanning:18.1.0")
+    // 用内置模型（bundled）而不是 play-services 版本：后者依赖 Google Play 服务，
+    // 国产手机（无 GMS）上初始化会抛异常，WebView 直接闪退。
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")

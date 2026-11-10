@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import QRCode from 'qrcode'
 import jsQR from 'jsqr'
-import { Format, requestPermissions, scan } from '@tauri-apps/plugin-barcode-scanner'
+import { Format, checkPermissions, requestPermissions, scan } from '@tauri-apps/plugin-barcode-scanner'
 import {
   buildSyncCode,
   fetchRemotePapers,
@@ -187,7 +187,10 @@ async function decodeQrImage(file: File): Promise<string | null> {
 type SyncView = 'main' | 'select'
 
 /** 手机端：配对后直接选同步方式；没配对时先扫码 / 相册 / 粘贴同步码。 */
-export function MobileDeviceSyncPanel({ onDone }: { onDone?: () => void } = {}) {
+export function MobileDeviceSyncPanel({
+  onDone,
+  bare = false,
+}: { onDone?: () => void; bare?: boolean } = {}) {
   const [server, setServer] = useState(loadMobileServer)
   const [code, setCode] = useState('')
   const [busy, setBusy] = useState(false)
@@ -288,16 +291,20 @@ export function MobileDeviceSyncPanel({ onDone }: { onDone?: () => void } = {}) 
     setError('')
     setNotice('')
     try {
-      const permission = await requestPermissions()
-      if (permission !== 'granted') {
+      let state = await checkPermissions().catch(() => null)
+      if (state !== 'granted') {
+        state = await requestPermissions()
+      }
+      if (state !== 'granted') {
         throw new Error('没有相机权限，请在系统设置里允许 Paperead 使用相机')
       }
       const result = await scan({ windowed: true, formats: [Format.QRCode] })
       await apply(result.content)
     } catch (e) {
-      setError(
-        `${e instanceof Error ? e.message : '扫码失败'}；也可以点「从相册识别」或粘贴同步码`,
-      )
+      const message = e instanceof Error ? e.message : String(e)
+      // 用户主动取消不算错误
+      if (/cancel/i.test(message)) return
+      setError(`${message}；也可以点「从相册识别」或粘贴同步码`)
     }
   }, [apply])
 
@@ -639,18 +646,22 @@ export function MobileDeviceSyncPanel({ onDone }: { onDone?: () => void } = {}) 
           )}
         </section>
       ) : (
-        <section className="model-section">
-          <div className="section-head">
-            <h3>{paired ? '重新配对' : '扫描电脑上的二维码'}</h3>
-            {paired && (
-              <button className="mini-btn" onClick={() => setPairOpen(false)} disabled={busy}>
-                返回
-              </button>
-            )}
-          </div>
-          <p className="hint">
-            在电脑上打开 <b>设置 → 设备同步</b>，用下面的按钮扫描二维码。地址、访问口令和模型配置会一起同步到本机。
-          </p>
+        <section className={bare ? 'model-section is-bare' : 'model-section'}>
+          {!bare && (
+            <>
+              <div className="section-head">
+                <h3>{paired ? '重新配对' : '扫描电脑上的二维码'}</h3>
+                {paired && (
+                  <button className="mini-btn" onClick={() => setPairOpen(false)} disabled={busy}>
+                    返回
+                  </button>
+                )}
+              </div>
+              <p className="hint">
+                在电脑上打开 <b>设置 → 设备同步</b>，用下面的按钮扫描二维码。地址、访问口令和模型配置会一起同步到本机。
+              </p>
+            </>
+          )}
 
           <div className="sync-scan-actions">
             {native && (

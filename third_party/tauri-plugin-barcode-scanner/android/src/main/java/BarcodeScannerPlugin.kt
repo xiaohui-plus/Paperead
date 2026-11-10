@@ -50,7 +50,6 @@ import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import java.util.Collections
-import java.util.concurrent.ExecutionException
 
 private const val PERMISSION_ALIAS_CAMERA = "camera"
 private const val PERMISSION_NAME = Manifest.permission.CAMERA
@@ -124,78 +123,82 @@ class BarcodeScannerPlugin(private val activity: Activity) : Plugin(activity),
     private fun setupCamera(cameraDirection: String, windowed: Boolean) {
         activity
             .runOnUiThread {
-                val previewView = PreviewView(activity)
-                previewView.layoutParams = FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-                )
-                this.previewView = previewView
+                try {
+                    val previewView = PreviewView(activity)
+                    previewView.layoutParams = FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                    this.previewView = previewView
 
-                val graphicOverlay = GraphicOverlay(activity)
-                graphicOverlay.layoutParams = FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-                )
-                this.graphicOverlay = graphicOverlay
+                    val graphicOverlay = GraphicOverlay(activity)
+                    graphicOverlay.layoutParams = FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                    this.graphicOverlay = graphicOverlay
 
-                val parent = webView.parent as ViewGroup
-                parent.addView(previewView)
-                parent.addView(graphicOverlay)
+                    val parent = webView.parent as ViewGroup
+                    parent.addView(previewView)
+                    parent.addView(graphicOverlay)
 
-                this.windowed = windowed
-                if (windowed) {
-                    webView.bringToFront()
-                    webViewBackground = webView.background
-                    webView.setBackgroundColor(Color.TRANSPARENT)
+                    this.windowed = windowed
+                    if (windowed) {
+                        webView.bringToFront()
+                        webViewBackground = webView.background
+                        webView.setBackgroundColor(Color.TRANSPARENT)
+                    }
+
+                    val cameraProviderFuture = ProcessCameraProvider.getInstance(activity)
+                    cameraProviderFuture.addListener(
+                        {
+                            try {
+                                val cameraProvider = cameraProviderFuture.get()
+                                bindPreview(
+                                    cameraProvider,
+                                    if (cameraDirection == "front") CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
+                                )
+                                this.cameraProvider = cameraProvider
+                            } catch (e: InterruptedException) {
+                                failScan("相机初始化被中断")
+                            } catch (e: Throwable) {
+                                failScan("相机不可用：${e.message ?: e.javaClass.simpleName}")
+                            }
+                        },
+                        ContextCompat.getMainExecutor(activity)
+                    )
+                    this.cameraProviderFuture = cameraProviderFuture
+                } catch (e: Throwable) {
+                    failScan("无法启动相机预览：${e.message ?: e.javaClass.simpleName}")
                 }
-
-                val cameraProviderFuture = ProcessCameraProvider.getInstance(activity)
-                cameraProviderFuture.addListener(
-                    {
-                        try {
-                            val cameraProvider = cameraProviderFuture.get()
-                            bindPreview(
-                                cameraProvider,
-                                if (cameraDirection == "front") CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
-                            )
-                            this.cameraProvider = cameraProvider
-                        } catch (e: InterruptedException) {
-                            // ignored
-                        } catch (_: ExecutionException) {
-                            // ignored
-                        }
-                    },
-                    ContextCompat.getMainExecutor(activity)
-                )
-                this.cameraProviderFuture = cameraProviderFuture
             }
     }
 
     private fun bindPreview(cameraProvider: ProcessCameraProvider, cameraDirection: Int) {
         activity
             .runOnUiThread {
-                val preview = Preview.Builder().build()
-                val cameraSelector =
-                    CameraSelector.Builder().requireLensFacing(cameraDirection).build()
-                preview.setSurfaceProvider(previewView?.surfaceProvider)
-                val imageAnalysis = ImageAnalysis.Builder()
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .setTargetResolution(Size(1280, 720))
-                    .build()
-                imageAnalysis.setAnalyzer(
-                    ContextCompat.getMainExecutor(activity),
-                    this
-                )
-
                 try {
+                    val preview = Preview.Builder().build()
+                    val cameraSelector =
+                        CameraSelector.Builder().requireLensFacing(cameraDirection).build()
+                    preview.setSurfaceProvider(previewView?.surfaceProvider)
+                    val imageAnalysis = ImageAnalysis.Builder()
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .setTargetResolution(Size(1280, 720))
+                        .build()
+                    imageAnalysis.setAnalyzer(
+                        ContextCompat.getMainExecutor(activity),
+                        this
+                    )
+
                     camera = cameraProvider.bindToLifecycle(
                         activity as LifecycleOwner,
                         cameraSelector,
                         preview,
                         imageAnalysis
                     )
-                } catch (e: Exception) {
-                    // TODO
+                } catch (e: Throwable) {
+                    failScan("无法打开摄像头：${e.message ?: e.javaClass.simpleName}")
                 }
             }
     }
@@ -203,16 +206,34 @@ class BarcodeScannerPlugin(private val activity: Activity) : Plugin(activity),
     private fun dismantleCamera() {
         activity
             .runOnUiThread {
-                if (cameraProvider != null) {
+                try {
                     cameraProvider?.unbindAll()
-                    val parent = webView.parent as ViewGroup
-                    parent.removeView(previewView)
-                    parent.removeView(graphicOverlay)
+                    val parent = webView.parent as? ViewGroup
+                    previewView?.let { parent?.removeView(it) }
+                    graphicOverlay?.let { parent?.removeView(it) }
+                } catch (_: Throwable) {
+                    // 清理失败不应该影响调用方（取消 / 扫码成功 / 报错都要能收尾）
+                } finally {
                     camera = null
                     previewView = null
                     graphicOverlay = null
+                    cameraProvider = null
                 }
             }
+    }
+
+    /** 扫码失败时必须把 Promise 收掉，否则前端会一直停在“正在打开相机”。 */
+    private fun failScan(message: String) {
+        val invoke = savedInvoke
+        savedInvoke = null
+        try {
+            invoke?.reject(message)
+        } catch (_: Throwable) {
+        }
+        try {
+            destroy()
+        } catch (_: Throwable) {
+        }
     }
 
     private fun getFormats(args: ScanOptions): List<Int> {
@@ -235,11 +256,19 @@ class BarcodeScannerPlugin(private val activity: Activity) : Plugin(activity),
         dismantleCamera()
         savedInvoke = null
         if (windowed) {
-            if (webViewBackground != null) {
-                webView.background = webViewBackground
-                webViewBackground = null
-            } else {
-                webView.setBackgroundColor(Color.WHITE)
+            val background = webViewBackground
+            webViewBackground = null
+            // 必须在 UI 线程改 WebView：扫码成功回调跑在相机分析线程上，
+            // 直接改会抛 CalledFromWrongThreadException 把应用带崩
+            activity.runOnUiThread {
+                try {
+                    if (background != null) {
+                        webView.background = background
+                    } else {
+                        webView.setBackgroundColor(Color.WHITE)
+                    }
+                } catch (_: Throwable) {
+                }
             }
         }
     }
@@ -248,25 +277,31 @@ class BarcodeScannerPlugin(private val activity: Activity) : Plugin(activity),
     private fun configureCamera(formats: List<Int>) {
         activity
             .runOnUiThread {
-                val vibrator =
-                    activity.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-                this.vibrator = vibrator
-                if (previewView == null) {
-                    throw Exception("Something went wrong configuring the BarcodeScanner")
-                }
+                try {
+                    val vibrator =
+                        activity.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+                    this.vibrator = vibrator
+                    if (previewView == null) {
+                        failScan("相机预览初始化失败，请重试")
+                        return@runOnUiThread
+                    }
 
-                if (formats.isNotEmpty()) {
-                    val mappedFormats = mapFormats(formats)
-                    val options =
-                        BarcodeScannerOptions.Builder()
-                            .setBarcodeFormats(Barcode.FORMAT_QR_CODE, *mappedFormats).build()
-                    scannerOptions = options
-                    scanner = BarcodeScanning.getClient(options)
-                } else {
-                    val options = BarcodeScannerOptions.Builder()
-                        .setBarcodeFormats(Barcode.FORMAT_ALL_FORMATS).build()
-                    scannerOptions = options
-                    scanner = BarcodeScanning.getClient(options)
+                    if (formats.isNotEmpty()) {
+                        val mappedFormats = mapFormats(formats)
+                        val options =
+                            BarcodeScannerOptions.Builder()
+                                .setBarcodeFormats(Barcode.FORMAT_QR_CODE, *mappedFormats).build()
+                        scannerOptions = options
+                        scanner = BarcodeScanning.getClient(options)
+                    } else {
+                        val options = BarcodeScannerOptions.Builder()
+                            .setBarcodeFormats(Barcode.FORMAT_ALL_FORMATS).build()
+                        scannerOptions = options
+                        scanner = BarcodeScanning.getClient(options)
+                    }
+                } catch (e: Throwable) {
+                    // 识别器初始化失败（如缺少 MLKit 模型 / GMS）时给出提示，不要直接崩掉
+                    failScan("无法启动二维码识别：${e.message ?: e.javaClass.simpleName}")
                 }
             }
     }
@@ -315,16 +350,17 @@ class BarcodeScannerPlugin(private val activity: Activity) : Plugin(activity),
                     Logger.error(e.message ?: e.toString())
                 }
                 ?.addOnCompleteListener {
+                    // ImageProxy.close() 会一并关闭底层 Image，重复关闭可能抛异常并崩溃
                     image.close()
-                    mediaImage.close()
                 }
         }
     }
 
     @Command
     fun vibrate(invoke: Invoke) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            vibrator!!.vibrate(
+        val v = vibrator
+        if (v != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            v.vibrate(
                 VibrationEffect.createOneShot(
                     50,
                     VibrationEffect.DEFAULT_AMPLITUDE
@@ -348,15 +384,17 @@ class BarcodeScannerPlugin(private val activity: Activity) : Plugin(activity),
         val args = invoke.parseArgs(ScanOptions::class.java)
 
         savedInvoke = invoke
-        if (hasCamera()) {
-            if (getPermissionState("camera") != PermissionState.GRANTED) {
-                throw Exception("No permission to use camera. Did you request it yet?")
-            } else {
-                webViewBackground = null
-                prepare(args.cameraDirection ?: "back", args.windowed)
-                configureCamera(getFormats(args))
-            }
+        if (!hasCamera()) {
+            failScan("这台设备没有可用的摄像头")
+            return
         }
+        if (getPermissionState("camera") != PermissionState.GRANTED) {
+            failScan("没有相机权限，请先在系统设置里允许 Paperead 使用相机")
+            return
+        }
+        webViewBackground = null
+        prepare(args.cameraDirection ?: "back", args.windowed)
+        configureCamera(getFormats(args))
     }
 
     @SuppressLint("ObsoleteSdkInt")

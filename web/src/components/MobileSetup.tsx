@@ -53,15 +53,31 @@ export function MobileSetupScreen() {
           <span className="brand-mark">P</span>
           <span className="brand-name">Paperead</span>
         </div>
-        <h1>连接你的文献库</h1>
-        <p>
-          手机和电脑连同一个 Wi-Fi。在电脑上打开「设置 → 设备同步」，扫码配对后即可选择要同步的文献。
-        </p>
 
-        <MobileDeviceSyncPanel onDone={() => window.location.reload()} />
+        <div className="mobile-setup-intro">
+          <h1>连接电脑上的文献库</h1>
+          <p>扫码一次，就能把电脑上的文献同步到手机离线阅读。</p>
+        </div>
+
+        <ol className="mobile-setup-steps">
+          <li>
+            <b>电脑端显示二维码</b>
+            <span>打开 Paperead → 设置 → 设备同步</span>
+          </li>
+          <li>
+            <b>手机连同一个 Wi-Fi</b>
+            <span>也可以是电脑所在局域网的同一网段</span>
+          </li>
+          <li>
+            <b>对准二维码扫描</b>
+            <span>下方点「扫描二维码」，识别后自动配对</span>
+          </li>
+        </ol>
+
+        <MobileDeviceSyncPanel bare onDone={() => window.location.reload()} />
 
         <details className="mobile-setup-manual">
-          <summary>手动填写服务器地址</summary>
+          <summary>扫码不方便？手动填写服务器地址</summary>
           <ManualConnect />
         </details>
       </div>
