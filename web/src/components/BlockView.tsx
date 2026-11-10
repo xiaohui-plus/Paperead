@@ -13,6 +13,7 @@ import {
   getProvenance,
   type Annotation,
   type AnnotationColor,
+  type AnnotationKind,
   type ProvenanceCitation,
   type ReadingHighlight,
 } from '../lib/library'
@@ -163,20 +164,23 @@ export function BlockView({
     }, 0)
   }
 
-  const applyHighlight = async (color: AnnotationColor) => {
+  const applyHighlight = async (color: AnnotationColor, kind: AnnotationKind) => {
     if (!selection || !annotationActions) return
     const current = selection
     setSelection(null)
     window.getSelection()?.removeAllRanges()
     try {
-      await annotationActions.create({
+      const row = await annotationActions.create({
         block_id: b.id,
         source: current.source,
         start: current.start,
         end: current.end,
         quote: current.quote,
         color,
+        kind,
       })
+      // 批注建好后直接打开编辑框，省去再点一次
+      if (kind === 'comment' && row) setEditing({ annotation: row, rect: current.rect })
     } catch (err) {
       console.warn('添加标注失败：', err)
     }
@@ -360,7 +364,8 @@ export function BlockView({
       {selection && (
         <SelectionToolbar
           rect={selection.rect}
-          onPick={(color) => void applyHighlight(color)}
+          onPick={(color) => void applyHighlight(color, 'highlight')}
+          onComment={() => void applyHighlight('blue', 'comment')}
           onClose={() => {
             setSelection(null)
             window.getSelection()?.removeAllRanges()

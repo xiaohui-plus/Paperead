@@ -509,7 +509,12 @@ class LibraryStore:
         except Exception:
             log.warning("标注文件损坏，忽略：%s", path)
             return []
-        return data if isinstance(data, list) else []
+        rows = data if isinstance(data, list) else []
+        # 旧数据没有 kind：默认按荧光笔高亮处理
+        for row in rows:
+            if isinstance(row, dict):
+                row.setdefault("kind", "highlight")
+        return rows
 
     def _write_annotations(
         self, paper_id: str, rows: list[dict[str, Any]]
@@ -530,6 +535,7 @@ class LibraryStore:
             "end": int(data.get("end") or 0),
             "quote": data.get("quote") or "",
             "color": data.get("color") or "yellow",
+            "kind": data.get("kind") or "highlight",
             "note": data.get("note") or "",
             "created_at": now,
             "updated_at": now,

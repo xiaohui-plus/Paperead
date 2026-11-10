@@ -105,12 +105,13 @@ MOCK = env("PAPEREAD_MOCK") == "1"
 # 公式识别的整体时间预算：超时就先让论文可读，剩余公式保留裁图
 FORMULA_TIMEOUT = float(env("PAPEREAD_FORMULA_TIMEOUT", "180"))
 
-# 版本更新：优先读 Tauri 的 latest.json；国内镜像作为回退。
+# 版本更新：Gitee（国内主通道，固定 tag `latest` 的发行版）优先，GitHub 与镜像作为回退。
 UPDATE_ENDPOINTS = (
+    "https://gitee.com/deng_xiaohui/paperead/releases/download/latest/latest.json",
     "https://github.com/xiaohui-plus/Paperead/releases/latest/download/latest.json",
     "https://ghproxy.net/https://github.com/xiaohui-plus/Paperead/releases/latest/download/latest.json",
 )
-UPDATE_RELEASE_PAGE = "https://github.com/xiaohui-plus/Paperead/releases/latest"
+UPDATE_RELEASE_PAGE = "https://gitee.com/deng_xiaohui/paperead/releases"
 UPDATE_TTL = 24 * 3600
 _update_cache: dict = {"checked_at": 0.0, "payload": None}
 
@@ -1093,6 +1094,8 @@ async def block_provenance(paper_id: str, block_id: str) -> dict:
 # ── 标注 / 笔记 ──────────────────────────────────────────
 
 ANNOTATION_COLORS = {"yellow", "green", "blue", "pink"}
+# highlight = 荧光笔填色；comment = 彩色下划线批注
+ANNOTATION_KINDS = {"highlight", "comment"}
 
 
 class AnnotationIn(BaseModel):
@@ -1102,6 +1105,7 @@ class AnnotationIn(BaseModel):
     end: int = Field(..., ge=0)
     quote: str = Field("", max_length=4000)
     color: str = Field("yellow", max_length=20)
+    kind: str = Field("highlight", max_length=20)
     note: str = Field("", max_length=5000)
 
 
@@ -1143,6 +1147,7 @@ async def add_annotation(paper_id: str, req: AnnotationIn) -> dict:
     text = _annotation_text(blocks, req.block_id, req.source)
     _check_range(req.start, req.end, text)
     color = req.color if req.color in ANNOTATION_COLORS else "yellow"
+    kind = req.kind if req.kind in ANNOTATION_KINDS else "highlight"
     return store.add_annotation(
         paper_id,
         {
@@ -1152,6 +1157,7 @@ async def add_annotation(paper_id: str, req: AnnotationIn) -> dict:
             "end": req.end,
             "quote": req.quote,
             "color": color,
+            "kind": kind,
             "note": req.note,
         },
     )

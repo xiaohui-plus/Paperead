@@ -75,10 +75,14 @@ npm run tauri -- dev
 “帮助 → 检查更新”。检查到新版本才弹窗询问，不会自动下载。测试时可用
 `PAPEREAD_UPDATE_INTERVAL_SECS` 覆盖间隔（最小 30 秒）。
 
-当前 `src-tauri/tauri.conf.json` 的更新地址指向本仓库，并带一个国内镜像回退：
+当前 `src-tauri/tauri.conf.json` 的更新地址以 **Gitee 为第一位**：Gitee 没有
+GitHub 那种 `releases/latest/download/` 永久直链，所以要在 Gitee 维护一个
+**固定 tag 为 `latest` 的发行版**，每次发版替换它的 `latest.json` 附件。
+GitHub 与国内镜像作为回退：
 
 ```json
 "endpoints": [
+  "https://gitee.com/deng_xiaohui/paperead/releases/download/latest/latest.json",
   "https://github.com/xiaohui-plus/Paperead/releases/latest/download/latest.json",
   "https://ghproxy.net/https://github.com/xiaohui-plus/Paperead/releases/latest/download/latest.json"
 ]

@@ -46,6 +46,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
+        "https://gitee.com/deng_xiaohui/paperead/releases/download/latest/latest.json",
         "https://github.com/xiaohui-plus/Paperead/releases/latest/download/latest.json",
         "https://ghproxy.net/https://github.com/xiaohui-plus/Paperead/releases/latest/download/latest.json"
       ],

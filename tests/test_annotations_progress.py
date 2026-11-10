@@ -75,6 +75,61 @@ def test_annotation_lifecycle(tmp_path: Path):
     assert store.list_annotations("p1") == []
 
 
+def test_annotation_kind_defaults_and_persists(tmp_path: Path):
+    store = _store(tmp_path)
+
+    # 不传 kind：老客户端/老数据按荧光笔处理
+    hl = store.add_annotation(
+        "p1",
+        {
+            "block_id": "b0001",
+            "source": "en",
+            "start": 0,
+            "end": 3,
+            "quote": "The",
+            "color": "yellow",
+        },
+    )
+    assert hl["kind"] == "highlight"
+
+    # 批注：彩色下划线
+    cm = store.add_annotation(
+        "p1",
+        {
+            "block_id": "b0001",
+            "source": "en",
+            "start": 4,
+            "end": 9,
+            "quote": "model",
+            "color": "blue",
+            "kind": "comment",
+            "note": "这里的 baseline 有疑问",
+        },
+    )
+    assert cm["kind"] == "comment"
+    assert [row["kind"] for row in store.list_annotations("p1")] == ["highlight", "comment"]
+
+
+def test_legacy_annotations_read_as_highlight(tmp_path: Path):
+    store = _store(tmp_path)
+    legacy = [
+        {
+            "id": "a_old",
+            "block_id": "b0001",
+            "source": "en",
+            "start": 0,
+            "end": 3,
+            "quote": "The",
+            "color": "green",
+            "note": "",
+            "created_at": 1,
+            "updated_at": 1,
+        }
+    ]
+    store.annotations_path("p1").write_text(json.dumps(legacy), encoding="utf-8")
+    assert store.list_annotations("p1")[0]["kind"] == "highlight"
+
+
 def test_removing_paper_cleans_annotations(tmp_path: Path):
     store = _store(tmp_path)
     store.add_annotation(

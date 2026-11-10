@@ -6,6 +6,7 @@ import {
   installUpdateInApp,
   isDesktopApp,
   loadUpdateCache,
+  parseUpdateNotes,
   UPDATE_DAY_MS,
   type UpdateInfo,
 } from '../lib/update'
@@ -1344,7 +1345,14 @@ export function SettingsDialog({
                       )}
                     </div>
                     {updateInfo.notes && (
-                      <pre className="update-notes">{updateInfo.notes}</pre>
+                      <div className="update-notes-card">
+                        <div className="update-notes-head">更新内容</div>
+                        <ul className="update-notes-list">
+                          {parseUpdateNotes(updateInfo.notes).map((line, i) => (
+                            <li key={i}>{line}</li>
+                          ))}
+                        </ul>
+                      </div>
                     )}
                     <div className="update-release-actions">
                       {canInstallInApp() ? (

@@ -694,6 +694,12 @@ export async function getProvenance(
 
 export type AnnotationColor = 'yellow' | 'green' | 'blue' | 'pink'
 
+/**
+ * highlight：荧光笔，正文填色，进「阅读重点」里的我的标记；
+ * comment：批注，正文彩色下划线，进左侧「批注」栏。
+ */
+export type AnnotationKind = 'highlight' | 'comment'
+
 export interface Annotation {
   id: string
   block_id: string
@@ -703,6 +709,7 @@ export interface Annotation {
   quote: string
   color: AnnotationColor
   note: string
+  kind: AnnotationKind
   created_at: number
   updated_at: number
 }
@@ -723,6 +730,7 @@ export async function addAnnotation(
     end: number
     quote: string
     color: AnnotationColor
+    kind?: AnnotationKind
     note?: string
   },
 ): Promise<Annotation> {

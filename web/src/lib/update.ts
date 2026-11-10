@@ -68,6 +68,20 @@ export function formatCheckTime(ts: number): string {
   }
 }
 
+/**
+ * 把更新说明拆成条目：去掉行首的 markdown 记号（- • * #、序号、勾选框），
+ * 空行丢弃；没有结构化行时整段作为一条展示。
+ */
+export function parseUpdateNotes(notes: string): string[] {
+  const text = String(notes || '').trim()
+  if (!text) return []
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*(?:#{1,4}\s+|[-•*·]\s+|\d+[.、)]\s*|\[[x ]\]\s*)/, '').trim())
+    .filter(Boolean)
+  return lines.length ? lines : [text]
+}
+
 interface TauriInternals {
   invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>
 }

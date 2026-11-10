@@ -398,6 +398,7 @@ export function ReaderView({ paperId, onBack }: Props) {
       create: async (input) => {
         const row = await addAnnotation(paperId, input)
         setAnnotations((prev) => [...prev, row])
+        return row
       },
       update: async (id, patch) => {
         const row = await updateAnnotation(paperId, id, patch)
