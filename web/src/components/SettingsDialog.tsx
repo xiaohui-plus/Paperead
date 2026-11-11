@@ -4,6 +4,7 @@ import {
   checkUpdate,
   formatCheckTime,
   installUpdateInApp,
+  isAndroidApp,
   loadUpdateCache,
   parseUpdateNotes,
   UPDATE_DAY_MS,
@@ -323,7 +324,7 @@ export function SettingsDialog({
     setInstalling(true)
     setInstallError('')
     try {
-      await installUpdateInApp()
+      await installUpdateInApp(updateInfo ?? undefined)
     } catch (e) {
       setInstallError(e instanceof Error ? e.message : '自动更新失败，请下载安装包')
     } finally {
@@ -1250,11 +1251,13 @@ export function SettingsDialog({
                 </div>
                 {installing && (
                   <p className="update-install-hint">
-                    下载完成后应用会自动关闭并启动安装程序，请勿关闭窗口。
+                    {isAndroidApp()
+                      ? '正在下载安装包，完成后会调起系统安装器，请在系统弹窗里确认安装。'
+                      : '下载完成后应用会自动关闭并启动安装程序，请勿关闭窗口。'}
                   </p>
                 )}
                 {installError && (
-                  <div className="update-error">自动更新失败：{installError}</div>
+                  <div className="update-error">更新失败：{installError}</div>
                 )}
               </section>
             )}
@@ -1263,7 +1266,11 @@ export function SettingsDialog({
               <span>应用每天自动检查一次</span>
               <span aria-hidden="true">·</span>
               <span>
-                {canInstallInApp() ? '桌面版支持应用内更新' : '浏览器版需手动下载安装包'}
+                {canInstallInApp()
+                  ? isAndroidApp()
+                    ? '安卓版支持应用内更新'
+                    : '桌面版支持应用内更新'
+                  : '浏览器版需手动下载安装包'}
               </span>
               <a
                 href={

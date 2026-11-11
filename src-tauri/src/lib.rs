@@ -2,6 +2,9 @@
 mod desktop;
 
 #[cfg(mobile)]
+mod apk_updater;
+
+#[cfg(mobile)]
 mod llm_stream;
 
 /// 桌面端：启动本机 sidecar、研究 agent 与更新器。
@@ -18,10 +21,13 @@ pub fn run() {
         // llm_stream 让前端在连不上后端时也能直连模型并保持流式输出。
         tauri::Builder::default()
             .plugin(tauri_plugin_barcode_scanner::init())
+            .plugin(apk_updater::init())
             .manage(llm_stream::Cancels::default())
             .invoke_handler(tauri::generate_handler![
                 llm_stream::llm_stream,
-                llm_stream::llm_cancel
+                llm_stream::llm_cancel,
+                apk_updater::check_apk_update,
+                apk_updater::install_apk_update
             ])
             .run(tauri::generate_context!())
             .expect("failed to run Paperead mobile");

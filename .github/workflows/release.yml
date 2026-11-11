@@ -103,7 +103,6 @@ jobs:
             ## Windows 10/11 x64
 
             - 安装包：`Paperead_*_x64-setup.exe`（推荐，per-user 安装，不弹 UAC）
-            - 便携版：`Paperead_*_portable_x64.zip`（自带 pandoc，解压后双击「启动.cmd」，完全离线）
             - 自动更新清单：`latest.json`（仅 Windows 使用）
             - pandoc 下载源：`pandoc-2.19.2-windows-x86_64.zip`
 
@@ -115,13 +114,14 @@ jobs:
             ## Android（arm64）
 
             - APK：`Paperead_*_android-arm64.apk`（Android 8.0 / API 24 及以上，arm64 设备）
+            - 自动更新清单：`android.json`（仅 Android 使用）
             - 手机端是「内置前端 + 连电脑后端」：先在电脑上运行 Paperead 桌面版，
               手机与电脑在同一个局域网，打开 App 后填写电脑地址（或扫桌面端二维码配对）。
             - 手机端支持文献库、阅读、离线缓存与设备同步；研究与写综述仍在电脑端完成。
+            - 手机端支持应用内自动更新：设置里检查到新版本后可直接下载并调起系统安装器。
 
             ## 通用
 
-            - 源码：`Paperead_*_source.zip`
             - 首次启动会引导填写模型 API Key；手机端配对后沿用电脑上的模型配置。
           releaseDraft: true
           prerelease: false
@@ -129,18 +129,10 @@ jobs:
           updaterJsonPreferNsis: true
           args: --bundles nsis
 
-      - name: Build portable ZIP and source archive
-        shell: pwsh
-        run: |
-          .\scripts\build-portable.ps1
-          git archive --format=zip --prefix=Paperead-${{ github.ref_name }}/ --output=release/Paperead_${{ github.ref_name }}_source.zip HEAD
-
-      - name: Upload portable and source to release
+      - name: Upload pandoc download source to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           draft: true
           files: |
-            release/Paperead_*_portable_x64.zip
-            release/Paperead_*_source.zip
             release/pandoc-*.zip

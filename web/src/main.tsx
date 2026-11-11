@@ -9,7 +9,7 @@ import { migrateLegacyStorage } from './lib/storage'
 import { syncVisionConfig } from './lib/settings'
 import { syncResearchModel } from './lib/researchModel'
 import { syncScholarConfig } from './lib/scholarConfig'
-import { autoCheckUpdate, isDesktopApp } from './lib/update'
+import { autoCheckUpdate, isAndroidApp, isDesktopApp } from './lib/update'
 import { hasMobileServer, installMobileFetch, isMobileShell } from './lib/mobile'
 import {
   pullModelSettings,
@@ -57,7 +57,9 @@ async function boot() {
   if (!mobile) {
     // 研究 agent 通过本地代理调用模型，启动时把当前选择同步过去
     void syncResearchModel()
-    // 每天自动检查一次新版本；设置页里也能随时手动检查
+  }
+  if (!mobile || isAndroidApp()) {
+    // 每天自动检查一次新版本；桌面走 latest.json，安卓走原生 android.json
     void autoCheckUpdate()
   }
 

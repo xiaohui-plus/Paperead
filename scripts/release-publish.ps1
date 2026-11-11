@@ -9,7 +9,6 @@ param(
     [string]$GiteeToken = $env:GITEE_TOKEN,
     [string]$GithubRepo = "xiaohui-plus/Paperead",
     [string]$GiteeRepo = "deng_xiaohui/paperead",
-    [string]$SourceZip = "",
     [string]$Notes = "",
     [switch]$SkipGithub,
     [switch]$SkipGitee
@@ -25,11 +24,10 @@ if (-not $Version) {
 $tag = "v$Version"
 
 $installer    = Join-Path $root "release\Paperead_${Version}_x64-setup.exe"
-$installerZip = Join-Path $root "release\Paperead_${Version}_x64-setup.zip"
-$portable     = Join-Path $root "release\Paperead_${Version}_portable_x64.zip"
 $android      = Get-ChildItem (Join-Path $root "release\Paperead_${Version}_android-*.apk") -ErrorAction SilentlyContinue | Select-Object -First 1
 $pandoc       = Get-ChildItem (Join-Path $root "release\pandoc-*.zip") -ErrorAction SilentlyContinue | Select-Object -First 1
 $latestJson   = Join-Path $root "release\latest.json"
+$androidJson  = Join-Path $root "release\android.json"
 $sums         = Join-Path $root "release\SHA256SUMS.txt"
 
 # ---------- 前置检查 ----------
@@ -50,6 +48,23 @@ if ($manifest.version -ne $Version) {
 if ("$($manifest.platforms.'windows-x86_64'.url)" -notmatch "gitee\.com") {
     Write-Host "WARN: latest.json 的下载 url 未指向 Gitee，国内用户更新会走慢通道" -ForegroundColor Yellow
 }
+
+# Android 自动更新清单：Gitee 版本发行版为主下载源，GitHub 为回退。
+$apkName = Split-Path -Leaf $android.FullName
+$python = Join-Path $root ".venv-build\Scripts\python.exe"
+if (-not (Test-Path $python)) { $python = "python" }
+$androidNotes = if ($Notes) { $Notes } else { "Paperead $tag" }
+$notesFile = Join-Path $root "release\android-notes.txt"
+Set-Content -LiteralPath $notesFile -Value $androidNotes -Encoding UTF8
+& $python "scripts\make_android_json.py" `
+    --version $Version `
+    --apk $android.FullName `
+    --url "https://gitee.com/$GiteeRepo/releases/download/$tag/$apkName" `
+    --fallback-url "https://github.com/$GithubRepo/releases/download/$tag/$apkName" `
+    --notes-file $notesFile `
+    --out $androidJson
+Remove-Item -LiteralPath $notesFile -ErrorAction SilentlyContinue
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $androidJson)) { throw "生成 android.json 失败" }
 
 Write-Host "发版版本：$tag"
 
@@ -76,8 +91,8 @@ if (-not $SkipGithub) {
         }
     }
     if ($rel.draft) {
-        # 安卓 APK 与校验和是本地产出的，CI 手里没有：转正前先补传到同一个 release
-        foreach ($extra in @($android.FullName, $sums)) {
+        # 安卓 APK、更新清单与校验和是本地产出的，CI 手里没有：转正前先补传到同一个 release
+        foreach ($extra in @($android.FullName, $androidJson, $sums)) {
             $name = Split-Path -Leaf $extra
             if (@($rel.assets) | Where-Object { $_.name -eq $name }) {
                 Write-Host "GitHub: $name 已存在，跳过"
@@ -189,19 +204,8 @@ if (-not $SkipGitee) {
         Write-Host "Gitee: 发行版 $tag 已存在，补齐附件（描述如需修改请手动编辑）"
     }
 
-    $files = @($installer, $android.FullName, $sums, $latestJson, $pandoc.FullName)
-# Gitee 单附件上限 100MB；便携包更大时保留在本地，不随发行版上传
-if (Test-Path $portable) {
-    $portableMB = [math]::Round((Get-Item $portable).Length / 1MB, 1)
-    if ($portableMB -le 100) {
-        $files += $portable
-    } else {
-        Write-Host "提示：便携包 $portableMB MB 超过 Gitee 单文件 100MB 上限，跳过上传"
-    }
-}
-    if (Test-Path $installerZip) { $files += $installerZip }
-    if ($SourceZip -and (Test-Path $SourceZip)) { $files += $SourceZip }
-    else { Write-Host "  提示：未提供源码 zip（-SourceZip），跳过" }
+    # 只发 Windows 安装包与 Android APK（外加更新清单、校验和与 pandoc 下载源）
+    $files = @($installer, $android.FullName, $androidJson, $sums, $latestJson, $pandoc.FullName)
 
     Write-Host "Gitee: 上传 $tag 附件"
     foreach ($f in $files) { Publish-GiteeFile $rel $f }
@@ -211,10 +215,11 @@ if (Test-Path $portable) {
     if (-not $latest) {
         Write-Host "Gitee: 首次创建 latest 固定发行版"
         $latest = New-GiteeRelease -TagName "latest" -Name "最新版本" -Commitish (git rev-parse HEAD) `
-            -Body "固定发行版：始终存放最新版的 latest.json，应用自动更新从这里检查。"
+            -Body "固定发行版：始终存放最新版的 latest.json 与 android.json，应用自动更新从这里检查。"
     }
-    Write-Host "Gitee: 更新 latest 固定发行版的 latest.json"
+    Write-Host "Gitee: 更新 latest 固定发行版的 latest.json / android.json"
     Publish-GiteeFile $latest $latestJson
+    Publish-GiteeFile $latest $androidJson
 }
 
 # ---------- 下载自检 ----------
@@ -223,7 +228,8 @@ Write-Host "==== 下载自检 ===="
 $checks = @(
     "https://gitee.com/$GiteeRepo/releases/download/$tag/$(Split-Path -Leaf $installer)",
     "https://gitee.com/$GiteeRepo/releases/download/$tag/$(Split-Path -Leaf $android.FullName)",
-    "https://gitee.com/$GiteeRepo/releases/download/latest/latest.json"
+    "https://gitee.com/$GiteeRepo/releases/download/latest/latest.json",
+    "https://gitee.com/$GiteeRepo/releases/download/latest/android.json"
 )
 $failed = 0
 foreach ($u in $checks) {
@@ -247,6 +253,22 @@ try {
     }
 } catch {
     Write-Host "FAIL latest.json 解析失败（$($_.Exception.Message)）" -ForegroundColor Red
+    $failed++
+}
+
+try {
+    $checkAndroid = Invoke-RestMethod -Uri $checks[3]
+    if ($checkAndroid.version -ne $Version) {
+        Write-Host "FAIL android.json 内容版本 $($checkAndroid.version) != $Version" -ForegroundColor Red
+        $failed++
+    } elseif ("$($checkAndroid.url)" -notmatch "gitee\.com") {
+        Write-Host "FAIL android.json 下载 url 未指向 Gitee：$($checkAndroid.url)" -ForegroundColor Red
+        $failed++
+    } else {
+        Write-Host "OK   android.json 版本 = $Version"
+    }
+} catch {
+    Write-Host "FAIL android.json 解析失败（$($_.Exception.Message)）" -ForegroundColor Red
     $failed++
 }
 
