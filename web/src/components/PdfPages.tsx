@@ -120,6 +120,9 @@ export function PdfPages({
   const jumped = useRef(false)
   const total = Math.max(1, pageCount)
   const [pdfFailed, setPdfFailed] = useState(false)
+  // react-pdf 在 PDF 加载完成前不会渲染 children；观察器必须等页面节点真正出现后再注册，
+  // 否则一次空查询后就再也不会重跑，表现为只能看到前两页。
+  const [pdfReady, setPdfReady] = useState(false)
   const [available, setAvailable] = useState(0)
   const [visible, setVisible] = useState<Set<number>>(
     () => new Set([initialPage - 1, initialPage, initialPage + 1]),
@@ -190,6 +193,8 @@ export function PdfPages({
     if (!useTextLayer) return
     const root = scrollRef.current
     if (!root) return
+    const targets = root.querySelectorAll<HTMLElement>('[data-page]')
+    if (targets.length === 0) return
     const observer = new IntersectionObserver(
       (entries) => {
         setVisible((prev) => {
@@ -212,9 +217,9 @@ export function PdfPages({
       },
       { root, rootMargin: '900px 0px' },
     )
-    root.querySelectorAll<HTMLElement>('[data-page]').forEach((node) => observer.observe(node))
+    targets.forEach((node) => observer.observe(node))
     return () => observer.disconnect()
-  }, [useTextLayer, total])
+  }, [useTextLayer, total, pdfReady])
 
   const onFrameMouseUp = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (!annotationActions) return
@@ -274,6 +279,8 @@ export function PdfPages({
         <Document
           file={pdfUrl ?? undefined}
           loading={null}
+          onLoadStart={() => setPdfReady(false)}
+          onLoadSuccess={() => setPdfReady(true)}
           onLoadError={() => setPdfFailed(true)}
         >
           <div className="pdf-pages">
@@ -282,10 +289,15 @@ export function PdfPages({
               // 拿不到页尺寸时退回 A4 比例，至少保证跳页时占位高度稳定
               const ratio = size && size[0] > 0 ? `${size[0]} / ${size[1]}` : '0.707'
               return (
-                <figure key={page} className="pdf-page" data-page={page}>
+                <figure
+                  key={page}
+                  className="pdf-page"
+                  data-page={page}
+                  style={{ width: `min(${pageWidth}px, 100%)` }}
+                >
                   <div
                     className="pdf-page-frame"
-                    style={{ width: `min(${pageWidth}px, 100%)`, aspectRatio: ratio }}
+                    style={{ width: '100%', aspectRatio: ratio }}
                     onMouseUp={onFrameMouseUp}
                   >
                     {visible.has(page) && (
@@ -312,10 +324,15 @@ export function PdfPages({
             const size = pageSizes?.[page - 1]
             const ratio = size && size[0] > 0 ? `${size[0]} / ${size[1]}` : '0.707'
             return (
-              <figure key={page} className="pdf-page" data-page={page}>
+              <figure
+                key={page}
+                className="pdf-page"
+                data-page={page}
+                style={{ width: `min(${width}px, 100%)` }}
+              >
                 <div
                   className="pdf-page-frame"
-                  style={{ width: `min(${width}px, 100%)`, aspectRatio: ratio }}
+                  style={{ width: '100%', aspectRatio: ratio }}
                 >
                   <img
                     src={

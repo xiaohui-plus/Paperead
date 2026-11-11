@@ -308,7 +308,12 @@ def _mark_margins(lines: list[Line], doc: pymupdf.Document) -> None:
     widths = {p: doc[p].rect.width for p in range(len(doc))}
     for ln in lines:
         h = heights.get(ln.page - 1, 792)
-        if ln.y1 < h * _HEADER_RATIO or ln.y0 > h * _FOOTER_RATIO:
+        # Nature 等期刊的通栏图注/表题经常紧贴页面顶端（图注首行正好落在
+        # 7.5% 页眉带内）。只看几何位置会把它当页眉丢掉，后面的图注续行
+        # 变成正文、表格也因为没有表题而无法裁图。
+        if ln.y1 < h * _HEADER_RATIO and not _CAPTION_RE.match(ln.text.strip()):
+            ln.is_margin = True
+        elif ln.y0 > h * _FOOTER_RATIO:
             ln.is_margin = True
     # 同一文本在多页重复出现（≥ 3 页且 ≥ 30% 篇幅）→ 页眉页脚
     if len(doc) >= 3:
@@ -1999,10 +2004,20 @@ def _is_body_block(b: Block) -> bool:
     return len(b.text.strip()) > 80
 
 
+def _is_small_float_text(b: Block, body_size: float) -> bool:
+    """字号明显小于正文的是图内标注（Nature 整页图的说明常用 5pt）。
+
+    只靠长度会把「Scientist describes a research goal…」这类长标注判成
+    正文，进而阻止整页图裁图；按字号再收一道。
+    """
+    return bool(b.size) and body_size > 0 and b.size < body_size * 0.8
+
+
 def _extract_vector_text_figures(
     doc: pymupdf.Document,
     blocks: list[Block],
     out_dir: Path,
+    body_size: float = 0.0,
 ) -> list[Block]:
     """带文字标注的矢量图：按图注裁出图形区域，正文块保持原样。
 
@@ -2036,13 +2051,15 @@ def _extract_vector_text_figures(
             continue
         # 图注续行也算长块，所以只统计真正的正文段落：正文段落多说明这是
         # 正文页，不该按图裁；图注再长也不影响判断
+        disclaim = lambda b: _is_small_float_text(b, body_size)  # noqa: E731
         long = sum(
-            1 for b in texts if _is_body_block(b) and len(b.text.strip()) > 220
+            1 for b in texts
+            if _is_body_block(b) and not disclaim(b) and len(b.text.strip()) > 220
         )
         if long > 4:
             continue
 
-        bodies = [b for b in texts if _is_body_block(b)]
+        bodies = [b for b in texts if _is_body_block(b) and not disclaim(b)]
         if not bodies:
             continue  # 纯图表页交给整页图化兜底
         caps = sorted(
@@ -2148,6 +2165,7 @@ def _collapse_vector_figure_pages(
     doc: pymupdf.Document,
     blocks: list[Block],
     out_dir: Path,
+    body_size: float = 0.0,
 ) -> list[Block]:
     """把纯矢量图表页收敛成一张整页图，避免把图里的标注拆成一句一块。
 
@@ -2178,14 +2196,20 @@ def _collapse_vector_figure_pages(
         if len(texts) < 8:
             continue
         short = sum(1 for _, b in texts if len(b.text.strip()) <= 70)
-        long = sum(1 for _, b in texts if len(b.text.strip()) > 220)
+        long = sum(
+            1 for _, b in texts
+            if len(b.text.strip()) > 220 and not _is_small_float_text(b, body_size)
+        )
         if short < len(texts) * 0.7 or long > 2:
             continue
         # 页面里只要还有成段的正文，就不能整页图化：整页替换会把这些正文
         # 一起吞进图片（引言、附录说明、图下的分析段都遇到过）。交给常规的
         # 图表抽取，只把矢量图形裁成 figure，正文继续按段落渲染。
+        # 字号明显小于正文的块是图内标注，不算「成段正文」。
         if any(
-            b.kind in ("para", "heading") and len(b.text.strip()) > 80
+            b.kind in ("para", "heading")
+            and len(b.text.strip()) > 80
+            and not _is_small_float_text(b, body_size)
             for _, b in texts
         ):
             continue
@@ -2196,6 +2220,18 @@ def _collapse_vector_figure_pages(
         first = min(i for i, _ in texts)
         # 用页面上真实的图注，而不是笼统的「第 N 页图表」；没有图注才兜底
         caps = [b.text.strip() for _, b in items if b.kind == "caption" and b.text.strip()]
+        # 整页图常把「See next page for caption」印在图底，真正的图注在下一页；
+        # 这种占位句不能当图注，往下一页找真实编号图注。
+        if not caps or all("next page" in c.lower() for c in caps):
+            nxt = [
+                b.text.strip() for b in blocks
+                if b.page == page_no + 1
+                and b.kind == "caption"
+                and b.text.strip()
+                and not _is_table_caption(b.text)
+            ]
+            if nxt:
+                caps = nxt[:1]
         replacements[page_no] = (
             first,
             Block(
@@ -2286,8 +2322,8 @@ def parse_pdf(
             blocks = _extract_figures(doc, blocks, out / "figures")
             # 带文字标注的矢量图先按图注裁出图形区域，避免后面的整页图化
             # 把同一页的正文一起吞进图片
-            blocks = _extract_vector_text_figures(doc, blocks, out / "figures")
-            blocks = _collapse_vector_figure_pages(doc, blocks, out / "figures")
+            blocks = _extract_vector_text_figures(doc, blocks, out / "figures", body_size)
+            blocks = _collapse_vector_figure_pages(doc, blocks, out / "figures", body_size)
             # 图表裁好之后再清一次：图里的坐标轴/标注不该再作为公式出现
             blocks = _drop_equations_inside_floats(blocks)
             blocks = _crop_equations(doc, blocks, out / "equations")

@@ -25,7 +25,6 @@ $tag = "v$Version"
 
 $installer    = Join-Path $root "release\Paperead_${Version}_x64-setup.exe"
 $android      = Get-ChildItem (Join-Path $root "release\Paperead_${Version}_android-*.apk") -ErrorAction SilentlyContinue | Select-Object -First 1
-$pandoc       = Get-ChildItem (Join-Path $root "release\pandoc-*.zip") -ErrorAction SilentlyContinue | Select-Object -First 1
 $latestJson   = Join-Path $root "release\latest.json"
 $androidJson  = Join-Path $root "release\android.json"
 $sums         = Join-Path $root "release\SHA256SUMS.txt"
@@ -35,7 +34,7 @@ $missing = @()
 foreach ($f in @($installer, $latestJson, $sums)) {
     if (-not (Test-Path $f)) { $missing += $f }
 }
-if (-not $pandoc) { $missing += "release\pandoc-*.zip" }
+if (-not $android) { $missing += "release\Paperead_${Version}_android-*.apk（先跑 build:android）" }
 if (-not $android) { $missing += "release\Paperead_${Version}_android-*.apk（先跑 build:android）" }
 if ($missing.Count -gt 0) {
     throw "缺少发布物料：`n  " + ($missing -join "`n  ")
@@ -204,8 +203,8 @@ if (-not $SkipGitee) {
         Write-Host "Gitee: 发行版 $tag 已存在，补齐附件（描述如需修改请手动编辑）"
     }
 
-    # 只发 Windows 安装包与 Android APK（外加更新清单、校验和与 pandoc 下载源）
-    $files = @($installer, $android.FullName, $androidJson, $sums, $latestJson, $pandoc.FullName)
+    # 只发 Windows 安装包与 Android APK（外加更新清单与校验和）
+    $files = @($installer, $android.FullName, $androidJson, $sums, $latestJson)
 
     Write-Host "Gitee: 上传 $tag 附件"
     foreach ($f in $files) { Publish-GiteeFile $rel $f }
