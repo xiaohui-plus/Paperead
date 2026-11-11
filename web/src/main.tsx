@@ -96,16 +96,3 @@ document.addEventListener(
   },
   true,
 )
-
-createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <ErrorBoundary title="应用渲染失败" hint="刷新页面可以恢复；如果反复出现，请把这段错误信息反馈给我们。">
-      <App />
-      {isDesktopApp() && (
-        <Suspense fallback={null}>
-          <TourRoot />
-        </Suspense>
-      )}
-    </ErrorBoundary>
-  </React.StrictMode>,
-)
