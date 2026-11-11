@@ -4,6 +4,7 @@ import {
   createFolder,
   deleteFolder,
   deletePaper,
+  importPaperByPath,
   listFolders,
   listPapers,
   movePaperToFolder,
@@ -32,6 +33,7 @@ import {
 import { LibraryFolders } from './LibraryFolders'
 import { tourBus } from '../tour/tourBus'
 import { isMobileShell } from '../lib/mobile'
+import { isDesktopApp } from '../lib/update'
 import {
   deleteOffline,
   downloadPaper,
@@ -59,6 +61,7 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
   const [sort, setSort] = useState<Sort>('recent')
   const [view, setView] = useState<'grid' | 'list'>('grid')
   const [dragOver, setDragOver] = useState(false)
+
   const [toast, setToast] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null)
   // 设置只由用户点齿轮/侧栏打开；刷新页面不自动弹
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -75,6 +78,7 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
   const [dragOutDone, setDragOutDone] = useState(false)
   const [dragFolderName, setDragFolderName] = useState('')
   const dwellTimer = useRef<number | undefined>(undefined)
+  const dragDepth = useRef(0)
   const movingOut = useRef(false)
   const postDragFolder = useRef<string | null | undefined>(undefined)
   const suppressClick = useRef(false)
@@ -171,34 +175,172 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
     }
   }
 
-  const doUpload = async (files: File[]) => {
-    if (offlineMode) {
-      notify('当前连不上电脑端，暂时不能上传新论文', 'err')
-      return
-    }
-    const pdfs = files.filter((f) => f.name.toLowerCase().endsWith('.pdf'))
-    if (!pdfs.length) {
-      notify('只支持 PDF 文件', 'err')
-      return
-    }
-    setUploading(true)
-    try {
-      const res = await uploadPapers(pdfs, activeFolderId)
-      await refresh()
-      if (res.added.length > 0) {
-        tourBus.emit('library:uploaded', { paperId: res.added[0].id })
-        notify(`已添加 ${res.added.length} 篇，正在解析…`)
-        // 上传后直接进入阅读页；解析没完成时阅读页会自动重试
-        onOpenPaper(res.added[0].id)
-      } else {
-        notify(`上传失败：${res.failed[0]?.error ?? '未知错误'}`, 'err')
+  const doUpload = useCallback(
+    async (files: File[]) => {
+      if (offlineMode) {
+        notify('当前连不上电脑端，暂时不能上传新论文', 'err')
+        return
       }
-    } catch (e) {
-      notify(e instanceof Error ? e.message : '上传失败', 'err')
-    } finally {
-      setUploading(false)
+      const pdfs = files.filter((f) => f.name.toLowerCase().endsWith('.pdf'))
+      if (!pdfs.length) {
+        notify('只支持 PDF 文件', 'err')
+        return
+      }
+      setUploading(true)
+      try {
+        const res = await uploadPapers(pdfs, activeFolderId)
+        await refresh()
+        if (res.added.length > 0) {
+          tourBus.emit('library:uploaded', { paperId: res.added[0].id })
+          notify(`已添加 ${res.added.length} 篇，正在解析…`)
+          // 上传后直接进入阅读页；解析没完成时阅读页会自动重试
+          onOpenPaper(res.added[0].id)
+        } else {
+          notify(`上传失败：${res.failed[0]?.error ?? '未知错误'}`, 'err')
+        }
+      } catch (e) {
+        notify(e instanceof Error ? e.message : '上传失败', 'err')
+      } finally {
+        setUploading(false)
+      }
+    },
+    [offlineMode, activeFolderId, notify, refresh, onOpenPaper],
+  )
+
+  // 桌面壳把外部文件拖放交给 Tauri，WebView 收不到 HTML5 drop，
+  // 只能订阅原生 drag-drop 事件拿本地路径，再让后端从磁盘导入。
+  const doImportPaths = useCallback(
+    async (paths: string[]) => {
+      if (uploading) {
+        notify('正在上传，请稍候再拖入', 'err')
+        return
+      }
+      if (offlineMode) {
+        notify('当前连不上电脑端，暂时不能上传新论文', 'err')
+        return
+      }
+      const pdfs = paths.filter((path) => path.toLowerCase().endsWith('.pdf'))
+      if (!pdfs.length) {
+        notify('只支持 PDF 文件', 'err')
+        return
+      }
+      setUploading(true)
+      const added: PaperRow[] = []
+      const failures: string[] = []
+      try {
+        for (const path of pdfs) {
+          try {
+            const res = await importPaperByPath(path, activeFolderId)
+            added.push(...res.added)
+            for (const item of res.failed) {
+              failures.push(`${item.filename}：${item.error}`)
+            }
+          } catch (error) {
+            failures.push(`${path.split(/[\\/]/).pop() ?? path}：${errorText(error)}`)
+          }
+        }
+        await refresh()
+        if (added.length > 0) {
+          tourBus.emit('library:uploaded', { paperId: added[0].id })
+          notify(
+            failures.length
+              ? `已添加 ${added.length} 篇，${failures.length} 篇失败：${failures[0]}`
+              : `已添加 ${added.length} 篇，正在解析…`,
+            failures.length ? 'err' : 'ok',
+          )
+          onOpenPaper(added[0].id)
+        } else {
+          notify(`上传失败：${failures[0] ?? '未知错误'}`, 'err')
+        }
+      } finally {
+        setUploading(false)
+      }
+    },
+    [uploading, offlineMode, activeFolderId, notify, refresh, onOpenPaper],
+  )
+
+  useEffect(() => {
+    if (!isDesktopApp()) return
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void (async () => {
+      try {
+        const { getCurrentWebview } = await import('@tauri-apps/api/webview')
+        const stop = await getCurrentWebview().onDragDropEvent((event) => {
+          const payload = event.payload
+          if (payload.type === 'enter') {
+            setDragOver(true)
+          } else if (payload.type === 'over') {
+            setDragOver(true)
+          } else if (payload.type === 'leave') {
+            setDragOver(false)
+          } else if (payload.type === 'drop') {
+            setDragOver(false)
+            void doImportPaths(payload.paths)
+          }
+        })
+        if (disposed) stop()
+        else unlisten = stop
+      } catch {
+        // 旧壳或浏览器预览：保持 HTML5 / 选择文件上传可用
+      }
+    })()
+    return () => {
+      disposed = true
+      unlisten?.()
     }
-  }
+  }, [doImportPaths])
+
+  // 整个窗口都接文件拖放：从资源管理器拖 PDF 进来即可上传。
+  // 用 dragenter/dragleave 计数而不是逐个子元素判断，避免浮层闪烁或被子元素吞掉。
+  useEffect(() => {
+    if (isDesktopApp()) return
+    const hasFiles = (event: DragEvent) =>
+      Array.from(event.dataTransfer?.types ?? []).includes('Files')
+
+    const onDragEnter = (event: DragEvent) => {
+      if (!hasFiles(event)) return
+      event.preventDefault()
+      dragDepth.current += 1
+      setDragOver(true)
+    }
+
+    const onDragOver = (event: DragEvent) => {
+      if (!hasFiles(event)) return
+      event.preventDefault()
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+      setDragOver(true)
+    }
+
+    const onDragLeave = () => {
+      dragDepth.current = Math.max(0, dragDepth.current - 1)
+      if (dragDepth.current === 0) setDragOver(false)
+    }
+
+    const onDrop = (event: DragEvent) => {
+      const files = Array.from(event.dataTransfer?.files ?? [])
+      dragDepth.current = 0
+      setDragOver(false)
+      if (!files.length) return
+      event.preventDefault()
+      if (uploading) {
+        notify('正在上传，请稍候再拖入', 'err')
+        return
+      }
+      void doUpload(files)
+    }
+
+    window.addEventListener('dragenter', onDragEnter, true)
+    window.addEventListener('dragover', onDragOver, true)
+    window.addEventListener('dragleave', onDragLeave, true)
+    window.addEventListener('drop', onDrop, true)
+    return () => {
+      window.removeEventListener('dragenter', onDragEnter, true)
+      window.removeEventListener('dragover', onDragOver, true)
+      window.removeEventListener('dragleave', onDragLeave, true)
+      window.removeEventListener('drop', onDrop, true)
+    }
+  }, [doUpload, uploading, notify])
 
   const onDelete = async (paper: PaperRow) => {
     // 本机副本：只删手机上的，服务器上的论文不受影响
@@ -564,23 +706,7 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
   }, [allPapers, query, filter, sort, activeFolderId, dragPaper?.id])
 
   return (
-    <div
-      className="library"
-      onDragOver={(e) => {
-        if (!Array.from(e.dataTransfer.types).includes('Files')) return
-        e.preventDefault()
-        setDragOver(true)
-      }}
-      onDragLeave={() => {
-        if (dragOver) setDragOver(false)
-      }}
-      onDrop={(e) => {
-        if (e.dataTransfer.files.length === 0) return
-        e.preventDefault()
-        setDragOver(false)
-        void doUpload(Array.from(e.dataTransfer.files))
-      }}
-    >
+    <div className="library">
       <Sidebar
         active="library"
         count={allPapers.length}
@@ -691,6 +817,7 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
                 e.target.value = ''
               }}
             />
+
             <button
               className="btn primary"
               data-tour="library-upload"
@@ -852,9 +979,10 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
 
       {dragOver && (
         <div className="drop-overlay">
-          <div>
+          <div className="drop-overlay-card">
             <IconUpload />
-            松开即可上传 PDF
+            <b>松开即可上传 PDF</b>
+
           </div>
         </div>
       )}

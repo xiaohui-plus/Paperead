@@ -1,8 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ErrorBoundary } from '../components/ErrorBoundary'
-import { relativeTime, researchApi, type ProjectFile, type SessionSummary } from '../lib/researchApi'
+import {
+  relativeTime,
+  researchApi,
+  type ProjectFile,
+  type ProjectKind,
+  type ProjectSummary,
+  type SendMeta,
+  type SessionSummary,
+} from '../lib/researchApi'
 import { EMPTY_CHAT, type AgentEvent, type ChatState } from '../lib/researchTypes'
-import { addLocalMessage, applyEvents } from '../lib/researchReducer'
+import { addLocalMessage, applyEvent, applyEvents } from '../lib/researchReducer'
 import { ensureResearchModel } from '../lib/researchModel'
 import { streamSessionEvents, type StreamState } from '../lib/researchStream'
 import { Composer } from './Composer'
@@ -17,6 +25,10 @@ interface Props {
   onMeta: (patch: { title?: string; running?: boolean }) => void
   /** 输入框上传的附件，交给项目页刷新文件树。 */
   onFilesUploaded?: (files: ProjectFile[]) => void
+  kind: ProjectKind
+  projectName?: string
+  projects?: ProjectSummary[]
+  onOpenProject?: (projectId: string) => void
 }
 
 const FLUSH_MS = 40
@@ -27,6 +39,10 @@ export function SessionView({
   onInitialTextConsumed,
   onMeta,
   onFilesUploaded,
+  kind,
+  projectName,
+  projects,
+  onOpenProject,
 }: Props) {
   const [chat, setChat] = useState<ChatState>(EMPTY_CHAT)
   const [streamState, setStreamState] = useState<StreamState>('connecting')
@@ -97,7 +113,7 @@ export function SessionView({
   }, [chat.running])
 
   const submit = useCallback(
-    async (text: string) => {
+    async (text: string, meta?: SendMeta) => {
       const value = text.trim()
       if (!value) return
       setSendError(null)
@@ -106,9 +122,9 @@ export function SessionView({
         setSendError(modelProblem)
         return
       }
-      setChat((prev) => addLocalMessage(prev, value))
+      setChat((prev) => addLocalMessage(prev, value, meta))
       try {
-        await researchApi.sendMessage(session.id, value)
+        await researchApi.sendMessage(session.id, value, meta)
         if (streamState === 'offline' || streamState === 'error') {
           setStreamKey((key) => key + 1)
         }
@@ -194,15 +210,23 @@ export function SessionView({
 
       <Composer
         running={chat.running}
+        kind={kind}
         projectId={session.projectId}
+        projectName={projectName}
+        projects={projects}
+        sessionId={session.id}
+        onOpenProject={onOpenProject}
         onUploaded={(file) => onFilesUploaded?.([file])}
         hint={
           reconnecting && chat.messages.length === 0
             ? '正在连接研究 agent…'
             : undefined
         }
-        onSend={(text) => void submit(text)}
+        onSend={(text, meta) => void submit(text, meta)}
         onStop={() => void stop()}
+        onCommandResult={(event) =>
+          setChat((prev) => applyEvent(prev, event))
+        }
       />
     </div>
   )

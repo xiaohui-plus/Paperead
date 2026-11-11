@@ -13,6 +13,8 @@ export interface AgentEvent {
   seq: number
   at: number
   type: string
+  /** command.result 的结果类型：success / error。 */
+  kind?: string
   turn?: number
   step?: number
   text?: string
@@ -29,6 +31,10 @@ export interface AgentEvent {
   result?: string
   meta?: unknown
   items?: PlanItem[]
+  refs?: unknown[]
+  mode?: string
+  scope?: string
+  line?: string
 }
 
 export type ToolStatus = 'draft' | 'running' | 'done' | 'error'
@@ -66,6 +72,8 @@ export interface UserMessage {
   at: number
   text: string
   local?: boolean
+  mode?: string
+  scope?: string
 }
 
 export interface ChatNotice {

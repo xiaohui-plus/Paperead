@@ -169,7 +169,9 @@ fn create_main_window(app: &mut tauri::App, port: u16, data_dir: &std::path::Pat
         .inner_size(1280.0, 860.0)
         .min_inner_size(1000.0, 680.0)
         .data_directory(webview_dir)
-        .drag_and_drop(false)
+        // 外部文件拖放必须由 Tauri 接管：WebView2 收不到 HTML5 drop，
+        // 前端通过 onDragDropEvent 拿本地路径，再调 /api/papers/import 入库。
+        .drag_and_drop(true)
         .center()
         .on_navigation(move |url| {
             if url.as_str().starts_with(&allowed) {

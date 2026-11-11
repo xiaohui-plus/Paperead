@@ -9,7 +9,14 @@ interface Props {
 }
 
 type Row =
-  | { kind: 'message'; id: string; at: number; text: string }
+  | {
+      kind: 'message'
+      id: string
+      at: number
+      text: string
+      mode?: string
+      scope?: string
+    }
   | { kind: 'turn'; id: string; at: number; turn: ChatState['turns'][number] }
 
 function buildRows(chat: ChatState): Row[] {
@@ -18,6 +25,8 @@ function buildRows(chat: ChatState): Row[] {
     id: message.id,
     at: message.at,
     text: message.text,
+    mode: message.mode,
+    scope: message.scope,
   }))
   for (const turn of chat.turns) {
     rows.push({
@@ -67,6 +76,12 @@ export function Transcript({ chat, now }: Props) {
         {rows.map((row) =>
           row.kind === 'message' ? (
             <div className="chat-message" key={row.id}>
+              {(row.mode === 'deep' || row.scope === 'readonly') && (
+                <div className="chat-message-tags">
+                  {row.mode === 'deep' && <span>深度研究</span>}
+                  {row.scope === 'readonly' && <span>只读分析</span>}
+                </div>
+              )}
               <div className="chat-bubble">{row.text}</div>
             </div>
           ) : (

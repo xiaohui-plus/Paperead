@@ -107,6 +107,18 @@ export async function uploadPapers(
   return jsonFetch('/api/papers/upload', { method: 'POST', body: fd })
 }
 
+/** 桌面壳拖入的是本地路径：直接让后端从磁盘导入，避免大文件再走 multipart。 */
+export async function importPaperByPath(
+  path: string,
+  folderId: string | null = null,
+): Promise<{ added: PaperRow[]; failed: { filename: string; error: string }[] }> {
+  return jsonFetch('/api/papers/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path, folder_id: folderId }),
+  })
+}
+
 export async function deletePaper(id: string): Promise<void> {
   await jsonFetch(`/api/papers/${id}`, { method: 'DELETE' })
 }

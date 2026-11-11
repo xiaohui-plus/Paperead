@@ -179,6 +179,7 @@ export default function App() {
         onInitialTextConsumed={() => setInitialText(null)}
         onBack={(kind: ProjectKind) => goView(kind)}
         onSelectSession={selectSession}
+        onOpenProject={openProject}
       />
     )
   }

@@ -84,8 +84,26 @@ class SessionCreateIn(BaseModel):
     title: str | None = None
 
 
+class MessageRef(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    kind: str = "file"
+    name: str = ""
+    path: str = ""
+    paper_id: str | None = Field(default=None, alias="paperId")
+
+
 class MessageIn(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     text: str
+    refs: list[MessageRef] = Field(default_factory=list)
+    mode: str = "standard"
+    scope: str = "workspace"
+
+
+class CommandIn(BaseModel):
+    line: str
 
 
 def _sse(event: dict[str, Any]) -> str:
@@ -916,6 +934,43 @@ def build_router(
             raise HTTPException(status_code=404, detail="project not found")
         return str(store.workspace_root(str(project["id"])))
 
+    @router.get("/sessions/{session_id}/commands")
+    async def list_session_commands(session_id: str) -> dict[str, Any]:
+        session = _session_or_404(session_id)
+        cwd = _workspace(session)
+        try:
+            await agent_client.ensure_session(session_id, cwd)
+            items = await agent_client.list_commands(session_id)
+        except agent_client.AgentUnavailable as error:
+            raise HTTPException(status_code=503, detail="AGENT_UNAVAILABLE") from error
+        return {"items": items}
+
+    @router.post("/sessions/{session_id}/commands", status_code=202)
+    async def run_session_command(
+        session_id: str, body: CommandIn
+    ) -> dict[str, Any]:
+        _session_or_404(session_id)
+        line = body.line.strip()
+        if not line.startswith("/"):
+            raise HTTPException(status_code=400, detail="命令必须以 / 开头")
+        cwd = _workspace(_session_or_404(session_id))
+        try:
+            await agent_client.ensure_session(session_id, cwd)
+            result = await agent_client.run_command(session_id, line)
+        except agent_client.AgentUnavailable as error:
+            raise HTTPException(status_code=503, detail="AGENT_UNAVAILABLE") from error
+        event = store.append_event(
+            session_id,
+            {
+                "type": "command.result",
+                "name": result.get("name") or "",
+                "kind": result.get("kind") or "success",
+                "text": result.get("text") or "",
+                "line": line,
+            },
+        )
+        return {"ok": True, "event": event}
+
     @router.post("/sessions/{session_id}/messages", status_code=202)
     async def post_message(session_id: str, body: MessageIn) -> dict[str, Any]:
         session = _session_or_404(session_id)
@@ -923,8 +978,45 @@ def build_router(
         if not text:
             raise HTTPException(status_code=400, detail="消息不能为空")
 
+        refs = [
+            item.model_dump(exclude_none=True)
+            for item in body.refs
+            if item.path or item.paper_id
+        ]
+        agent_text = text
+        if refs:
+            lines: list[str] = []
+            for item in refs:
+                name = item.get("name") or item.get("path") or ""
+                suffix = (
+                    f"（论文 {item['paper_id']}）"
+                    if item.get("paper_id")
+                    else f"（路径：{item.get('path')}）"
+                )
+                lines.append(f"- {name}{suffix}")
+            agent_text += "\n\n引用对象（用户指定，优先读取）：\n" + "\n".join(lines)
+        if body.mode == "deep":
+            agent_text += (
+                "\n\n[研究方式] 深度研究：先做多轮检索与交叉核验，"
+                "列明证据来源，不要跳步。"
+            )
+        if body.scope == "readonly":
+            agent_text += (
+                "\n\n[工作区权限] 只读：只分析与回答，"
+                "不要修改、新建或删除工作区文件。"
+            )
+
         # 先落用户消息：即使 agent 掉线，刷新后也能看到自己发过什么。
-        store.append_event(session_id, {"type": "message.user", "text": text})
+        store.append_event(
+            session_id,
+            {
+                "type": "message.user",
+                "text": text,
+                "refs": refs,
+                "mode": body.mode,
+                "scope": body.scope,
+            },
+        )
 
         cwd = _workspace(session)
         try:
@@ -932,7 +1024,7 @@ def build_router(
             # 订阅先于发送建立：即使页面立刻关掉，后台任务也会把回复落库。
             # shield 避免浏览器中断 POST 时把 restart 一起取消，导致这一轮没有后台泵。
             await asyncio.shield(pump.restart(session_id, cwd))
-            await agent_client.send_message(session_id, text, cwd)
+            await agent_client.send_message(session_id, agent_text, cwd)
         except agent_client.AgentUnavailable as error:
             store.append_event(
                 session_id,

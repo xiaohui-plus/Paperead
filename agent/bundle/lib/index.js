@@ -8,7 +8,7 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
 export const name = 'research-host'
-export const inject = ['webServer', 'agents']
+export const inject = ['webServer', 'agents', 'commands']
 
 const MAX_BODY_BYTES = 1_000_000
 const MAX_HISTORY = 2_000
@@ -276,6 +276,35 @@ export function apply(ctx, config = {}) {
             }
           }),
         })
+      }
+
+      const commandsMatch = pathname.match(/^\/v1\/sessions\/([^/]+)\/commands$/)
+      if (commandsMatch) {
+        const sessionId = decodeURIComponent(commandsMatch[1])
+        const agent = ctx.agents.get(sessionId)
+        if (!agent) return json(res, 404, { error: 'session not found' })
+        if (req.method === 'GET') {
+          return json(res, 200, { items: ctx.commands.list(agent) })
+        }
+        if (req.method === 'POST') {
+          try {
+            const body = await readJson(req)
+            const line = typeof body.line === 'string' ? body.line.trim() : ''
+            if (!line.startsWith('/')) return json(res, 400, { error: 'line must start with /' })
+            if (agent.status === 'running') return json(res, 409, { error: 'agent is running' })
+            const controller = new AbortController()
+            const execution = await ctx.commands.execute(agent, line, controller.signal)
+            if (!execution) return json(res, 400, { error: 'unknown command' })
+            return json(res, 200, {
+              name: line.slice(1).split(/\s+/)[0],
+              commandId: execution.commandId,
+              kind: execution.result.kind,
+              text: execution.result.text,
+            })
+          } catch (error) {
+            return json(res, 500, { error: String(error?.message || error) })
+          }
+        }
       }
 
       const messageMatch = pathname.match(/^\/v1\/sessions\/([^/]+)\/messages$/)

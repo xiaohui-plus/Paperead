@@ -35,6 +35,7 @@ interface Props {
   onInitialTextConsumed?: () => void
   onBack: (kind: ProjectKind) => void
   onSelectSession: (sessionId: string | null) => void
+  onOpenProject?: (projectId: string) => void
 }
 
 type Tab = 'files' | 'sessions'
@@ -75,8 +76,26 @@ export function ProjectPage({
   onInitialTextConsumed,
   onBack,
   onSelectSession,
+  onOpenProject,
 }: Props) {
   const [project, setProject] = useState<ProjectSummary | null>(null)
+  const [projectOptions, setProjectOptions] = useState<ProjectSummary[]>([])
+
+  useEffect(() => {
+    if (!project) return
+    let alive = true
+    void researchApi
+      .listProjects(project.kind)
+      .then((items) => {
+        if (alive) setProjectOptions(items)
+      })
+      .catch(() => {
+        if (alive) setProjectOptions([])
+      })
+    return () => {
+      alive = false
+    }
+  }, [project?.kind])
   const [files, setFiles] = useState<ProjectFile[]>([])
   const [artifacts, setArtifacts] = useState<ArtifactSummary[]>([])
   const [sessions, setSessions] = useState<SessionSummary[]>([])
@@ -813,6 +832,10 @@ export function ProjectPage({
                 onInitialTextConsumed?.()
               }}
               onMeta={updateSessionMeta}
+              kind={project?.kind ?? 'research'}
+              projectName={project?.name}
+              onOpenProject={onOpenProject}
+              projects={projectOptions}
               onFilesUploaded={(uploaded) =>
                 setFiles((prev) => [...prev, ...uploaded])
               }
@@ -829,7 +852,11 @@ export function ProjectPage({
               <Composer
                 autoFocus
                 running={false}
+                kind={project?.kind ?? 'research'}
                 projectId={projectId}
+                projectName={project?.name}
+                onOpenProject={onOpenProject}
+                projects={projectOptions}
                 placeholder="Enter 发送 · Shift+Enter 换行"
                 hint={sending ? '正在创建会话…' : '会话将在发送后创建'}
                 onUploaded={(file) => setFiles((prev) => [...prev, file])}

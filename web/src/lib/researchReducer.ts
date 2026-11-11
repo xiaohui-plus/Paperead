@@ -103,16 +103,38 @@ export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
   switch (event.type) {
     case 'message.user': {
       const text = asText(event.text)
+      const mode = typeof event.mode === 'string' ? event.mode : undefined
+      const scope = typeof event.scope === 'string' ? event.scope : undefined
       const last = base.messages[base.messages.length - 1]
       if (last?.local && last.text === text) {
         const messages = base.messages.slice(0, -1)
-        return { ...base, messages: [...messages, { ...last, local: false, at }] }
+        return {
+          ...base,
+          messages: [...messages, { ...last, local: false, at, mode, scope }],
+        }
       }
       return {
         ...base,
         messages: [
           ...base.messages,
-          { id: `m-${event.seq || at}`, at, text },
+          { id: `m-${event.seq || at}`, at, text, mode, scope },
+        ],
+      }
+    }
+
+    case 'command.result': {
+      const name = asText(event.name)
+      const text = asText(event.text)
+      return {
+        ...base,
+        notices: [
+          ...base.notices,
+          {
+            id: `c-${event.seq || at}`,
+            at,
+            level: event.kind === 'error' ? 'error' : 'info',
+            text: `/${name}${text ? ` · ${text}` : ' 已执行'}`,
+          },
         ],
       }
     }
@@ -242,12 +264,23 @@ export function applyEvents(state: ChatState, events: AgentEvent[]): ChatState {
 }
 
 /** 发送前的乐观消息：等 message.user 事件到达时原位替换。 */
-export function addLocalMessage(state: ChatState, text: string): ChatState {
+export function addLocalMessage(
+  state: ChatState,
+  text: string,
+  meta?: { mode?: string; scope?: string },
+): ChatState {
   return {
     ...state,
     messages: [
       ...state.messages,
-      { id: `local-${Date.now()}`, at: Date.now(), text, local: true },
+      {
+        id: `local-${Date.now()}`,
+        at: Date.now(),
+        text,
+        local: true,
+        mode: meta?.mode,
+        scope: meta?.scope,
+      },
     ],
   }
 }

@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
-import { IconList, IconSend, IconSpark } from '../components/icons'
+import { useEffect, useState } from 'react'
+import { IconList, IconSpark } from '../components/icons'
 import type { ProjectKind, ProjectSummary } from '../lib/researchApi'
 import { tourBus } from '../tour/tourBus'
+import { Composer } from './Composer'
 import type { StartHandler } from './ResearchShell'
 import { WorkspacePicker } from './WorkspacePicker'
 
@@ -94,16 +95,9 @@ const REVIEW_EXAMPLES = [
 export function ResearchHome({ kind, projects, onStart }: Props) {
   const [target, setTarget] = useState<string>('auto')
   const [workspace, setWorkspace] = useState('')
-  const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
   const [filled, setFilled] = useState(false)
-  const composerRef = useRef<HTMLTextAreaElement | null>(null)
-  // 手机端回车是换行键，不劫持成发送。
-  const [touch] = useState(
-    () =>
-      typeof window !== 'undefined' &&
-      Boolean(window.matchMedia?.('(pointer: coarse)').matches),
-  )
+  const [seed, setSeed] = useState<{ key: number; text: string } | null>(null)
 
   const effectiveProject =
     target === 'new' ? null : target === 'auto' ? (projects[0]?.id ?? null) : target
@@ -118,15 +112,8 @@ export function ResearchHome({ kind, projects, onStart }: Props) {
 
   /** 快捷卡片只把示例填进输入框，等用户改完再自己发送。 */
   const fillDraft = (text: string) => {
-    setDraft(text)
+    setSeed({ key: Date.now(), text })
     setFilled(true)
-    requestAnimationFrame(() => {
-      const input = composerRef.current
-      if (!input) return
-      input.focus()
-      input.setSelectionRange(text.length, text.length)
-      input.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
-    })
   }
 
   const run = async (text: string, title: string) => {
@@ -136,7 +123,7 @@ export function ResearchHome({ kind, projects, onStart }: Props) {
     try {
       tourBus.emit('research:action', { label: title })
       await onStart(value, title, effectiveProject, workspace)
-      setDraft('')
+      setSeed(null)
       setFilled(false)
     } finally {
       setBusy(false)
@@ -195,35 +182,27 @@ export function ResearchHome({ kind, projects, onStart }: Props) {
               : 'agent 会在这个目录里读写文件'}
           </span>
         </div>
-        <textarea
-          ref={composerRef}
-          value={draft}
+        <Composer
+          kind={kind}
+          variant="home"
+          projectId={effectiveProject ?? undefined}
+          projectName={
+            effectiveProject
+              ? projects.find((project) => project.id === effectiveProject)?.name
+              : undefined
+          }
+          projects={projects}
+          running={busy}
+          seed={seed ?? undefined}
           placeholder={
             kind === 'research'
-              ? '描述你想研究的问题，或 @ 一份文献、$ 调用一个技能…'
-              : '描述综述主题、时间范围与目标读者…'
+              ? '描述你想研究的问题，/ 调用指令，@ 引用文件或论文'
+              : '描述综述主题与目标读者，/ 调用指令，@ 引用文件或论文'
           }
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey && !touch) {
-              event.preventDefault()
-              void run(draft, draft.slice(0, 40))
-            }
-          }}
+          hint={filled ? '示例已填入，可修改后发送' : '发送后自动建会话，可随时回到项目继续'}
+          onSend={(text) => void run(text, text.slice(0, 40))}
+          onStop={() => undefined}
         />
-        <div className="research-composer-actions">
-          <span>
-            {touch ? '点「开始」发送，回车换行' : 'Enter 发送 · Shift+Enter 换行'}
-          </span>
-          <button
-            className="research-send"
-            disabled={busy || !draft.trim()}
-            onClick={() => void run(draft, draft.slice(0, 40))}
-          >
-            <IconSend />
-            {busy ? '创建中…' : '开始'}
-          </button>
-        </div>
       </section>
 
       <section

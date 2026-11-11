@@ -40,6 +40,22 @@ def _headers(token: str) -> dict[str, str]:
     return {"x-agent-token": token} if token else {}
 
 
+async def get_json(path: str, *, timeout: float = 30) -> dict[str, Any]:
+    base, token = agent_target()
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(f"{base}{path}", headers=_headers(token))
+    except httpx.HTTPError as error:
+        raise AgentUnavailable(f"研究 agent 不可用：{error}") from error
+    if response.status_code >= 400:
+        raise AgentUnavailable(f"研究 agent 返回 {response.status_code}")
+    try:
+        value = response.json()
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 async def post_json(
     path: str, payload: dict[str, Any], *, timeout: float = 60
 ) -> dict[str, Any]:
@@ -74,6 +90,18 @@ async def send_message(session_id: str, text: str, cwd: str) -> None:
 
 async def cancel(session_id: str) -> None:
     await post_json(f"/v1/sessions/{session_id}/cancel", {}, timeout=15)
+
+
+async def list_commands(session_id: str) -> list[dict[str, Any]]:
+    data = await get_json(f"/v1/sessions/{session_id}/commands", timeout=20)
+    items = data.get("items")
+    return items if isinstance(items, list) else []
+
+
+async def run_command(session_id: str, line: str) -> dict[str, Any]:
+    return await post_json(
+        f"/v1/sessions/{session_id}/commands", {"line": line}, timeout=120
+    )
 
 
 async def stream_events(session_id: str, after: int) -> AsyncIterator[dict[str, Any]]:

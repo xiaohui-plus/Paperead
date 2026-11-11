@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -22,6 +23,12 @@ from pydantic import BaseModel, Field
 log = logging.getLogger(__name__)
 
 SSE_MEDIA = "text/event-stream"
+
+# 研究 agent 的 SSE 解析器（dsh-llm-deepseek）要求流以 `data: [DONE]` 收尾，
+# 否则整轮判为 STREAM_CLOSED。部分 OpenAI 兼容网关（中转站、自建网关、
+# CDN 边缘）只发数据块就关流，所以代理要替它们补结束标记。
+DONE_MARKER = b"[DONE]"
+DONE_SCAN_TAIL = 64
 
 ENV_BASE = os.environ.get("PAPEREAD_LLM_BASE", "https://api.deepseek.com").rstrip("/")
 ENV_KEY = (
@@ -95,6 +102,17 @@ def _preferred_entry(
         if entry["id"] and entry["id"] == active_id:
             return entry
     return entries[0] if entries else None
+
+
+def _done_suffix(tail: bytes) -> bytes:
+    """构造 `data: [DONE]` 收尾块，保证与前一条事件之间有完整的空行分隔。"""
+    if tail.endswith(b"\n\n"):
+        separator = b""
+    elif tail.endswith(b"\n"):
+        separator = b"\n"
+    else:
+        separator = b"\n\n"
+    return separator + b"data: [DONE]\n\n"
 
 
 def _join(base: str, path: str) -> str:
@@ -304,6 +322,9 @@ def build_llm_proxy_router(data_dir: Path, token: str) -> APIRouter:
             "authorization": f"Bearer {state['api_key']}",
             "content-type": "application/json",
             "accept": request.headers.get("accept", "text/event-stream"),
+            # 代理不转发上游的 content-encoding，压缩后的流会把 agent 的 SSE
+            # 解析器喂成乱码（最终同样以 STREAM_CLOSED 结束），所以先要求明文。
+            "accept-encoding": "identity",
         }
         client = httpx.AsyncClient(timeout=TIMEOUT)
         upstream = None
@@ -346,7 +367,10 @@ def build_llm_proxy_router(data_dir: Path, token: str) -> APIRouter:
             return JSONResponse(payload, status_code=status)
 
         content_type = upstream.headers.get("content-type", "")
-        chunks = upstream.aiter_raw()
+        content_encoding = upstream.headers.get("content-encoding", "")
+        # aiter_bytes 会按上游 content-encoding 解压；配合上面的 identity 请求头，
+        # 保证转发给 agent 的是明文 SSE。
+        chunks = upstream.aiter_bytes()
         try:
             first = await chunks.__anext__()
         except StopAsyncIteration:
@@ -427,22 +451,75 @@ def build_llm_proxy_router(data_dir: Path, token: str) -> APIRouter:
             )
 
         log.info(
-            "llm 代理：url=%s model=%s status=%s 建连=%.2fs",
+            "llm 代理：url=%s model=%s status=%s type=%s encoding=%s 建连=%.2fs",
             url,
             state["model"],
             status,
+            content_type or "-",
+            content_encoding or "-",
             time.monotonic() - started,
         )
 
         async def stream():
+            tail = b""
+            seen_done = False
+            finish_seen = False
+            delivered = 0
+            failure = ""
             try:
                 if first:
+                    seen_done = DONE_MARKER in first
+                    finish_seen = b"finish_reason" in first
+                    tail = first[-DONE_SCAN_TAIL:]
+                    delivered += len(first)
                     yield first
                 async for chunk in chunks:
+                    if not chunk:
+                        continue
+                    # `[DONE]` 可能被上游切在两个数据块之间，所以连上尾部一起看。
+                    if not seen_done:
+                        seen_done = DONE_MARKER in tail + chunk
+                    if not finish_seen:
+                        finish_seen = b"finish_reason" in chunk
+                    tail = (tail + chunk)[-DONE_SCAN_TAIL:]
+                    delivered += len(chunk)
                     yield chunk
+            except (httpx.HTTPError, OSError) as error:
+                failure = str(error) or type(error).__name__
+                log.warning(
+                    "llm 代理读流中断：url=%s model=%s 已转发=%d 字节 %s",
+                    url,
+                    state["model"],
+                    delivered,
+                    failure,
+                )
             finally:
-                await upstream.aclose()
-                await client.aclose()
+                with contextlib.suppress(Exception):
+                    await upstream.aclose()
+                with contextlib.suppress(Exception):
+                    await client.aclose()
+
+            if seen_done:
+                return
+            if delivered:
+                log.warning(
+                    "llm 代理补齐流结束标记：url=%s model=%s 已转发=%d 字节 finish_reason=%s 中断=%s",
+                    url,
+                    state["model"],
+                    delivered,
+                    "有" if finish_seen else "无",
+                    failure or "-",
+                )
+            else:
+                log.warning(
+                    "llm 代理收到空流：url=%s model=%s status=%s type=%s 中断=%s",
+                    url,
+                    state["model"],
+                    status,
+                    content_type or "-",
+                    failure or "-",
+                )
+            yield _done_suffix(tail)
 
         return StreamingResponse(
             stream(),

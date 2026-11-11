@@ -246,6 +246,7 @@ class PingReq(BaseModel):
 
 class ImportReq(BaseModel):
     path: str = Field(..., min_length=1, description="本机 PDF 绝对路径")
+    folder_id: str | None = None
 
 
 class FolderIn(BaseModel):
@@ -467,7 +468,12 @@ async def research_proxy(path: str, request: Request):
         client = httpx.AsyncClient(timeout=None)
         try:
             upstream = await client.send(
-                client.build_request("GET", url, headers=headers, params=query),
+                client.build_request(
+                    "GET",
+                    url,
+                    headers={**headers, "accept-encoding": "identity"},
+                    params=query,
+                ),
                 stream=True,
             )
         except Exception as e:
@@ -476,7 +482,9 @@ async def research_proxy(path: str, request: Request):
 
         async def relay():
             try:
-                async for chunk in upstream.aiter_raw():
+                # 事件流不压缩：本机 agent 若启用了 gzip，raw 字节会让前端 ES
+                # 解析不出事件（表现为一轮结束却没有内容）。
+                async for chunk in upstream.aiter_bytes():
                     yield chunk
             finally:
                 await upstream.aclose()
@@ -934,8 +942,11 @@ async def import_paper(req: ImportReq) -> dict:
         raise HTTPException(status_code=400, detail="只支持 PDF")
     if path.stat().st_size < 1024:
         raise HTTPException(status_code=400, detail="文件过小，可能不是有效 PDF")
+    if req.folder_id and store.get_folder(req.folder_id) is None:
+        raise HTTPException(status_code=404, detail="文件夹不存在")
 
-    row = store.add(path.name, path.read_bytes())
+    meta = {"folder_id": req.folder_id} if req.folder_id else None
+    row = store.add(path.name, path.read_bytes(), meta)
     asyncio.create_task(_parse_task(row["id"]))
     return {"added": [_public(row)], "failed": []}
 

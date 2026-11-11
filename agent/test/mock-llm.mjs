@@ -20,6 +20,10 @@ import { writeFileSync } from 'node:fs'
 
 const PORT = Number(process.env.MOCK_LLM_PORT || 8012)
 const RECORD = process.env.MOCK_LLM_RECORD || ''
+// 模拟不规范网关：只发数据块、不发 [DONE]，用来验证本地代理的补齐逻辑。
+const OMIT_DONE = process.env.MOCK_LLM_OMIT_DONE === '1'
+// 主对话只回文本、不要求工具，便于单独验证流式收尾（不依赖内部工具接口）。
+const TEXT_ONLY = process.env.MOCK_LLM_TEXT_ONLY === '1'
 const records = []
 
 function send(res, payload) {
@@ -101,10 +105,14 @@ function record(body, info) {
   }
 }
 
+function endStream(res) {
+  if (!OMIT_DONE) res.write('data: [DONE]\n\n')
+  res.end()
+}
+
 function finishOk(res) {
   send(res, { ...chunk({}, 'stop'), usage: { prompt_tokens: 40, completion_tokens: 5, total_tokens: 45 } })
-  res.write('data: [DONE]\n\n')
-  res.end()
+  endStream(res)
 }
 
 function streamText(res, text) {
@@ -156,8 +164,7 @@ function streamMain(res, info) {
       )
     }
     send(res, { ...chunk({}, 'tool_calls'), usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 } })
-    res.write('data: [DONE]\n\n')
-    res.end()
+    endStream(res)
   }, 60)
 }
 
@@ -184,6 +191,7 @@ const server = createServer(async (req, res) => {
   if (info.kind === 'title') return streamText(res, 'DSH 接入回归')
   if (info.kind === 'compaction') return streamText(res, '压缩摘要：早期对话已折叠。')
   if (info.kind === 'main-followup') return streamText(res, '完成：计划已更新，echo=pong。')
+  if (info.kind === 'main' && TEXT_ONLY) return streamText(res, '代理收尾验证：这是一段普通回答。')
   return streamMain(res, info)
 })
 

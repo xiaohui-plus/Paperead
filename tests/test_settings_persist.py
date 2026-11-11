@@ -5,6 +5,7 @@
 - 设置页保存的回答模型会被研究 agent 的本地代理直接使用，不需要再配一遍。
 """
 
+import gzip
 import importlib
 import json
 import threading
@@ -147,13 +148,18 @@ class _FakeModel(BaseHTTPRequestHandler):
     """假装成一个 OpenAI 兼容服务；响应由测试通过 `reply` 注入。"""
 
     reply: tuple[str, bytes] = ("application/json", b"{}")
+    extra_headers: dict[str, str] = {}
+    requests: list[dict[str, str]] = []
 
     def do_POST(self) -> None:  # noqa: N802 - http.server 的固定接口名
         length = int(self.headers.get("content-length") or 0)
         self.rfile.read(length)
+        type(self).requests.append(dict(self.headers))
         content_type, body = type(self).reply
         self.send_response(200)
         self.send_header("content-type", content_type)
+        for name, value in type(self).extra_headers.items():
+            self.send_header(name, value)
         self.send_header("content-length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -162,8 +168,12 @@ class _FakeModel(BaseHTTPRequestHandler):
         pass
 
 
-def _serve_model(reply: tuple[str, bytes]) -> ThreadingHTTPServer:
+def _serve_model(
+    reply: tuple[str, bytes], headers: dict[str, str] | None = None
+) -> ThreadingHTTPServer:
     _FakeModel.reply = reply
+    _FakeModel.extra_headers = dict(headers or {})
+    _FakeModel.requests = []
     server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeModel)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
@@ -250,6 +260,60 @@ def test_agent_proxy_passes_sse_through(monkeypatch, tmp_path: Path):
     assert response.status_code == 200, response.text
     assert "text/event-stream" in response.headers["content-type"]
     assert response.content == sse
+
+
+def test_agent_proxy_adds_done_when_upstream_omits_it(monkeypatch, tmp_path: Path):
+    """网关只发数据块、不发 [DONE] 时，代理要补齐，否则 agent 整轮 STREAM_CLOSED。"""
+    _prepare(monkeypatch, tmp_path)
+    sse = (
+        b'data: {"choices":[{"index":0,"delta":{"content":"\xe5\x97\xa8"},"finish_reason":null}]}\n\n'
+        b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+    )
+    server = _serve_model(("text/event-stream", sse))
+    try:
+        import server.main as main
+
+        importlib.reload(main)
+        with TestClient(main.app) as client:
+            _point_at(monkeypatch, client, server)
+            response = _call_agent(client)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert response.status_code == 200, response.text
+    assert response.content.startswith(sse)
+    assert response.content.endswith(b"data: [DONE]\n\n")
+    assert response.content.count(b"[DONE]") == 1
+    assert _FakeModel.requests[0].get("accept-encoding") == "identity"
+
+
+def test_agent_proxy_decodes_compressed_sse(monkeypatch, tmp_path: Path):
+    """上游压缩的 SSE 必须解码后再转发，否则 agent 解析不到事件、报 STREAM_CLOSED。"""
+    _prepare(monkeypatch, tmp_path)
+    plain = (
+        b'data: {"choices":[{"index":0,"delta":{"content":"\xe5\x97\xa8"},"finish_reason":null}]}\n\n'
+        b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+    )
+    server = _serve_model(
+        ("text/event-stream", gzip.compress(plain)),
+        headers={"content-encoding": "gzip"},
+    )
+    try:
+        import server.main as main
+
+        importlib.reload(main)
+        with TestClient(main.app) as client:
+            _point_at(monkeypatch, client, server)
+            response = _call_agent(client)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert response.status_code == 200, response.text
+    assert response.content.startswith(plain)
+    assert b"\x1f\x8b" not in response.content
+    assert response.content.endswith(b"data: [DONE]\n\n")
 
 
 def test_agent_proxy_reports_non_api_body(monkeypatch, tmp_path: Path):

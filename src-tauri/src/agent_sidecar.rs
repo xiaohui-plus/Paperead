@@ -63,8 +63,16 @@ impl AgentSidecar {
             .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok())
             .unwrap_or_default();
         let env_base = paths::var("PAPEREAD_LLM_BASE").or_else(|| paths::var("PAPEREAD_BASE_URL"));
-        // 没有显式覆盖时走本机 LLM 代理，这样研究输入框里切换模型可以即时生效。
-        let (llm_base, llm_key) = match env_base {
+        // 只有显式设置 PAPEREAD_LLM_DIRECT=1 才允许绕过本机代理（调试用）。
+        // 机器上残留的 PAPEREAD_LLM_BASE 会让研究 agent 跳过设置页里的统一模型
+        // 配置，直接连一个旧地址，表现为「阅读/翻译正常、研究/综述一直失败」。
+        let direct_base = if paths::var("PAPEREAD_LLM_DIRECT").is_some() {
+            env_base
+        } else {
+            None
+        };
+        // 默认走本机 LLM 代理，这样研究输入框里切换模型可以即时生效。
+        let (llm_base, llm_key) = match direct_base {
             Some(base) => (base, env_key),
             None => (
                 format!("http://127.0.0.1:{python_port}/api/llm-proxy/v1"),

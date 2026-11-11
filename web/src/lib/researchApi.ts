@@ -1,5 +1,7 @@
 /** 研究项目 / 文件树 / 会话索引 API 客户端。 */
 
+import type { AgentEvent } from './researchTypes'
+
 export type ProjectKind = 'research' | 'review'
 
 export interface ProjectSummary {
@@ -187,6 +189,27 @@ export interface ReviewTemplateState {
   selectedDetail: ReviewTemplateDetail
   library: ReviewTemplatePaper[]
   uploaded?: ReviewTemplateOption
+}
+
+export type ResearchMode = 'standard' | 'deep'
+export type WorkspaceScope = 'workspace' | 'readonly'
+
+export interface SendMeta {
+  mode: ResearchMode
+  scope: WorkspaceScope
+}
+
+export interface ResearchCommand {
+  name: string
+  description: string
+  input?: { hint: string }
+}
+
+export interface MessageRef {
+  kind: 'file' | 'paper'
+  name: string
+  path?: string
+  paperId?: string
 }
 
 async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
@@ -413,10 +436,35 @@ export const researchApi = {
     )
   },
 
-  async sendMessage(sessionId: string, text: string): Promise<void> {
+  async sendMessage(
+    sessionId: string,
+    text: string,
+    meta?: SendMeta,
+  ): Promise<void> {
     await jsonFetch<{ ok: boolean }>(
       `/api/research/sessions/${sessionId}/messages`,
-      json('POST', { text }),
+      json('POST', {
+        text,
+        mode: meta?.mode ?? 'standard',
+        scope: meta?.scope ?? 'workspace',
+      }),
+    )
+  },
+
+  async listCommands(sessionId: string): Promise<ResearchCommand[]> {
+    const data = await jsonFetch<{ items: ResearchCommand[] }>(
+      `/api/research/sessions/${sessionId}/commands`,
+    )
+    return data.items
+  },
+
+  runCommand(
+    sessionId: string,
+    line: string,
+  ): Promise<{ ok: boolean; event: AgentEvent }> {
+    return jsonFetch<{ ok: boolean; event: AgentEvent }>(
+      `/api/research/sessions/${sessionId}/commands`,
+      json('POST', { line }),
     )
   },
 

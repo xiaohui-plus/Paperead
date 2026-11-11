@@ -2158,6 +2158,7 @@ body.col-resizing * {
   gap: 8px;
 }
 
+
 .library-notice {
   margin-bottom: 14px;
   padding: 9px 12px;
@@ -2687,31 +2688,48 @@ body.col-resizing * {
   .folder-out-rail {
     display: none;
   }
+
 }
 
 .drop-overlay {
   position: fixed;
   inset: 0;
   z-index: 90;
-  background: rgba(37, 99, 235, 0.08);
-  border: 2px dashed var(--blue);
+  padding: 24px;
+  background: rgba(248, 250, 252, 0.82);
+  backdrop-filter: blur(3px);
   display: grid;
   place-items: center;
   pointer-events: none;
 }
 
-.drop-overlay div {
+.drop-overlay-card {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 8px;
-  padding: 12px 20px;
-  border-radius: 10px;
+  gap: 5px;
+  min-width: 280px;
+  padding: 26px 34px;
+  border: 1.5px dashed var(--line-2);
+  border-radius: 16px;
   background: #fff;
-  box-shadow: var(--shadow-2);
-  color: var(--blue-ink);
-  font-size: 13px;
-  font-weight: 600;
+  box-shadow: 0 18px 44px rgba(15, 23, 42, 0.1);
+  text-align: center;
 }
+
+.drop-overlay-card svg {
+  width: 26px;
+  height: 26px;
+  margin-bottom: 4px;
+  color: var(--blue-ink);
+}
+
+.drop-overlay-card b {
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 650;
+}
+
 
 .toast {
   position: fixed;
