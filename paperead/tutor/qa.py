@@ -37,7 +37,15 @@ _NOISE_SECTION_RE = re.compile(
 )
 _EXTERNAL_RE = re.compile(
     r"最新|近几年|后续|被超越|有没有.*(新|更好)|sota|state of the art|对比其他|其他工作|"
-    r"领域内|发展趋势|和.*比|比.*好吗|202[4-9]|202[0-9]年",
+    r"领域内|发展趋势|和.*比|比.*好吗|202[4-9]|202[0-9]年|"
+    r"相关研究|相关文献|别人怎么做|业界|开源实现|网上|谷歌|百度|搜一下",
+    re.IGNORECASE,
+)
+# 概念/原理类问题：论文往往只给了本文的一个变体，读者要的是通用解释
+_CONCEPT_RE = re.compile(
+    r"是什么|什么是|为什么|为何|如何理解|怎么理解|原理|机制|含义|意思|定义|"
+    r"区别|差异|不同点|优缺点|优劣|局限性|适用场景|应用场景|举例|例子|"
+    r"背景|历史|由来|前置知识|入门|科普|怎么用|如何用|怎么实现|如何实现",
     re.IGNORECASE,
 )
 _DIALOGUE_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -273,25 +281,49 @@ def _parse_json(raw: str) -> dict | list | None:
 
 
 def needs_external(question: str, top_score: float) -> bool:
-    if _EXTERNAL_RE.search(question):
+    """是否需要联网。
+
+    这里只判断「必须联网」的强信号；开关打开时调用方对每个问题都会做一次
+    基础检索，本函数用于决定是否再扩大检索范围（补英文关键词/学术源）。
+    """
+    q = (question or "").strip()
+    if not q:
+        return False
+    if _EXTERNAL_RE.search(q):
+        return True
+    if _CONCEPT_RE.search(q) and top_score < 3.5:
         return True
     return top_score < 1.2      # 论文里基本没匹配上
 
 
-ANSWER_SYS = """你是论文助教。只根据给定的材料回答，用中文，简洁、分点、不要客套。
+ANSWER_SYS = """你是论文助教。结合【材料】回答问题，用中文，简洁、分点、不要客套。
+
+材料分三类：
+- [P3] 论文原文第 3 页
+- [R31] 论文参考文献 31
+- [W2] 网络检索结果 2（公开网络，可能有错，需谨慎采信）
+另有【附录】里的图表/公式、用户上传的附件，按标注引用。
 
 规则：
-1. 材料里没有的信息不要编，直接说"论文中没有提到"；
-2. 每一条论断后面必须标注来源，格式：
-   [P3] 第 3 页  |  [R31] 参考文献 31  |  [W2] 网络结果 2
-3. 如果材料之间矛盾，指出矛盾，不要强行统一；
-4. 不要复述问题，直接给答案。"""
+1. 优先用论文材料回答；论文确实没写、或用户问的是论文之外的知识时，用网络结果回答，
+   也可以补充必要的领域常识与定义，不要因为论文没写就拒答。
+2. 绝对不要编造论文里没有的页码、数据、实验结论；不要把网络内容或常识说成论文原文。
+3. 论断标注来源：来自论文标 [P3]，来自参考文献标 [R31]，来自网络标 [W2]；
+   来自你自己的领域常识、且材料里没有的，句末标「（通识）」。
+4. 如果论文与网络信息冲突，指出各自说法，不要强行统一。
+5. 材料完全不足以回答时，说明缺什么，再给出基于公开资料或常识的最佳解释，
+   不要只回一句"论文中没有提到"。
+6. 不要复述问题，直接给答案。"""
 
 MEMORY_RULES = """
-5. 【背景记忆】只用于调整讲法、承接前文、避免重复，不能作为论文事实、数字、结论的依据；
-6. 概念标为"已懂"的不再展开；标为"困惑"的换一种讲法，先补前置；
-7. 用户纠正过的以纠正为准；记忆与材料冲突时以材料为准；
-8. 不要声称"我记得你……"，直接用调整后的讲法。"""
+7. 【背景记忆】只用于调整讲法、承接前文、避免重复，不能作为论文事实、数字、结论的依据；
+8. 概念标为"已懂"的不再展开；标为"困惑"的换一种讲法，先补前置；
+9. 用户纠正过的以纠正为准；记忆与材料冲突时以材料为准；
+10. 不要声称"我记得你……"，直接用调整后的讲法。"""
+
+WEB_NOTE = """
+【联网状态】本次未能获取到有效的网络结果。若论文材料不足，请基于领域常识回答，
+并在相应结论后标注「（通识）」；明确告知用户这些内容不是论文原文。"""
 
 
 def build_context(
@@ -312,7 +344,11 @@ def build_context(
     for idx, title in (refs or {}).items():
         parts.append(f"[R{idx}] {title}")
     for i, w in enumerate(web or [], 1):
-        parts.append(f"[W{i}] {w.get('title','')} — {w.get('content','')[:400]}")
+        title = w.get("title", "")
+        url = w.get("url", "")
+        body = (w.get("content") or "")[:600]
+        head = f"{title}（{url}）" if url else title
+        parts.append(f"[W{i}] {head} — {body}")
     return "\n\n".join(parts)
 
 
@@ -340,6 +376,7 @@ def _answer_messages(
     context: str,
     memory: str = "",
     recent: list[dict] | None = None,
+    web_empty: bool = False,
 ) -> list[dict]:
     system = ANSWER_SYS + (MEMORY_RULES if memory else "")
     user = f"【材料】\n{context}\n\n【问题】{question}"
@@ -347,6 +384,8 @@ def _answer_messages(
         user = f"{_recent_block(recent)}\n\n{user}"
     if memory:
         user = f"【背景记忆】\n{memory}\n\n{user}"
+    if web_empty:
+        user = f"{user}\n{WEB_NOTE}"
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
@@ -358,9 +397,10 @@ async def answer(
     context: str,
     memory: str = "",
     recent: list[dict] | None = None,
+    web_empty: bool = False,
 ) -> str:
     raw = await chat(
-        _answer_messages(question, context, memory, recent),
+        _answer_messages(question, context, memory, recent, web_empty),
         temperature=0.2,
         max_tokens=4000,
     )
@@ -372,10 +412,11 @@ async def answer_stream(
     context: str,
     memory: str = "",
     recent: list[dict] | None = None,
+    web_empty: bool = False,
 ) -> AsyncIterator[str]:
     """流式回答：逐 delta 产出，调用方负责拼接与发送。"""
     async for piece in chat_stream(
-        _answer_messages(question, context, memory, recent),
+        _answer_messages(question, context, memory, recent, web_empty),
         temperature=0.2,
         max_tokens=4000,
     ):

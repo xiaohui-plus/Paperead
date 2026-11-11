@@ -123,13 +123,25 @@ def test_ask_stream_event_order_and_text(monkeypatch, tmp_path):
     types = [e["type"] for e in events]
     assert types[0] == "status"
     assert events[0]["stage"] == "retrieving"
-    assert types[1] == "sources"
+    # 检索步骤先以工具卡片事件到达，再给出出处汇总
+    assert "tool" in types
+    sources_index = types.index("sources")
+    assert "tool" in types[:sources_index]
     assert types[-1] == "done"
     assert events[-1]["latency"] >= 0
 
     assert "".join(e["text"] for e in events if e["type"] == "delta") == "".join(pieces)
-    assert events[1]["sources"][0]["label"] == "P1"
-    assert events[1]["usedWeb"] is False
+    sources_ev = events[sources_index]
+    assert sources_ev["sources"][0]["label"] == "P1"
+    assert sources_ev["usedWeb"] is False
+    assert sources_ev["tools"][0]["name"] == "paper_search"
+    assert sources_ev["tools"][0]["status"] == "done"
+
+    paper_end = next(
+        e for e in events if e["type"] == "tool" and e.get("phase") == "end"
+    )
+    assert paper_end["name"] == "paper_search"
+    assert paper_end["items"][0]["label"] == "P1"
 
 
 def test_ask_stream_falls_back_to_plain_chat(monkeypatch, tmp_path):
@@ -176,3 +188,107 @@ def test_ask_stream_requires_model_config(monkeypatch, tmp_path):
     res = _post_stream(main)
     assert res.status_code == 400
     assert "未配置模型" in res.json()["detail"]
+
+class CapturingBackend:
+    def __init__(self, pieces):
+        self.pieces = pieces
+        self.seen: list[list[dict]] = []
+
+    async def chat(self, messages, **kwargs):
+        return "".join(self.pieces)
+
+    async def chat_stream(self, messages, **kwargs):
+        self.seen.append(list(messages))
+        for piece in self.pieces:
+            yield piece
+
+
+def test_ask_stream_includes_web_sources_and_allows_common_sense(monkeypatch, tmp_path):
+    """联网结果必须进入出处与提示词，且论文没写时允许用通识回答。"""
+    main = _load_main(monkeypatch, tmp_path)
+    _use_fake_paper(main, monkeypatch)
+
+    async def fake_search(query, limit=4):
+        return [
+            {
+                "title": "自注意力机制详解",
+                "url": "https://e.com/a",
+                "content": "自注意力让模型关注序列中的所有词",
+                "engine": "so360",
+            },
+            {
+                "title": "对比学习入门",
+                "url": "https://e.com/b",
+                "content": "对比学习是一种自监督方法",
+                "engine": "so360",
+            },
+        ]
+
+    monkeypatch.setattr(main.web_search, "search", fake_search)
+
+    backend = CapturingBackend(["自注意力机制", "会同时关注所有词。"])
+    llm_mod.set_backend(backend)
+    try:
+        with TestClient(main.app) as client:
+            res = client.post(
+                "/api/papers/p1/ask/stream",
+                json={"question": "自注意力机制是什么", "web": True},
+            )
+    finally:
+        llm_mod.set_backend(None)
+
+    assert res.status_code == 200
+    events = _events(res.text)
+    sources_ev = next(e for e in events if e["type"] == "sources")
+    assert sources_ev["usedWeb"] is True
+    assert sources_ev["webStatus"]["attempted"] is True
+    assert sources_ev["webStatus"]["count"] == 2
+    assert sources_ev["webStatus"]["engines"] == ["so360"]
+    assert [t["name"] for t in sources_ev["tools"]] == ["paper_search", "web_search"]
+    assert sources_ev["tools"][1]["items"][0]["url"] == "https://e.com/a"
+    web_sources = [s for s in sources_ev["sources"] if s["type"] == "web"]
+    assert [s["url"] for s in web_sources] == ["https://e.com/a", "https://e.com/b"]
+    assert web_sources[0]["engine"] == "so360"
+
+    user_prompt = backend.seen[0][-1]["content"]
+    assert "[W1] 自注意力机制详解" in user_prompt
+    assert "https://e.com/a" in user_prompt
+
+
+def test_ask_stream_reports_web_attempt_without_results(monkeypatch, tmp_path):
+    """联网开关打开但没搜到结果时，也要把 attempted/count 透传给前端。"""
+    main = _load_main(monkeypatch, tmp_path)
+    _use_fake_paper(main, monkeypatch)
+
+    async def empty_search(query, limit=4):
+        return []
+
+    async def empty_many(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(main.web_search, "search", empty_search)
+    monkeypatch.setattr(main.web_search, "search_many", empty_many)
+
+    backend = CapturingBackend(["论文没有直接写，", "这里用通识解释。"])
+    llm_mod.set_backend(backend)
+    try:
+        with TestClient(main.app) as client:
+            res = client.post(
+                "/api/papers/p1/ask/stream",
+                json={"question": "自注意力机制是什么", "web": True},
+            )
+    finally:
+        llm_mod.set_backend(None)
+
+    events = _events(res.text)
+    sources_ev = next(e for e in events if e["type"] == "sources")
+    assert sources_ev["usedWeb"] is False
+    assert sources_ev["webStatus"] == {
+        "attempted": True,
+        "engine": "",
+        "engines": [],
+        "count": 0,
+    }
+    user_prompt = backend.seen[0][-1]["content"]
+    assert "【联网状态】" in user_prompt
+    assert "（通识）" in user_prompt

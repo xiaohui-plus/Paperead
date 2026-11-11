@@ -11091,3 +11091,152 @@ html[data-scanning='1'] #root .scan-overlay * {
   color: var(--ink);
   font-weight: 600;
 }
+/* ── 阅读页问答：复用研究页的工具卡片（DSH 风格）─────────────── */
+.chat .turn-block {
+  gap: 6px;
+}
+
+.chat .turn-block .turn-text {
+  font-size: 13px;
+  line-height: 1.85;
+}
+
+/* 回答里的标题按侧栏宽度收一档，避免 h1 撑满整个气泡 */
+.chat .turn-block .turn-text h1 {
+  font-size: 15px;
+}
+
+.chat .turn-block .turn-text h2 {
+  font-size: 14px;
+}
+
+.chat .turn-block .turn-text h3 {
+  font-size: 13.5px;
+}
+
+.chat .turn-block .tool-row > summary {
+  gap: 5px;
+  padding: 1px 5px;
+  font-size: 13px;
+  line-height: 22px;
+}
+
+.chat .turn-block .tool-leading svg {
+  width: 13px;
+  height: 13px;
+}
+
+.chat .turn-block .tool-sep {
+  margin: 0 5px;
+}
+
+.chat .turn-block .tool-summary {
+  font-size: 12px;
+  line-height: 22px;
+}
+
+.chat .turn-block .tool-suffix {
+  margin-left: 6px;
+  font-size: 11px;
+}
+
+.chat .turn-block .tool-body {
+  padding: 2px 0 4px 18px;
+}
+
+.chat .turn-block .tool-io {
+  grid-template-columns: 1fr;
+  row-gap: 4px;
+  padding: 8px 10px;
+  border-radius: 10px;
+}
+
+.chat .turn-block .tool-io-label {
+  font-size: 10px;
+}
+
+.chat .turn-block .tool-io-text {
+  max-height: 220px;
+  font-size: 10.5px;
+}
+
+.chat .turn-block .turn-foot {
+  font-size: 11px;
+}
+
+.chat .turn-block .turn-pending {
+  margin: 0;
+  color: var(--faint);
+  font-size: 12.5px;
+}
+
+.chat .turn-block .turn-error {
+  margin: 0;
+  font-size: 12px;
+}
+
+.tool-hits {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tool-hits li {
+  margin: 0;
+}
+
+.tool-hit {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: 6px;
+  width: 100%;
+  padding: 5px 6px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1.5;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.tool-hit:hover {
+  background: var(--bg-soft);
+}
+
+.tool-hit[data-static='true'] {
+  color: var(--faint);
+  cursor: default;
+}
+
+.tool-hit-label {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.7;
+  white-space: nowrap;
+}
+
+.tool-hit-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-hit-snippet {
+  grid-column: 2;
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 11px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}

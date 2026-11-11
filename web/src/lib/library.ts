@@ -469,12 +469,54 @@ export interface AskSource {
   index?: number
   title?: string
   url?: string
+  /** 网络来源的搜索引擎：tavily / bing / duckduckgo / openalex */
+  engine?: string
+}
+
+/** 联网过程的结构化结果，用于告诉用户「搜了没有 / 搜到几条」。 */
+export interface AskWebStatus {
+  attempted: boolean
+  engine?: string
+  engines?: string[]
+  count: number
+}
+
+/** 工具卡片里的一条结果：论文段落可跳转，网页可打开外链。 */
+export interface AskToolItem {
+  label: string
+  title?: string
+  url?: string
+  page?: number
+  blockId?: string
+  snippet?: string
+  engine?: string
+}
+
+/** 与研究页 ToolCall 同构的阅读页工具调用，用于渲染 DSH 风格的工具卡片。 */
+export interface AskToolCall {
+  callId: string
+  name: string
+  status: 'running' | 'done' | 'error'
+  input?: { query?: string; keywords?: string[] }
+  summary?: string
+  items?: AskToolItem[]
+  error?: string
+  meta?: {
+    elapsedMs?: number
+    count?: number
+    hits?: number
+    engines?: string[]
+  }
+  startedAt?: number
+  endedAt?: number
 }
 
 export interface AskResult {
   answer: string
   sources: AskSource[]
   usedWeb: boolean
+  webStatus?: AskWebStatus
+  tools?: AskToolCall[]
   latency: number
 }
 
@@ -492,13 +534,29 @@ export async function askPaper(
 }
 
 export interface AskStreamEvent {
-  type: 'status' | 'sources' | 'delta' | 'done' | 'error'
+  type: 'status' | 'sources' | 'delta' | 'done' | 'error' | 'tool'
   stage?: string
+  /** status 阶段是否开启联网 */
+  web?: boolean
   sources?: AskSource[]
   usedWeb?: boolean
+  webStatus?: AskWebStatus
+  tools?: AskToolCall[]
   text?: string
   latency?: number
   message?: string
+  /** tool 事件的增量字段：phase=start 表示开始，phase=end 表示结束 */
+  phase?: 'start' | 'end'
+  callId?: string
+  name?: string
+  status?: 'running' | 'done' | 'error'
+  input?: { query?: string; keywords?: string[] }
+  summary?: string
+  items?: AskToolItem[]
+  meta?: AskToolCall['meta']
+  error?: string
+  startedAt?: number
+  endedAt?: number
 }
 
 /** 问答附件：上传到当前论文的附件目录，随问题一起发送。 */
@@ -581,7 +639,13 @@ export async function askPaperStream(
     // 兼容旧服务 / 旧桌面 sidecar：没有流式端点时退回一次性接口，
     // 前端仍然按 Markdown 渲染，只是不再逐字出现。
     const legacy = await askPaper(id, config, question, web)
-    onEvent({ type: 'sources', sources: legacy.sources, usedWeb: legacy.usedWeb })
+    onEvent({
+      type: 'sources',
+      sources: legacy.sources,
+      usedWeb: legacy.usedWeb,
+      webStatus: legacy.webStatus,
+      tools: legacy.tools,
+    })
     if (legacy.answer) onEvent({ type: 'delta', text: legacy.answer })
     onEvent({ type: 'done', latency: legacy.latency })
     return
@@ -600,6 +664,7 @@ export interface ChatTurn {
   answer: string
   sources: AskSource[]
   usedWeb: boolean
+  tools?: AskToolCall[]
   latency?: number
   at?: number
 }

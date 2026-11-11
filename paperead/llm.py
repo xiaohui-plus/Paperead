@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import AsyncIterator, Protocol, Sequence, runtime_checkable
 
 from .env import env
@@ -108,6 +108,24 @@ class LLMBackend(Protocol):
         ...
 
 
+@dataclass
+class ToolCall:
+    """模型要求执行的一次工具调用。"""
+
+    id: str
+    name: str
+    arguments: str = ""
+
+
+@dataclass
+class ToolReply:
+    """一轮带 tools 的模型回复：要么是正文，要么是工具调用（也可能两者都有）。"""
+
+    content: str = ""
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    finish_reason: str = ""
+
+
 class OpenAICompatBackend:
     """OpenAI 兼容接口实现。"""
 
@@ -185,6 +203,131 @@ class OpenAICompatBackend:
         finally:
             await stream.close()
 
+    async def chat_tools(
+        self,
+        messages: Sequence[dict],
+        *,
+        tools: Sequence[dict],
+        model: str | None = None,
+        temperature: float = 0.25,
+        max_tokens: int | None = None,
+        extra_body: dict | None = None,
+    ) -> ToolReply:
+        """带 tools 的一轮调用（非流式），供 agent 循环做工具决策。"""
+        actual_model = model or self.config.model
+        kwargs: dict[str, object] = {
+            "model": actual_model,
+            "messages": list(messages),
+            "max_tokens": max_tokens,
+            "tools": list(tools),
+            "tool_choice": "auto",
+        }
+        if not _fixed_temperature_model(actual_model):
+            kwargs["temperature"] = temperature
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+        resp = await self._client.chat.completions.create(**kwargs)
+        choice = resp.choices[0]
+        msg = choice.message
+        calls: list[ToolCall] = []
+        for i, call in enumerate(getattr(msg, "tool_calls", None) or []):
+            fn = getattr(call, "function", None)
+            calls.append(
+                ToolCall(
+                    id=getattr(call, "id", "") or f"call_{i}",
+                    name=getattr(fn, "name", "") or "",
+                    arguments=getattr(fn, "arguments", "") or "",
+                )
+            )
+        return ToolReply(
+            content=(msg.content or "").strip(),
+            tool_calls=[c for c in calls if c.name],
+            finish_reason=choice.finish_reason or "",
+        )
+
+    async def chat_stream_tools(
+        self,
+        messages: Sequence[dict],
+        *,
+        tools: Sequence[dict],
+        model: str | None = None,
+        temperature: float = 0.25,
+        max_tokens: int | None = None,
+        extra_body: dict | None = None,
+    ) -> AsyncIterator[dict]:
+        """流式工具调用：边产出正文 delta，最后产出聚合后的 tool_calls。
+
+        不同 OpenAI 兼容网关对 `delta.tool_calls` 的分片方式不一致（有的只发
+        一次完整调用，有的按 index 增量拼接），这里统一按 index 累加。
+        """
+        actual_model = model or self.config.model
+        kwargs: dict[str, object] = {
+            "model": actual_model,
+            "messages": list(messages),
+            "max_tokens": max_tokens,
+            "stream": True,
+            "tools": list(tools),
+            "tool_choice": "auto",
+        }
+        if not _fixed_temperature_model(actual_model):
+            kwargs["temperature"] = temperature
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+
+        stream = await self._client.chat.completions.create(**kwargs)
+        order: list[int] = []
+        acc: dict[int, ToolCall] = {}
+        content: list[str] = []
+        finish = ""
+        try:
+            async for chunk in stream:
+                if not getattr(chunk, "choices", None):
+                    continue
+                choice = chunk.choices[0]
+                finish = choice.finish_reason or finish
+                delta = choice.delta
+                text = getattr(delta, "content", None)
+                if text:
+                    content.append(text)
+                    yield {"type": "text", "text": text}
+                for call in getattr(delta, "tool_calls", None) or []:
+                    idx = getattr(call, "index", None)
+                    if idx is None:
+                        idx = 0
+                    current = acc.get(idx)
+                    if current is None:
+                        current = ToolCall(id="", name="", arguments="")
+                        acc[idx] = current
+                        order.append(idx)
+                    cid = getattr(call, "id", None)
+                    if cid:
+                        current.id = cid
+                    fn = getattr(call, "function", None)
+                    if fn is not None:
+                        name = getattr(fn, "name", None)
+                        if name:
+                            current.name += name
+                        args = getattr(fn, "arguments", None)
+                        if args:
+                            current.arguments += args
+        finally:
+            await stream.close()
+
+        calls: list[ToolCall] = []
+        for i, idx in enumerate(order):
+            call = acc[idx]
+            if not call.name:
+                continue
+            if not call.id:
+                call.id = f"call_{i}"
+            calls.append(call)
+        yield {
+            "type": "reply",
+            "content": "".join(content),
+            "tool_calls": calls,
+            "finish_reason": finish or ("tool_calls" if calls else "stop"),
+        }
+
 
 _backend: LLMBackend | None = None
 
@@ -257,3 +400,71 @@ async def chat_stream(
     text = await backend.chat(messages, **kwargs)
     if text:
         yield text
+
+def supports_tools() -> bool:
+    """当前后端是否支持工具调用；不支持时调用方应回退到固定检索管道。"""
+    return hasattr(get_backend(), "chat_tools")
+
+
+async def chat_tools(
+    messages: Sequence[dict],
+    *,
+    tools: Sequence[dict],
+    model: str | None = None,
+    temperature: float = 0.25,
+    max_tokens: int | None = None,
+    extra_body: dict | None = None,
+) -> ToolReply:
+    backend = get_backend()
+    fn = getattr(backend, "chat_tools", None)
+    if fn is None:
+        raise NotImplementedError("当前模型后端不支持 tools")
+    kwargs: dict = {
+        "tools": tools,
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if extra_body is not None:
+        kwargs["extra_body"] = extra_body
+    return await fn(messages, **kwargs)
+
+
+async def chat_stream_tools(
+    messages: Sequence[dict],
+    *,
+    tools: Sequence[dict],
+    model: str | None = None,
+    temperature: float = 0.25,
+    max_tokens: int | None = None,
+    extra_body: dict | None = None,
+) -> AsyncIterator[dict]:
+    """流式工具调用事件流：`{"type":"text"}` 与 `{"type":"reply"}`。
+
+    后端没有流式工具能力时退回一次性 `chat_tools`，调用方逻辑不变。
+    """
+    backend = get_backend()
+    fn = getattr(backend, "chat_stream_tools", None)
+    kwargs: dict = {
+        "tools": tools,
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if extra_body is not None:
+        kwargs["extra_body"] = extra_body
+
+    if fn is not None:
+        async for event in fn(messages, **kwargs):
+            yield event
+        return
+
+    reply = await chat_tools(messages, **kwargs)
+    if reply.content:
+        yield {"type": "text", "text": reply.content}
+    yield {
+        "type": "reply",
+        "content": reply.content,
+        "tool_calls": reply.tool_calls,
+        "finish_reason": reply.finish_reason or ("tool_calls" if reply.tool_calls else "stop"),
+    }

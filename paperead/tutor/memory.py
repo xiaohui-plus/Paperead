@@ -346,6 +346,7 @@ def _public_turn(user: dict, answer: dict | None) -> dict:
         "sources": [],
         "usedWeb": False,
         "latency": 0.0,
+        "tools": [],
         "at": user.get("at", 0.0),
     }
     if answer is not None:
@@ -353,6 +354,7 @@ def _public_turn(user: dict, answer: dict | None) -> dict:
         turn["sources"] = answer.get("sources") or []
         turn["usedWeb"] = bool(answer.get("used_web"))
         turn["latency"] = answer.get("latency", 0.0)
+        turn["tools"] = answer.get("tools") or []
     return turn
 
 
@@ -490,6 +492,7 @@ class MemoryStore:
         sources: list[dict],
         used_web: bool,
         latency: float,
+        tools: list[dict] | None = None,
     ) -> dict:
         msg = {
             "id": f"m_{uuid.uuid4().hex[:12]}",
@@ -498,6 +501,7 @@ class MemoryStore:
             "sources": sources,
             "used_web": bool(used_web),
             "latency": latency,
+            "tools": tools or [],
             "answer_to": user_message_id,
             "at": _now(),
         }

@@ -203,9 +203,11 @@ def test_ask_stream_event_order_and_persisted_turn(monkeypatch, tmp_path):
             types = [e["type"] for e in events]
             assert types[0] == "status"
             assert events[0]["stage"] == "retrieving"
-            assert types[1] == "sources"
+            # 检索先以工具卡片事件到达，sources 是汇总后的出处
+            assert "tool" in types
+            sources_index = types.index("sources")
             assert types[-1] == "done"
-            assert types[2:-1] == ["delta", "delta"]
+            assert types[sources_index + 1 : -1] == ["delta", "delta"]
             assert (
                 "".join(e["text"] for e in events if e["type"] == "delta")
                 == "回答正文"

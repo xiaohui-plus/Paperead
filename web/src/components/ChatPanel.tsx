@@ -6,6 +6,8 @@ import {
   listPaperAttachments,
   uploadPaperAttachment,
   type AskSource,
+  type AskToolCall,
+  type AskWebStatus,
   type PaperAttachment,
 } from '../lib/library'
 import {
@@ -24,6 +26,7 @@ import { appendLocalChat, loadLocalChat } from '../lib/offlineStore'
 import { tourBus } from '../tour/tourBus'
 import { Markdown, balanceMarkdown } from './Markdown'
 import { Katex } from './Katex'
+import { ReaderToolCard } from './ReaderToolCard'
 import {
   IconCheck,
   IconClose,
@@ -49,6 +52,10 @@ interface Turn {
   answer: string
   sources: AskSource[]
   usedWeb: boolean
+  /** 后端联网过程的结构化结果（搜到几条、用了哪个引擎）；离线链路没有这一项 */
+  webStatus?: AskWebStatus
+  /** 检索步骤：paper_search / web_search，渲染成研究页同款工具卡片 */
+  tools: AskToolCall[]
   latency?: number
   status: TurnStatus
   error?: string
@@ -63,13 +70,86 @@ interface Turn {
 }
 
 /** 本机问答的系统提示：和电脑端 `paperead/tutor/qa.py` 保持一致。 */
-const LOCAL_ANSWER_SYS = `你是论文助教。只根据给定的材料回答，用中文，简洁、分点、不要客套。
+const LOCAL_ANSWER_SYS = `你是论文助教。结合【材料】回答问题，用中文，简洁、分点、不要客套。
 
 规则：
-1. 材料里没有的信息不要编，直接说"论文中没有提到"；
-2. 每一条论断后面必须标注来源，格式：[P3] 第 3 页；
-3. 如果材料之间矛盾，指出矛盾，不要强行统一；
-4. 不要复述问题，直接给答案。`
+1. 优先用论文材料回答；论文没写、或用户问的是论文之外的知识时，可以补充必要的领域常识与定义，不要因为论文没写就拒答；
+2. 绝对不要编造论文里没有的页码、数据、实验结论；
+3. 来自论文材料的论断标 [P3]；来自你自己领域常识的，句末标「（通识）」；
+4. 论文材料与常识冲突时，指出各自说法，不要强行统一；
+5. 材料完全不足以回答时，说明缺什么，再给出基于常识的最佳解释，不要只回一句"论文中没有提到"；
+6. 不要复述问题，直接给答案。`
+
+const ENGINE_LABEL: Record<string, string> = {
+  tavily: 'Tavily',
+  so360: '360 搜索',
+  bing: 'Bing',
+  duckduckgo: 'DuckDuckGo',
+  openalex: 'OpenAlex',
+}
+
+/** 联网结果的展示文案：让用户知道「搜过没搜过、搜到几条」，而不是只看到是否联网。 */
+function webMetaText(webStatus?: AskWebStatus, usedWeb?: boolean): string {
+  if (webStatus?.attempted) {
+    if (webStatus.count > 0) {
+      const names = (webStatus.engines ?? [])
+        .map((e) => ENGINE_LABEL[e] ?? e)
+        .filter(Boolean)
+      const suffix = names.length ? `（${names.join(' / ')}）` : ''
+      return ` · 联网检索 ${webStatus.count} 条${suffix}`
+    }
+    return ' · 联网无结果，已用领域常识补充'
+  }
+  return usedWeb ? ' · 已联网检索' : ''
+}
+
+/** 从出处重建工具卡片：旧历史或离线记录没有 tools 字段时也要有同样的渲染。 */
+function toolsFromSources(sources: AskSource[], usedWeb: boolean): AskToolCall[] {
+  const paper = sources.filter((s) => s.type === 'paper')
+  const web = sources.filter((s) => s.type === 'web')
+  const out: AskToolCall[] = []
+  if (paper.length > 0) {
+    out.push({
+      callId: 'paper_search',
+      name: 'paper_search',
+      status: 'done',
+      summary: `命中 ${paper.length} 段`,
+      items: paper.map((s) => ({
+        label: s.label,
+        page: s.page,
+        blockId: s.blockId,
+        snippet: s.snippet,
+      })),
+      meta: { hits: paper.length },
+    })
+  }
+  if (usedWeb || web.length > 0) {
+    out.push({
+      callId: 'web_search',
+      name: 'web_search',
+      status: 'done',
+      summary: web.length ? `联网检索 ${web.length} 条` : '未获取到网络结果',
+      items: web.map((s) => ({
+        label: s.label,
+        title: s.title,
+        url: s.url,
+        snippet: s.snippet,
+        engine: s.engine,
+      })),
+      meta: {
+        count: web.length,
+        engines: [
+          ...new Set(
+            web
+              .map((s) => s.engine)
+              .filter((x): x is string => Boolean(x)),
+          ),
+        ],
+      },
+    })
+  }
+  return out
+}
 
 const QUICK: { key: AskKind; label: string }[] = [
   { key: 'summary', label: '总结论文' },
@@ -200,18 +280,24 @@ export function ChatPanel({
         answer: string
         sources?: AskSource[]
         usedWeb?: boolean
+        tools?: AskToolCall[]
         latency?: number
       }[]) => {
         if (!alive || rows.length === 0) return
         const restored: Turn[] = rows.map((t): Turn => {
           seq.current += 1
+          const sources = t.sources ?? []
           return {
             id: seq.current,
             memoryId: t.id,
             question: t.question,
             answer: t.answer ?? '',
-            sources: t.sources ?? [],
+            sources,
             usedWeb: !!t.usedWeb,
+            tools:
+              t.tools && t.tools.length > 0
+                ? t.tools
+                : toolsFromSources(sources, !!t.usedWeb),
             latency: t.latency,
             // 上一轮没答完（例如中途停止）时 answer 是空串，按 stopped 展示
             status: t.answer ? 'done' : 'stopped',
@@ -320,6 +406,7 @@ export function ChatPanel({
         answer: '',
         sources: [],
         usedWeb: false,
+        tools: [],
         status: 'retrieving',
         demo: !cfg,
         attachments: sentFiles.length > 0 ? sentFiles : undefined,
@@ -404,7 +491,12 @@ export function ChatPanel({
           blockId: hit.doc.blockId,
           snippet: (hit.doc.translated || hit.doc.text).slice(0, 160),
         }))
-        patch(id, (t) => ({ ...t, sources, status: 'streaming' }))
+        patch(id, (t) => ({
+          ...t,
+          sources,
+          tools: toolsFromSources(sources, false),
+          status: 'streaming',
+        }))
 
         const history = await loadLocalChat(paperId).catch(() => [])
         const recent = history
@@ -451,11 +543,45 @@ export function ChatPanel({
         useWeb,
         (event) => {
           switch (event.type) {
+            case 'tool': {
+              // 检索步骤按 callId 增量更新：start 先占位「运行中」，end 补结果
+              const call: AskToolCall = {
+                callId: event.callId ?? `tool-${Date.now()}`,
+                name: event.name ?? 'tool',
+                status:
+                  event.phase === 'end' ? (event.status ?? 'done') : 'running',
+                input: event.input,
+                summary: event.summary,
+                items: event.items,
+                error: event.error,
+                meta: event.meta,
+                startedAt: event.startedAt,
+                endedAt: event.endedAt,
+              }
+              patch(id, (t) => {
+                const index = t.tools.findIndex((x) => x.callId === call.callId)
+                const tools =
+                  index >= 0
+                    ? t.tools.map((x, i) => (i === index ? { ...x, ...call } : x))
+                    : [...t.tools, call]
+                return {
+                  ...t,
+                  tools,
+                  status: t.answer ? t.status : 'streaming',
+                }
+              })
+              break
+            }
             case 'sources':
               patch(id, (t) => ({
                 ...t,
                 sources: event.sources ?? [],
                 usedWeb: Boolean(event.usedWeb),
+                webStatus: event.webStatus,
+                tools:
+                  event.tools && event.tools.length > 0 && t.tools.length === 0
+                    ? event.tools
+                    : t.tools,
                 status: t.answer ? t.status : 'streaming',
               }))
               break
@@ -618,76 +744,72 @@ export function ChatPanel({
               </div>
             )}
 
-            <div className="turn-a">
-              {t.answer &&
-                (t.demo ? (
-                  <div className="turn-plain">{t.answer}</div>
-                ) : (
-                  <Markdown
-                    text={
-                      t.status === 'streaming'
-                        ? `${balanceMarkdown(t.answer)} ▍`
-                        : t.status === 'stopped'
-                          ? balanceMarkdown(t.answer)
-                          : t.answer
-                    }
-                  />
-                ))}
+            <div
+              className="turn-block"
+              data-running={t.status === 'retrieving' || t.status === 'streaming'}
+              data-failed={t.status === 'error'}
+            >
+              {t.tools.length > 0 && (
+                <div className="turn-tools">
+                  {t.tools.map((tool) => (
+                    <ReaderToolCard key={tool.callId} tool={tool} onJump={onJump} />
+                  ))}
+                </div>
+              )}
 
-              {(t.status === 'retrieving' || t.status === 'streaming') &&
-                !t.answer && (
-                  <div className="turn-status">
-                    <span className="turn-dot" />
-                    {t.status === 'retrieving' ? '检索论文并思考中…' : '正在生成回答…'}
-                  </div>
-                )}
-
-              {t.sources.length > 0 && (
-                <div className="turn-sources">
-                  <span className="turn-sources-label">出处</span>
-                  {t.sources.slice(0, 8).map((s, i) =>
-                    s.type === 'web' ? (
-                      <a
-                        key={`w-${i}`}
-                        className="src-chip src-web"
-                        href={s.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        title={s.title}
-                      >
-                        {s.label} 网页
-                      </a>
-                    ) : s.type === 'ref' ? (
-                      <span className="src-chip src-ref" key={`r-${i}`} title={s.title}>
-                        {s.label} 文献
-                      </span>
-                    ) : (
-                      <button
-                        key={`p-${i}`}
-                        className="src-chip src-paper"
-                        onClick={() => s.blockId && onJump?.(s.blockId)}
-                        title={s.snippet}
-                      >
-                        {s.label}
-                      </button>
-                    ),
+              {t.answer && (
+                <div className="turn-text">
+                  {t.demo ? (
+                    <div className="turn-plain">{t.answer}</div>
+                  ) : (
+                    <Markdown
+                      text={
+                        t.status === 'streaming'
+                          ? `${balanceMarkdown(t.answer)} ▍`
+                          : t.status === 'stopped'
+                            ? balanceMarkdown(t.answer)
+                            : t.answer
+                      }
+                    />
                   )}
                 </div>
               )}
 
+              {(t.status === 'retrieving' || t.status === 'streaming') &&
+                !t.answer && (
+                  <p className="turn-pending">
+                    {t.status === 'retrieving'
+                      ? useWeb
+                        ? '正在检索论文并联网搜索…'
+                        : '正在检索论文…'
+                      : '正在生成回答…'}
+                  </p>
+                )}
+
               {t.status === 'error' && (
-                <div className="turn-error">
+                <p className="turn-error">
                   {t.error ? `回答中断：${t.error}` : '回答中断'}
-                </div>
+                </p>
               )}
 
-              {t.status === 'stopped' && <div className="turn-note">已停止生成</div>}
+              {t.status === 'stopped' && (
+                <footer className="turn-foot">
+                  <span>已停止</span>
+                  {t.tools.length > 0 && <em>· {t.tools.length} 次工具调用</em>}
+                </footer>
+              )}
 
-              {t.status === 'done' && t.latency !== undefined && t.latency > 0 && (
-                <div className="turn-meta">
-                  用时 {t.latency.toFixed(1)}s
-                  {t.usedWeb ? ' · 已联网检索' : ''}
-                </div>
+              {t.status === 'done' && (
+                <footer className="turn-foot">
+                  <span>已完成</span>
+                  {t.latency !== undefined && t.latency > 0 && (
+                    <em>· 用时 {t.latency.toFixed(1)}s</em>
+                  )}
+                  {t.tools.length > 0 && (
+                    <em>· {t.tools.length} 次工具调用</em>
+                  )}
+                  <em>{webMetaText(t.webStatus, t.usedWeb)}</em>
+                </footer>
               )}
             </div>
           </article>
@@ -949,7 +1071,10 @@ export function ChatPanel({
               </button>
             )}
           </div>
-          <label className="web-toggle">
+          <label
+            className="web-toggle"
+            title="论文里没有写的内容，会尝试从公开网络检索后回答"
+          >
             <input
               type="checkbox"
               checked={useWeb}

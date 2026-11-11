@@ -56,7 +56,7 @@ PAPEREAD_MODEL=deepseek-chat
 
 | 变量 | 作用 |
 |---|---|
-| `TAVILY_API_KEY` | 开启问答的联网检索；不填则只在论文与引用文献内回答 |
+| `TAVILY_API_KEY` | 可选。配置后联网检索优先走 Tavily；不填时自动改用免密钥的 360 搜索 + OpenAlex，联网问答仍然可用 |
 | `PAPEREAD_PORT` | 端口，默认 8010 |
 | `PAPEREAD_DATA` | 数据目录，默认 `./data` |
 | `PAPEREAD_MOCK=1` | 假翻译，用于验证流程不花钱 |

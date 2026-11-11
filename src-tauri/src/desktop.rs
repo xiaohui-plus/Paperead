@@ -459,6 +459,47 @@ async fn check_updates(app: AppHandle, interactive: bool) {
 }
 
 #[cfg(windows)]
+fn update_temp_dirs(app: &AppHandle) -> Vec<std::path::PathBuf> {
+    let primary = paths::ensure_data_dir(app).join("update-temp");
+    let system = std::env::temp_dir().join("paperead-update");
+    if system == primary {
+        vec![primary]
+    } else {
+        vec![primary, system]
+    }
+}
+
+/// 依次尝试数据目录与系统临时目录，避免某一个目录被 ACL/杀软限制时整条更新链失败。
+#[cfg(windows)]
+fn write_update_files(
+    app: &AppHandle,
+    version: &str,
+    bytes: &[u8],
+) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    let mut errors: Vec<String> = Vec::new();
+    for dir in update_temp_dirs(app) {
+        if let Err(error) = std::fs::create_dir_all(&dir) {
+            errors.push(format!("创建 {} 失败：{error}", dir.display()));
+            continue;
+        }
+        let installer = dir.join(format!("paperead-{version}-setup.exe"));
+        // 上一次残留的安装包可能仍被安装器占用，先尽力删掉再写。
+        let _ = std::fs::remove_file(&installer);
+        match std::fs::write(&installer, bytes) {
+            Ok(()) => return Ok((dir, installer)),
+            Err(error) => errors.push(format!("写入 {} 失败：{error}", installer.display())),
+        }
+    }
+    let message = format!(
+        "写入更新包失败（已尝试 {} 个目录）：{}",
+        errors.len(),
+        errors.join("；")
+    );
+    paths::log_line(app, &message);
+    Err(message)
+}
+
+#[cfg(windows)]
 fn install_downloaded_update(
     app: &AppHandle,
     version: &str,
@@ -466,10 +507,7 @@ fn install_downloaded_update(
 ) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
 
-    let temp_dir = paths::ensure_data_dir(app).join("update-temp");
-    std::fs::create_dir_all(&temp_dir).map_err(|error| format!("创建更新目录失败：{error}"))?;
-    let installer = temp_dir.join(format!("paperead-{version}-setup.exe"));
-    std::fs::write(&installer, bytes).map_err(|error| format!("写入更新包失败：{error}"))?;
+    let (temp_dir, installer) = write_update_files(app, version, bytes)?;
 
     let cmd = std::env::var("SystemRoot")
         .map(|root| format!("{root}\\System32\\cmd.exe"))
@@ -482,20 +520,37 @@ fn install_downloaded_update(
         temp_dir.display(),
         installer.display()
     );
-    std::fs::write(&batch, batch_content).map_err(|error| format!("写入更新脚本失败：{error}"))?;
+    if let Err(error) = std::fs::write(&batch, batch_content) {
+        let message = format!("写入更新脚本失败：{error}");
+        paths::log_line(app, &message);
+        return Err(message);
+    }
     std::process::Command::new(cmd)
         .env("TEMP", &temp_dir)
         .env("TMP", &temp_dir)
         .args(["/C", &batch.to_string_lossy()])
         .creation_flags(0x0800_0000)
         .spawn()
-        .map_err(|error| format!("启动更新安装器失败：{error}"))?;
+        .map_err(|error| {
+            let message = format!("启动更新安装器失败：{error}");
+            paths::log_line(app, &message);
+            message
+        })?;
 
     paths::log_line(
         app,
-        &format!("update installer scheduled: {}", installer.display()),
+        &format!(
+            "update installer scheduled: {} (temp={})",
+            installer.display(),
+            temp_dir.display()
+        ),
     );
-    app.exit(0);
+    // 先让命令返回、前端拿到成功结果；稍后再退出，避免「应用正在退出」被误判成更新失败。
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        handle.exit(0);
+    });
     Ok(())
 }
 

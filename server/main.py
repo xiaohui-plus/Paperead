@@ -23,6 +23,7 @@ import os
 import re
 import socket
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
@@ -46,6 +47,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from paperead import __version__
+from paperead import llm as llm_mod
 from paperead.env import env
 from paperead.formula import (
     read_cached_latex,
@@ -62,6 +64,7 @@ from paperead.tutor.guide import GUIDE_VERSION
 from paperead.tutor import memory as memory_engine
 from paperead.tutor import qa as qa_engine
 from paperead.tutor import web as web_search
+from paperead.tutor.agent import AgentTool, ToolOutcome, run_agent
 from paperead.tutor.citations import find as find_citations, resolve as resolve_citations
 from paperead.tutor.lineage import LINEAGE_VERSION, build_lineage
 from paperead.tutor.provenance import enrich as enrich_provenance
@@ -1524,6 +1527,10 @@ class _AskPrep:
     context: str
     sources: list[dict]
     used_web: bool
+    # 联网过程的结构化结果：前端据此显示「搜了什么/搜到几条/为什么没结果」
+    web_status: dict
+    # 供研究页同款工具卡片渲染的调用记录（paper_search / web_search）
+    tools: list[dict]
 
 
 def _require_ask_ready(paper_id: str, question: str) -> None:
@@ -1572,12 +1579,30 @@ def _seed_memory(mem: memory_engine.MemoryStore, paper_id: str) -> None:
     mem.seed(paper_id, title=row.get("title", ""), domains=domains)
 
 
+def _web_status_from_sources(
+    sources: list[dict], used_web: bool, attempted: bool
+) -> dict:
+    """缓存回放时没有原始 webStatus，从出处里的 web 条目还原一个等价结构。"""
+    web_sources = [s for s in (sources or []) if s.get("type") == "web"]
+    engines = sorted({s.get("engine") for s in web_sources if s.get("engine")})
+    return {
+        "attempted": bool(attempted or used_web),
+        "engine": engines[0] if engines else "",
+        "engines": engines,
+        "count": len(web_sources),
+    }
+
+
 def _cached_answer(user_msg: dict, cached: dict) -> dict:
     """同一个 client_id 重试时，直接回放已落盘的答案。"""
+    sources = cached.get("sources") or []
+    used_web = bool(cached.get("used_web"))
     return {
         "answer": cached.get("text", ""),
-        "sources": cached.get("sources") or [],
-        "usedWeb": bool(cached.get("used_web")),
+        "sources": sources,
+        "usedWeb": used_web,
+        "webStatus": _web_status_from_sources(sources, used_web, attempted=used_web),
+        "tools": cached.get("tools") or [],
         "latency": cached.get("latency", 0.0),
         "user_message_id": user_msg["id"],
         "answer_message_id": cached["id"],
@@ -1753,10 +1778,34 @@ def _block_context(paper_id: str, block_ids: list[str]) -> str:
     )
 
 
-async def _prepare_ask(
-    paper_id: str, req: AskReq, standalone: str, expanded: list[str]
-) -> _AskPrep:
-    """检索论文、必要时联网，返回拼好的材料与可点击的出处。"""
+async def _prepare_ask_events(
+    paper_id: str,
+    req: AskReq,
+    standalone: str,
+    expanded: list[str],
+    web_task: asyncio.Task | None = None,
+) -> AsyncIterator[tuple[str, object]]:
+    """检索过程以事件形式产出，供前端渲染成研究页同款的工具卡片。
+
+    产出 `("tool", {...})` 若干次（start / end），最后产出 `("prep", _AskPrep)`。
+    工具事件的结构与研究 agent 的 tool.start / tool.end 对齐：
+    callId / name / status / input / items / meta。
+    """
+    tools: list[dict] = []
+
+    paper_started = time.time()
+    yield (
+        "tool",
+        {
+            "type": "tool",
+            "phase": "start",
+            "callId": "paper_search",
+            "name": "paper_search",
+            "input": {"query": standalone, "keywords": expanded[:8]},
+            "startedAt": paper_started,
+        },
+    )
+
     blocks = store.read_blocks(paper_id) or []
     objs = [Block(**{**b, "bbox": tuple(b["bbox"])}) for b in blocks]
     docs, en, zh = qa_engine.build_index(objs)
@@ -1765,13 +1814,7 @@ async def _prepare_ask(
     hits = qa_engine.retrieve(docs, en, zh, query, k=6)
     top_score = hits[0][1] if hits else 0.0
 
-    web_results: list[dict] = []
-    if req.web and qa_engine.needs_external(standalone, top_score):
-        # 用英文关键词去搜学术内容，中文原问在通用搜索里几乎搜不到论文
-        web_query = " ".join(expanded[:6]) if expanded else standalone
-        web_results = await web_search.search(web_query, 4)
-
-    # 命中的段落里带的引用，作为补充材料
+    # 命中的段落里带的引用，作为补充材料；也一并放进检索卡片的 OUT 列表
     references = parse_references(objs)
     refs: dict[int, str] = {}
     for doc, _ in hits[:3]:
@@ -1780,6 +1823,136 @@ async def _prepare_ask(
         if len(refs) >= 4:
             break
     refs = dict(list(refs.items())[:4])
+
+    paper_items = [
+        {
+            "label": f"P{doc.page}",
+            "page": doc.page,
+            "blockId": doc.block_id,
+            "snippet": (doc.translated or doc.text)[:120],
+        }
+        for doc, score in hits
+        if score > 0
+    ]
+    paper_items.extend(
+        {"label": f"R{idx}", "title": title, "snippet": "论文参考文献"}
+        for idx, title in refs.items()
+    )
+    if hits:
+        pages = "/".join(
+            list(dict.fromkeys(str(doc.page) for doc, score in hits[:6] if score > 0))[:4]
+        )
+        paper_summary = f"命中 {len(hits)} 段 · 第 {pages} 页" if pages else "论文里没有直接匹配"
+    else:
+        paper_summary = "论文里没有直接匹配"
+    paper_tool = {
+        "type": "tool",
+        "phase": "end",
+        "callId": "paper_search",
+        "name": "paper_search",
+        "status": "done",
+        "summary": paper_summary,
+        "items": paper_items,
+        "meta": {
+            "elapsedMs": int((time.time() - paper_started) * 1000),
+            "hits": len(paper_items),
+        },
+        "startedAt": paper_started,
+        "endedAt": time.time(),
+    }
+    tools.append(paper_tool)
+    yield ("tool", paper_tool)
+
+    web_results: list[dict] = []
+    web_status = {"attempted": False, "engine": "", "engines": [], "count": 0}
+    web_started = time.time()
+    web_failed = False
+    try:
+        if req.web:
+            web_status["attempted"] = True
+            yield (
+                "tool",
+                {
+                    "type": "tool",
+                    "phase": "start",
+                    "callId": "web_search",
+                    "name": "web_search",
+                    "input": {"query": standalone, "keywords": expanded[:6]},
+                    "startedAt": web_started,
+                },
+            )
+            try:
+                base = await web_task if web_task is not None else await web_search.search(
+                    standalone, 4
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                log.info("联网检索失败：%s", e)
+                base = []
+                web_failed = True
+            base = base or []
+            web_results.extend(base)
+
+            # 论文没直接写、或概念题、或基础结果太少 → 扩大检索
+            need_more = qa_engine.needs_external(standalone, top_score)
+            if need_more or len(web_results) < 2:
+                zh_words = [w for w in expanded if re.search(r"[\u4e00-\u9fff]", w)]
+                en_words = [w for w in expanded if not re.search(r"[\u4e00-\u9fff]", w)]
+                extra_queries = [standalone]
+                # 中文关键词拼成一条更具体的查询；纯英文串在中文搜索里常被拆坏，只给学术源
+                if zh_words and zh_words[0] != standalone:
+                    extra_queries.append(" ".join(zh_words[:8]))
+                en_query = " ".join(en_words[:6])
+                extra = await web_search.search_many(
+                    extra_queries,
+                    limit=4,
+                    total_limit=5,
+                    academic=need_more or len(web_results) < 2,
+                    academic_query=en_query or " ".join(expanded[:6]) or standalone,
+                )
+                web_results = web_search.dedupe([*base, *extra])
+
+            web_results = web_results[:6]
+            engines = sorted({w.get("engine", "") for w in web_results if w.get("engine")})
+            web_status["count"] = len(web_results)
+            web_status["engines"] = engines
+            web_status["engine"] = engines[0] if engines else ""
+
+            web_items = [
+                {
+                    "label": f"W{i}",
+                    "title": item.get("title", ""),
+                    "url": item.get("url", ""),
+                    "snippet": (item.get("content") or "")[:120],
+                    "engine": item.get("engine", ""),
+                }
+                for i, item in enumerate(web_results, 1)
+            ]
+            web_tool = {
+                "type": "tool",
+                "phase": "end",
+                "callId": "web_search",
+                "name": "web_search",
+                "status": "error" if web_failed and not web_items else "done",
+                "summary": (
+                    f"联网检索 {len(web_items)} 条" if web_items else "未获取到网络结果"
+                ),
+                "items": web_items,
+                "meta": {
+                    "elapsedMs": int((time.time() - web_started) * 1000),
+                    "count": len(web_items),
+                    "engines": engines,
+                },
+                "startedAt": web_started,
+                "endedAt": time.time(),
+            }
+            tools.append(web_tool)
+            yield ("tool", web_tool)
+    finally:
+        if web_task is not None and not web_task.done():
+            web_task.cancel()
+
 
     context = qa_engine.build_context(hits, refs, web_results, docs)
     attachment_block = _attachment_context(paper_id, req.attachments)
@@ -1807,10 +1980,448 @@ async def _prepare_ask(
         sources.append({"type": "ref", "label": f"R{idx}", "index": idx, "title": title})
     for i, w in enumerate(web_results, 1):
         sources.append(
-            {"type": "web", "label": f"W{i}", "title": w["title"], "url": w["url"]}
+            {
+                "type": "web",
+                "label": f"W{i}",
+                "title": w["title"],
+                "url": w["url"],
+                "engine": w.get("engine", ""),
+                "snippet": (w.get("content") or "")[:90],
+            }
         )
 
-    return _AskPrep(context=context, sources=sources, used_web=bool(web_results))
+    yield (
+        "prep",
+        _AskPrep(
+            context=context,
+            sources=sources,
+            used_web=bool(web_results),
+            web_status=web_status,
+            tools=tools,
+        ),
+    )
+
+
+async def _prepare_ask(
+    paper_id: str,
+    req: AskReq,
+    standalone: str,
+    expanded: list[str],
+    web_task: asyncio.Task | None = None,
+) -> _AskPrep:
+    """非流式调用：把事件流跑完，只取最终结果。"""
+    async for kind, payload in _prepare_ask_events(
+        paper_id, req, standalone, expanded, web_task
+    ):
+        if kind == "prep":
+            return payload  # type: ignore[return-value]
+    raise RuntimeError("检索过程没有产出结果")
+
+
+
+# ── 阅读问答 agent：模型自主调用 paper_search / web_search / web_fetch ──
+
+_TUTOR_TOOLS = [
+    AgentTool(
+        name="paper_search",
+        description=(
+            "在用户正在阅读的论文里检索相关段落，返回页码、段落 id 与原文/译文片段。"
+            "任何关于这篇论文内容的问题都先用它。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "检索词或问题，中文、英文均可",
+                }
+            },
+            "required": ["query"],
+        },
+    ),
+    AgentTool(
+        name="web_search",
+        description=(
+            "联网搜索公开网页与学术源。只返回标题、URL 和摘要；"
+            "需要原理、公式、推导、细节时继续用 web_fetch 读取具体网页。"
+            "论文没有写、或需要领域外/最新知识时使用。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "检索式"},
+                "max_results": {
+                    "type": "integer",
+                    "description": "返回条数，默认 5",
+                    "minimum": 1,
+                    "maximum": 8,
+                },
+            },
+            "required": ["query"],
+        },
+    ),
+    AgentTool(
+        name="web_fetch",
+        description=(
+            "读取指定网页的正文（转成 Markdown 文本，约 2400 字）。"
+            "从 web_search 的结果里挑值得细读的链接；抓不到正文时会返回错误，"
+            "此时改用搜索摘要回答或换一个来源。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "http(s) 网页地址"}
+            },
+            "required": ["url"],
+        },
+    ),
+]
+
+
+def _tutor_agent_system(paper_id: str, req: AskReq, memory: str = "") -> str:
+    paper = store.get(paper_id) or {}
+    title = paper.get("title") or "（未知标题）"
+    authors = (paper.get("authors") or "").strip()
+    pages = paper.get("pages") or ""
+    meta = title
+    if authors:
+        meta += f" · {authors}"
+    if pages:
+        meta += f" · {pages} 页"
+
+    lines = [
+        "你是论文助教，可以调用工具检索后再回答。",
+        "",
+        "工具使用：",
+        "1. 关于论文内容的问题，先用 paper_search 在论文里找依据；",
+    ]
+    if req.web:
+        lines += [
+            "2. 论文没写、或需要外部/最新知识时，用 web_search；",
+            "3. web_search 只给摘要；需要原理、公式、细节时用 web_fetch 读取具体网页正文；",
+            "4. 不要重复搜同一内容；信息足够就停止调用工具并直接回答；最多 6 次工具调用。",
+        ]
+    else:
+        lines += [
+            "2. 用户已关闭联网检索，不要请求 web_search / web_fetch；论文材料不足时，"
+            "用领域常识回答并标注「（通识）」。",
+            "3. 不要重复搜同一内容；信息足够就停止调用工具并直接回答；最多 6 次工具调用。",
+        ]
+    lines += [
+        "",
+        "回答规则：",
+        "- 中文，简洁、分点、不要客套；",
+        "- 论文依据标 [P页码]，网络依据标 [W序号] 或直接给 Markdown 链接，"
+        "自己的领域常识标「（通识）」；",
+        "- 不要编造论文里没有的页码、数据、实验结论；",
+        "- 材料之间冲突时指出差异，不要强行统一；",
+        "- 论文确实没写时不要只回一句「论文中没有提到」，用网络结果或常识给出解释。",
+        "",
+        f"【论文】{meta}",
+    ]
+    attachment_block = _attachment_context(paper_id, req.attachments)
+    if attachment_block:
+        lines += ["", attachment_block]
+    block_block = _block_context(paper_id, req.block_ids)
+    if block_block:
+        lines += ["", block_block]
+    if memory:
+        lines += ["", "【背景记忆】（只用于调整讲法，不能当作论文事实）", memory]
+    return "\n".join(lines)
+
+
+def _make_tutor_executor(req: AskReq, state: dict):
+    """把三个工具接到论文检索、联网搜索与正文抓取。"""
+
+    async def run(name: str, args: dict) -> ToolOutcome:
+        if name == "paper_search":
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return ToolOutcome(
+                    content="query 不能为空",
+                    status="error",
+                    error="query 不能为空",
+                    summary="参数错误",
+                )
+            hits = qa_engine.retrieve(state["docs"], state["en"], state["zh"], query, 6)
+            chunks: list[str] = []
+            items: list[dict] = []
+            seen: set[str] = set()
+            for doc, score in hits:
+                if score <= 0:
+                    continue
+                label = f"P{doc.page}"
+                chunks.append(f"[{label}] {(doc.translated or doc.text)[:800]}")
+                if doc.block_id not in seen:
+                    seen.add(doc.block_id)
+                    item = {
+                        "label": label,
+                        "page": doc.page,
+                        "blockId": doc.block_id,
+                        "snippet": (doc.translated or doc.text)[:120],
+                    }
+                    items.append(item)
+                    state["paper_items"].append(item)
+            if not chunks:
+                return ToolOutcome(
+                    content="论文里没有检索到相关段落。",
+                    summary="论文里没有直接匹配",
+                )
+            pages = "/".join(
+                list(dict.fromkeys(str(item["page"]) for item in items))[:4]
+            )
+            return ToolOutcome(
+                content="\n\n".join(chunks),
+                summary=f"命中 {len(items)} 段 · 第 {pages} 页",
+                items=items,
+                meta={"hits": len(items)},
+            )
+
+        if name == "web_search":
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return ToolOutcome(
+                    content="query 不能为空",
+                    status="error",
+                    error="query 不能为空",
+                    summary="参数错误",
+                )
+            try:
+                limit = int(args.get("max_results") or 5)
+            except (TypeError, ValueError):
+                limit = 5
+            limit = max(1, min(limit, 8))
+
+            try:
+                results = await web_search.search_many(
+                    [query], limit=limit, total_limit=limit
+                )
+                if len(results) < 2:
+                    results = web_search.dedupe(
+                        [*results, *(await web_search.search_academic(query, 2))]
+                    )
+            except Exception as e:  # noqa: BLE001
+                log.info("联网检索失败：%s", e)
+                return ToolOutcome(
+                    content=f"联网检索失败：{e}",
+                    status="error",
+                    error=str(e)[:200],
+                    summary="联网检索失败",
+                )
+            results = results[:limit]
+            if not results:
+                return ToolOutcome(
+                    content="联网检索没有返回结果。可以换一个检索式，或基于已有材料与常识回答。",
+                    summary="未获取到网络结果",
+                    meta={"count": 0, "engines": []},
+                )
+
+            new_items: list[dict] = []
+            for item in results:
+                url = (item.get("url") or "").strip()
+                if not url or url in state["web_seen"]:
+                    continue
+                state["web_seen"].add(url)
+                state["web"].append(item)
+                new_items.append(
+                    {
+                        "label": f"W{len(state['web'])}",
+                        "title": item.get("title", ""),
+                        "url": url,
+                        "snippet": (item.get("content") or "")[:120],
+                        "engine": item.get("engine", ""),
+                    }
+                )
+            if not new_items:
+                return ToolOutcome(
+                    content="这些结果刚才已经搜过，没有新的来源。",
+                    summary="没有新的网络结果",
+                )
+            text = "\n\n".join(
+                f"[{item['label']}] {item['title']}（{item['url']}）— {item['snippet']}"
+                for item in new_items
+            )
+            engines = sorted(
+                {item["engine"] for item in new_items if item.get("engine")}
+            )
+            return ToolOutcome(
+                content=text,
+                summary=f"{len(new_items)} 条"
+                + (f" · {' / '.join(engines)}" if engines else ""),
+                items=new_items,
+                meta={"count": len(new_items), "engines": engines},
+            )
+
+        if name == "web_fetch":
+            url = str(args.get("url") or "").strip()
+            got = await web_search.fetch(url, 2400)
+            title = got.get("title") or url
+            if got.get("error"):
+                return ToolOutcome(
+                    content=(
+                        f"抓取失败（{got['error']}）。不要重试同一个地址，"
+                        "改用搜索摘要回答，或换一个来源。"
+                    ),
+                    status="error",
+                    error=str(got["error"])[:200],
+                    summary=str(got["error"])[:40],
+                    items=[{"label": "URL", "title": title, "url": url}],
+                )
+            body = got.get("content") or ""
+            return ToolOutcome(
+                content=(
+                    f"【网页】{title}\n{url}\n\n{body}"
+                    + ("\n…（正文已截断）" if got.get("truncated") else "")
+                ),
+                summary=f"正文 {len(body)} 字",
+                items=[
+                    {
+                        "label": "URL",
+                        "title": title,
+                        "url": url,
+                        "snippet": body[:120],
+                    }
+                ],
+                meta={"chars": len(body), "statusCode": got.get("statusCode")},
+            )
+
+        return ToolOutcome(
+            content=f"未知工具：{name}",
+            status="error",
+            error="未知工具",
+            summary="未知工具",
+        )
+
+    return run
+
+
+async def _ask_agent_events(
+    paper_id: str,
+    req: AskReq,
+    standalone: str,
+    recent: list[dict],
+    memory: str = "",
+) -> AsyncIterator[tuple[str, object]]:
+    """产出 `("sse", payload)` 与最后的 `("result", {...})`。"""
+    blocks = store.read_blocks(paper_id) or []
+    objs = [Block(**{**b, "bbox": tuple(b["bbox"])}) for b in blocks]
+    docs, en, zh = qa_engine.build_index(objs)
+    state = {
+        "docs": docs,
+        "en": en,
+        "zh": zh,
+        "web": [],
+        "web_seen": set(),
+        "paper_items": [],
+    }
+    executor = _make_tutor_executor(req, state)
+    allowed_tools = (
+        _TUTOR_TOOLS
+        if req.web
+        else [tool for tool in _TUTOR_TOOLS if tool.name == "paper_search"]
+    )
+    history = [
+        {
+            "role": "user" if m.get("role") == "user" else "assistant",
+            "content": m.get("text", ""),
+        }
+        for m in (recent or [])
+    ]
+
+    tools: list[dict] = []
+    started: dict[str, float] = {}
+    final_text = ""
+
+    async for kind, payload in run_agent(
+        system=_tutor_agent_system(paper_id, req, memory),
+        question=standalone,
+        tools=allowed_tools,
+        executor=executor,
+        history=history,
+    ):
+        if kind == "tool_start":
+            call_id = str(payload["callId"])  # type: ignore[index]
+            started[call_id] = time.time()
+            yield (
+                "sse",
+                {
+                    "type": "tool",
+                    "phase": "start",
+                    "callId": call_id,
+                    "name": payload["name"],  # type: ignore[index]
+                    "input": payload["input"],  # type: ignore[index]
+                    "startedAt": started[call_id],
+                },
+            )
+        elif kind == "tool_end":
+            call_id = str(payload["callId"])  # type: ignore[index]
+            event = {
+                "type": "tool",
+                "phase": "end",
+                "callId": call_id,
+                "name": payload["name"],  # type: ignore[index]
+                "status": payload["status"],  # type: ignore[index]
+                "summary": payload["summary"],  # type: ignore[index]
+                "items": payload.get("items") or [],  # type: ignore[union-attr]
+                "error": payload.get("error") or "",  # type: ignore[union-attr]
+                "meta": payload.get("meta") or {},  # type: ignore[union-attr]
+                "startedAt": started.get(call_id, time.time()),
+                "endedAt": time.time(),
+            }
+            tools.append(event)
+            yield ("sse", event)
+        elif kind == "text":
+            yield ("sse", {"type": "delta", "text": payload})
+        elif kind == "final":
+            final_text = str(payload or "")
+
+    paper_items: list[dict] = []
+    seen_blocks: set[str] = set()
+    for item in state["paper_items"]:
+        block_id = item.get("blockId") or ""
+        if not block_id or block_id in seen_blocks:
+            continue
+        seen_blocks.add(block_id)
+        paper_items.append(
+            {
+                "type": "paper",
+                "label": item["label"],
+                "page": item.get("page"),
+                "blockId": block_id,
+                "snippet": item.get("snippet", ""),
+            }
+        )
+    web_items = state["web"][:6]
+    sources = paper_items[:8]
+    for i, item in enumerate(web_items, 1):
+        sources.append(
+            {
+                "type": "web",
+                "label": f"W{i}",
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+                "engine": item.get("engine", ""),
+                "snippet": (item.get("content") or "")[:90],
+            }
+        )
+    engines = sorted({w.get("engine", "") for w in web_items if w.get("engine")})
+    web_status = {
+        "attempted": bool(web_items),
+        "engine": engines[0] if engines else "",
+        "engines": engines,
+        "count": len(web_items),
+    }
+    yield (
+        "result",
+        {
+            "answer": final_text,
+            "sources": sources,
+            "tools": tools,
+            "web_status": web_status,
+        },
+    )
+
+
 
 
 @app.post("/api/papers/{paper_id}/ask")
@@ -1834,15 +2445,36 @@ async def ask_paper(paper_id: str, req: AskReq) -> dict:
             return _cached_answer(user_msg, cached)
 
         recent = mem.recent_before(paper_id, user_msg["id"], 6)
-        standalone, expanded = await qa_engine.rewrite_and_expand(req.question, recent)
+        # 联网检索与问题改写并行，几乎不额外增加等待时间
+        web_task = (
+            asyncio.create_task(web_search.search(req.question, 4)) if req.web else None
+        )
+        try:
+            standalone, expanded = await qa_engine.rewrite_and_expand(req.question, recent)
+        except BaseException:
+            if web_task is not None:
+                web_task.cancel()
+            raise
         brief = mem.build_brief(paper_id, standalone, exclude_message_id=user_msg["id"])
 
-        prep = await _prepare_ask(paper_id, req, standalone, expanded)
-        text = await qa_engine.answer(standalone, prep.context, brief, recent)
+        prep = await _prepare_ask(paper_id, req, standalone, expanded, web_task)
+        text = await qa_engine.answer(
+            standalone,
+            prep.context,
+            brief,
+            recent,
+            web_empty=req.web and not prep.used_web,
+        )
 
         latency = round(time.time() - t0, 1)
         ai_msg = mem.finish_answer(
-            paper_id, user_msg["id"], text, prep.sources, prep.used_web, latency
+            paper_id,
+            user_msg["id"],
+            text,
+            prep.sources,
+            prep.used_web,
+            latency,
+            tools=prep.tools,
         )
         _schedule_writer(mem, paper_id, req.question, text, standalone)
 
@@ -1850,6 +2482,8 @@ async def ask_paper(paper_id: str, req: AskReq) -> dict:
             "answer": ai_msg.get("text", text),
             "sources": prep.sources,
             "usedWeb": prep.used_web,
+            "webStatus": prep.web_status,
+            "tools": prep.tools,
             "latency": latency,
             "user_message_id": user_msg["id"],
             "answer_message_id": ai_msg["id"],
@@ -1886,12 +2520,18 @@ async def ask_stream(paper_id: str, req: AskReq) -> StreamingResponse:
         _release_claim(claim)
 
         async def cached_gen():
-            yield _sse({"type": "status", "stage": "retrieving"})
+            yield _sse({"type": "status", "stage": "retrieving", "web": req.web})
+            sources = cached.get("sources") or []
+            used_web = bool(cached.get("used_web"))
             yield _sse(
                 {
                     "type": "sources",
-                    "sources": cached.get("sources") or [],
-                    "usedWeb": bool(cached.get("used_web")),
+                    "sources": sources,
+                    "usedWeb": used_web,
+                    "webStatus": _web_status_from_sources(
+                        sources, used_web, attempted=used_web
+                    ),
+                    "tools": cached.get("tools") or [],
                 }
             )
             yield _sse({"type": "delta", "text": cached.get("text", "")})
@@ -1909,24 +2549,111 @@ async def ask_stream(paper_id: str, req: AskReq) -> StreamingResponse:
 
     async def gen():
         t0 = time.time()
+        web_task: asyncio.Task | None = None
         try:
-            yield _sse({"type": "status", "stage": "retrieving"})
+            yield _sse({"type": "status", "stage": "retrieving", "web": req.web})
             recent = mem.recent_before(paper_id, user_msg["id"], 6)
-            standalone, expanded = await qa_engine.rewrite_and_expand(
-                req.question, recent
+            # agent 模式由模型自己决定搜什么；固定管道才预启动搜索并并行改写
+            use_agent = (
+                env("PAPEREAD_TUTOR_AGENT", "1") != "0" and llm_mod.supports_tools()
             )
+            web_task = (
+                asyncio.create_task(web_search.search(req.question, 4))
+                if req.web and not use_agent
+                else None
+            )
+            try:
+                standalone, expanded = await qa_engine.rewrite_and_expand(
+                    req.question, recent
+                )
+            except BaseException:
+                if web_task is not None:
+                    web_task.cancel()
+                raise
             brief = mem.build_brief(
                 paper_id, standalone, exclude_message_id=user_msg["id"]
             )
-            prep = await _prepare_ask(paper_id, req, standalone, expanded)
+
+            # 模型支持 tools 时走 agent：由模型决定搜什么、要不要抓网页正文
+            if use_agent:
+                emitted = False
+                result: dict | None = None
+                try:
+                    async for kind, payload in _ask_agent_events(
+                        paper_id, req, standalone, recent, brief
+                    ):
+                        if kind == "sse":
+                            emitted = True
+                            yield _sse(payload)  # type: ignore[arg-type]
+                        else:
+                            result = payload  # type: ignore[assignment]
+                    if result is None:
+                        raise RuntimeError("agent 没有产出结果")
+                    text = str(result.get("answer") or "").strip()
+                    if not text:
+                        raise RuntimeError(
+                            "模型没有返回内容（可能 max_tokens 被 reasoning 耗尽）"
+                        )
+                    latency = round(time.time() - t0, 1)
+                    sources = result.get("sources") or []
+                    web_status = result.get("web_status") or {}
+                    yield _sse(
+                        {
+                            "type": "sources",
+                            "sources": sources,
+                            "usedWeb": bool(web_status.get("count")),
+                            "webStatus": web_status,
+                            "tools": result.get("tools") or [],
+                        }
+                    )
+                    mem.finish_answer(
+                        paper_id,
+                        user_msg["id"],
+                        text,
+                        sources,
+                        bool(web_status.get("count")),
+                        latency,
+                        tools=result.get("tools") or [],
+                    )
+                    _schedule_writer(mem, paper_id, req.question, text, standalone)
+                    yield _sse({"type": "done", "latency": latency})
+                    return
+                except Exception as e:  # noqa: BLE001
+                    # 已经吐出内容就不能重跑，否则前端会看到两段回答
+                    if emitted:
+                        raise
+                    log.info("agent 工具模式不可用，回退固定检索：%s", e)
+
+            prep: _AskPrep | None = None
+            async for kind, payload in _prepare_ask_events(
+                paper_id, req, standalone, expanded, web_task
+            ):
+                if kind == "tool":
+                    yield _sse(payload)  # type: ignore[arg-type]
+                else:
+                    prep = payload  # type: ignore[assignment]
+            web_task = None
+            if prep is None:
+                raise RuntimeError("检索过程没有产出结果")
+
             yield _sse(
-                {"type": "sources", "sources": prep.sources, "usedWeb": prep.used_web}
+                {
+                    "type": "sources",
+                    "sources": prep.sources,
+                    "usedWeb": prep.used_web,
+                    "webStatus": prep.web_status,
+                    "tools": prep.tools,
+                }
             )
 
             parts: list[str] = []
             visible = 0
             async for piece in qa_engine.answer_stream(
-                standalone, prep.context, brief, recent
+                standalone,
+                prep.context,
+                brief,
+                recent,
+                web_empty=req.web and not prep.used_web,
             ):
                 if not piece:
                     continue
@@ -1940,7 +2667,13 @@ async def ask_stream(paper_id: str, req: AskReq) -> StreamingResponse:
             text = "".join(parts)
             latency = round(time.time() - t0, 1)
             mem.finish_answer(
-                paper_id, user_msg["id"], text, prep.sources, prep.used_web, latency
+                paper_id,
+                user_msg["id"],
+                text,
+                prep.sources,
+                prep.used_web,
+                latency,
+                tools=prep.tools,
             )
             _schedule_writer(mem, paper_id, req.question, text, standalone)
 
@@ -1952,6 +2685,8 @@ async def ask_stream(paper_id: str, req: AskReq) -> StreamingResponse:
             log.exception("流式问答失败 %s", paper_id)
             yield _sse({"type": "error", "message": str(e)[:300]})
         finally:
+            if web_task is not None and not web_task.done():
+                web_task.cancel()
             _release_claim(claim)
 
     background = BackgroundTask(_release_claim, claim) if claim is not None else None

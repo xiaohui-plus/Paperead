@@ -10,6 +10,7 @@ import {
 } from '../lib/researchApi'
 import { tourBus } from '../tour/tourBus'
 import { SidebarProjects } from './SidebarProjects'
+import { CreateProjectDialog } from './CreateProjectDialog'
 
 interface Props {
   kind: ProjectKind
@@ -46,6 +47,7 @@ export function ResearchShell({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
+  const [createOpen, setCreateOpen] = useState(false)
   const [starting, setStarting] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
 
@@ -72,24 +74,33 @@ export function ResearchShell({
   const createProject = async (
     name?: string,
     rootPath?: string,
-  ): Promise<ProjectSummary | null> => {
+  ): Promise<{ project: ProjectSummary | null; error: string }> => {
     setCreating(true)
     setError(null)
     try {
       const project = await researchApi.createProject(kind, name, rootPath)
       setProjects((prev) => [project, ...prev])
-      return project
+      return { project, error: '' }
     } catch (createError) {
-      setError(errorText(createError))
-      return null
+      const message = errorText(createError)
+      setError(message)
+      return { project: null, error: message }
     } finally {
       setCreating(false)
     }
   }
 
-  const handleCreate = async () => {
-    const project = await createProject()
-    if (project) onOpenProject(project.id, { rename: true })
+  const handleCreate = () => setCreateOpen(true)
+
+  const finishCreate = async (
+    name: string,
+    rootPath: string,
+  ): Promise<{ ok: boolean; error?: string }> => {
+    const result = await createProject(name, rootPath)
+    if (!result.project) return { ok: false, error: result.error }
+    setCreateOpen(false)
+    onOpenProject(result.project.id)
+    return { ok: true }
   }
 
   const start: StartHandler = async (text, title, projectId, rootPath = '') => {
@@ -101,8 +112,8 @@ export function ResearchShell({
       if (!target) {
         // 新项目直接用首条消息命名，避免侧栏里出现一排“新研究/新综述”。
         const created = await createProject(sessionTitle, rootPath)
-        if (!created) return
-        target = created.id
+        if (!created.project) return
+        target = created.project.id
       } else if (rootPath) {
         // 已有项目换了目录：先落盘根目录，后续会话与 agent 都在这里工作。
         const updated = await researchApi.setProjectRoot(target, rootPath)
@@ -136,7 +147,7 @@ export function ResearchShell({
             loading={loading}
             error={error}
             creating={creating}
-            onCreate={() => void handleCreate()}
+            onCreate={handleCreate}
             onOpen={(project) => onOpenProject(project.id)}
             onRetry={() => void load()}
           />
@@ -146,6 +157,12 @@ export function ResearchShell({
         {children(projects, start)}
       </main>
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <CreateProjectDialog
+        open={createOpen}
+        busy={creating}
+        onClose={() => setCreateOpen(false)}
+        onCreate={finishCreate}
+      />
     </div>
   )
 }

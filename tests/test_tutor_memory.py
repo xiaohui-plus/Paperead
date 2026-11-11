@@ -448,6 +448,7 @@ def test_history_keeps_unanswered_and_skips_orphan_answer(store):
             "sources": [],
             "usedWeb": False,
             "latency": 0.0,
+            "tools": [],
             "at": msg["at"],
         }
     ]
