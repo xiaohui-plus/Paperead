@@ -49,6 +49,9 @@ function failureHint(text?: string): string | null {
   if (/TRANSPORT|ECONN|ENOTFOUND|certificate|timed? ?out|连接模型服务失败/i.test(text)) {
     return '连不上模型服务：请检查网络、代理，以及模型配置里的 base_url 是否可用。'
   }
+  if (/STREAM_CLOSED/i.test(text)) {
+    return '模型服务没有按流式返回内容：请检查 设置 → 配置模型 里的服务地址（应填 API 地址，通常以 /v1 结尾）和模型名。'
+  }
   if (/Cannot find module|ERR_MODULE_NOT_FOUND|ENOENT|EISDIR|EACCES/i.test(text)) {
     return '研究 agent 缺少运行文件或依赖：请把上面的错误原文反馈给我们。'
   }
