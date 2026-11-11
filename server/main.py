@@ -84,7 +84,7 @@ from server.store import (
 from server.scholar_api import build_router as build_scholar_router
 from server.scholaread import build_router as build_scholaread_router
 from server.sync_package import build_router as build_sync_router
-from server import zotero_web
+from server import zotero_local, zotero_web
 from server.research import ResearchStore
 from server.research import build_router as build_research_router
 from server.research.abstracts import fill_one as fill_abstract
@@ -1153,15 +1153,41 @@ ANNOTATION_COLORS = {"yellow", "green", "blue", "pink"}
 ANNOTATION_KINDS = {"highlight", "comment"}
 
 
-class AnnotationIn(BaseModel):
-    block_id: str = Field(..., min_length=1, max_length=24)
-    source: str = Field("en", pattern="^(en|zh)$")
+class AnnotationPairIn(BaseModel):
+    """另一侧（原文 / 译文）的对应片段：同一条标注在两边都画出来。"""
+
+    source: str = Field(..., pattern="^(en|zh)$")
     start: int = Field(..., ge=0)
     end: int = Field(..., ge=0)
+    quote: str = Field("", max_length=4000)
+
+
+class PdfRectIn(BaseModel):
+    """PDF 页内选中区域，坐标相对页面宽高归一化到 0~1。
+
+    原版 PDF 视图的页图没有重排段落，标注只能锚在页 + 矩形上；
+    归一化后换缩放/换宽度仍能画回原位置。
+    """
+
+    x: float = Field(..., ge=0, le=1)
+    y: float = Field(..., ge=0, le=1)
+    w: float = Field(..., gt=0, le=1)
+    h: float = Field(..., gt=0, le=1)
+
+
+class AnnotationIn(BaseModel):
+    block_id: str = Field("", max_length=24)
+    source: str = Field("en", pattern="^(en|zh)$")
+    start: int = Field(0, ge=0)
+    end: int = Field(0, ge=0)
     quote: str = Field("", max_length=4000)
     color: str = Field("yellow", max_length=20)
     kind: str = Field("highlight", max_length=20)
     note: str = Field("", max_length=5000)
+    pair: AnnotationPairIn | None = None
+    # 原版 PDF 标注：page 从 1 起，rects 是页内归一化矩形
+    page: int | None = Field(None, ge=1, le=100000)
+    rects: list[PdfRectIn] | None = Field(None, max_length=200)
 
 
 class AnnotationPatch(BaseModel):
@@ -1170,6 +1196,7 @@ class AnnotationPatch(BaseModel):
     quote: str | None = Field(None, max_length=4000)
     start: int | None = Field(None, ge=0)
     end: int | None = Field(None, ge=0)
+    pair: AnnotationPairIn | None = None
 
 
 def _annotation_text(blocks: list[dict], block_id: str, source: str) -> str:
@@ -1187,6 +1214,19 @@ def _check_range(start: int, end: int, text: str) -> None:
         raise HTTPException(status_code=400, detail="标注范围超出段落长度")
 
 
+def _checked_pair(
+    blocks: list[dict], block_id: str, pair: AnnotationPairIn, own_source: str
+) -> dict | None:
+    """校验另一侧片段。译文还没出来时先不保存，翻译完成后由前端补齐。"""
+    if pair.source == own_source:
+        raise HTTPException(status_code=400, detail="对应片段必须来自另一侧文本")
+    text = _annotation_text(blocks, block_id, pair.source)
+    if not text:
+        return None
+    _check_range(pair.start, pair.end, text)
+    return pair.model_dump()
+
+
 @app.get("/api/papers/{paper_id}/annotations")
 async def list_annotations(paper_id: str) -> dict:
     if not store.get(paper_id):
@@ -1198,11 +1238,39 @@ async def list_annotations(paper_id: str) -> dict:
 async def add_annotation(paper_id: str, req: AnnotationIn) -> dict:
     if not store.get(paper_id):
         raise HTTPException(status_code=404, detail="论文不存在")
-    blocks = store.read_blocks(paper_id) or []
-    text = _annotation_text(blocks, req.block_id, req.source)
-    _check_range(req.start, req.end, text)
     color = req.color if req.color in ANNOTATION_COLORS else "yellow"
     kind = req.kind if req.kind in ANNOTATION_KINDS else "highlight"
+    blocks = store.read_blocks(paper_id) or []
+
+    # 原版 PDF：锚点是页码 + 归一化矩形，不走段落文本偏移校验
+    if req.page is not None:
+        rects = [rect.model_dump() for rect in (req.rects or [])]
+        if not rects:
+            raise HTTPException(status_code=400, detail="PDF 标注缺少选区")
+        if not req.quote.strip():
+            raise HTTPException(status_code=400, detail="PDF 标注没有选中文字")
+        return store.add_annotation(
+            paper_id,
+            {
+                "block_id": "",
+                "source": "en",
+                "start": 0,
+                "end": 0,
+                "quote": req.quote,
+                "color": color,
+                "kind": kind,
+                "note": req.note,
+                "pair": None,
+                "page": req.page,
+                "rects": rects,
+            },
+        )
+
+    if not req.block_id:
+        raise HTTPException(status_code=400, detail="标注缺少段落")
+    text = _annotation_text(blocks, req.block_id, req.source)
+    _check_range(req.start, req.end, text)
+    pair = _checked_pair(blocks, req.block_id, req.pair, req.source) if req.pair else None
     return store.add_annotation(
         paper_id,
         {
@@ -1214,6 +1282,7 @@ async def add_annotation(paper_id: str, req: AnnotationIn) -> dict:
             "color": color,
             "kind": kind,
             "note": req.note,
+            "pair": pair,
         },
     )
 
@@ -1227,6 +1296,23 @@ async def update_annotation(
     patch = req.model_dump(exclude_none=True)
     if "color" in patch and patch["color"] not in ANNOTATION_COLORS:
         raise HTTPException(status_code=400, detail="不支持的颜色")
+    if "pair" in patch:
+        rows = store.list_annotations(paper_id)
+        row = next((r for r in rows if r.get("id") == annotation_id), None)
+        if row is None:
+            raise HTTPException(status_code=404, detail="标注不存在")
+        pair_req = req.pair
+        if pair_req is None:
+            patch.pop("pair", None)
+        else:
+            blocks = store.read_blocks(paper_id) or []
+            pair = _checked_pair(
+                blocks, str(row.get("block_id") or ""), pair_req, str(row.get("source") or "en")
+            )
+            if pair is None:
+                patch.pop("pair", None)
+            else:
+                patch["pair"] = pair
     row = store.update_annotation(paper_id, annotation_id, patch)
     if row is None:
         raise HTTPException(status_code=404, detail="标注不存在")
@@ -2572,20 +2658,44 @@ async def zotero_probe() -> dict:
 
 @app.get("/api/zotero/status")
 async def zotero_status() -> dict:
-    """探测本机 Zotero 本地 API 是否可读。"""
+    """探测本机 Zotero：优先本地 API，失败时回退到直接读本机数据库（无需 Key）。"""
     data_dir = _zotero_data_dir()
+    local = await asyncio.to_thread(zotero_local.status)
+    local_payload = {
+        "ok": True,
+        "status": 200,
+        "version": "local-db",
+        "source": "local-db",
+        "data_dir": local.get("data_dir") or (str(data_dir) if data_dir.exists() else ""),
+        "total": int(local.get("total") or 0),
+        "error": "",
+    }
     try:
         async with _zotero_client(timeout=3) as c:
             r = await c.get(f"{ZOTERO_BASE}/items", params={"limit": 1})
     except Exception as e:
-        return {"ok": False, "error": f"连不上本机 Zotero（{e}）。{_ZOTERO_HINT}"}
+        if local.get("ok"):
+            return local_payload
+        return {
+            "ok": False,
+            "error": f"连不上本机 Zotero（{e}）。{_ZOTERO_HINT}",
+            "local_error": local.get("error", ""),
+        }
     if r.status_code == 403:
-        return {"ok": False, "status": 403, "error": _ZOTERO_HINT}
+        if local.get("ok"):
+            return local_payload
+        return {
+            "ok": False,
+            "status": 403,
+            "error": _ZOTERO_HINT,
+            "local_error": local.get("error", ""),
+        }
     return {
         "ok": r.status_code == 200,
         "status": r.status_code,
         "version": r.headers.get("Zotero-API-Version") or "",
         "data_dir": str(data_dir) if data_dir.exists() else "",
+        "source": "local-api",
     }
 
 
@@ -2612,6 +2722,29 @@ async def zotero_collections() -> dict:
     return {"collections": collections}
 
 
+def _zotero_mark_existing(items: list[dict]) -> list[dict]:
+    """给本地库回退的条目补上「已在库」和缩略图地址。"""
+    existing = store.list()
+    by_source = {
+        str(row.get("source_id")): row for row in existing if row.get("source_id")
+    }
+    by_title: dict[str, str] = {}
+    for row in existing:
+        key = _normalize_title(row.get("title"))
+        if key:
+            by_title.setdefault(key, row["id"])
+    for item in items:
+        key = str(item.get("key") or "")
+        title = str(item.get("title") or "").strip()
+        duplicate = by_source.get(f"zotero:{key}") if key else None
+        if not duplicate and title:
+            duplicate = by_title.get(_normalize_title(title))
+        item["imported"] = bool(duplicate)
+        if item.get("pdf") and not item.get("thumb_url"):
+            item["thumb_url"] = f"/api/zotero/thumb?key={quote(key)}"
+    return items
+
+
 @app.get("/api/zotero/items")
 async def zotero_items(
     collection: str = Query("", max_length=40),
@@ -2629,8 +2762,25 @@ async def zotero_items(
                 limit=limit,
                 start=start,
             )
-    except ZoteroError as e:
-        raise HTTPException(status_code=502, detail=str(e)) from e
+    except ZoteroError as api_error:
+        local_status = await asyncio.to_thread(zotero_local.status)
+        if not local_status.get("ok"):
+            raise HTTPException(status_code=502, detail=str(api_error)) from api_error
+        local_items, total = await asyncio.to_thread(
+            zotero_local.list_items,
+            q=q,
+            limit=limit,
+            start=start,
+            collection=collection.strip(),
+        )
+        items = _zotero_mark_existing(local_items)
+        return {
+            "items": items,
+            "total": total,
+            "start": start,
+            "limit": limit,
+            "has_more": start + len(items) < total,
+        }
 
     existing = store.list()
     by_id = {row["id"]: row for row in existing}
@@ -2705,10 +2855,18 @@ async def zotero_thumb(key: str = Query(..., max_length=40)) -> FileResponse:
             if not pairs or not pairs[0][1]:
                 raise HTTPException(status_code=404, detail="Zotero 条目没有 PDF")
             blob = await _zotero_file_bytes(client, pairs[0][1])
-    except HTTPException:
-        raise
-    except Exception as error:
-        raise HTTPException(status_code=502, detail=str(error)) from error
+    except Exception as api_error:
+        path = await asyncio.to_thread(zotero_local.pdf_path, key)
+        if path is None:
+            raise HTTPException(
+                status_code=404, detail="Zotero 条目没有可读取的 PDF"
+            ) from api_error
+        try:
+            blob = await asyncio.to_thread(path.read_bytes)
+        except OSError as read_error:
+            raise HTTPException(
+                status_code=404, detail="Zotero PDF 文件不可读"
+            ) from read_error
     tmp = DATA_DIR / "thumb-cache" / f"zotero-{safe}.pdf"
     tmp.parent.mkdir(parents=True, exist_ok=True)
     tmp.write_bytes(blob)
@@ -2725,6 +2883,56 @@ class ZoteroImportReq(BaseModel):
     collection: str = ""
     q: str = ""
     limit: int = Field(20, ge=1, le=100)
+
+
+async def _zotero_import_local(req: ZoteroImportReq) -> dict:
+    """无本地 API / 无 Web Key 时，直接从本机 Zotero 数据库导入。"""
+    items, total = await asyncio.to_thread(
+        zotero_local.list_items,
+        q=req.q,
+        limit=req.limit,
+        collection=req.collection.strip(),
+        keys=req.keys or None,
+    )
+    imported, skipped, errors, papers = 0, 0, [], []
+    for item in items:
+        key = str(item.get("key") or "")
+        title = str(item.get("title") or "(无标题)")
+        if not item.get("pdf"):
+            skipped += 1
+            continue
+        if key and store.find_by_source(f"zotero:{key}"):
+            skipped += 1
+            continue
+        try:
+            path = await asyncio.to_thread(zotero_local.pdf_path, key)
+            if path is None:
+                skipped += 1
+                continue
+            blob = await asyncio.to_thread(path.read_bytes)
+            meta = {
+                "source": "zotero",
+                "source_id": f"zotero:{key}",
+                "title": title,
+                "authors": str(item.get("authors") or ""),
+                "year": str(item.get("year") or ""),
+                "doi": str(item.get("doi") or ""),
+                "url": str(item.get("url") or ""),
+                "venue": str(item.get("publication") or ""),
+            }
+            row = store.add(_zotero_name(item), blob, meta)
+            asyncio.create_task(_parse_task(row["id"]))
+            papers.append(_public(row))
+            imported += 1
+        except Exception as error:
+            errors.append(f"{title}: {error}"[:160])
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "scanned": total,
+        "errors": errors[:10],
+        "papers": papers,
+    }
 
 
 @app.post("/api/zotero/import")
@@ -2762,8 +2970,8 @@ async def zotero_import(req: ZoteroImportReq) -> dict:
                     imported += 1
                 except Exception as e:
                     errors.append(f"{title}: {e}"[:160])
-    except ZoteroError as e:
-        raise HTTPException(status_code=502, detail=str(e)) from e
+    except ZoteroError:
+        return await _zotero_import_local(req)
 
     return {
         "imported": imported,
@@ -2824,8 +3032,10 @@ async def zotero_sync(req: ZoteroSyncReq) -> dict:
                 start += len(pairs)
                 if start >= total:
                     break
-    except ZoteroError as e:
-        raise HTTPException(status_code=502, detail=str(e)) from e
+    except ZoteroError:
+        return await _zotero_import_local(
+            ZoteroImportReq(collection=req.collection, limit=req.limit)
+        )
 
     return {
         "imported": imported,

@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -28,6 +30,7 @@ import { mediaUrl } from '../lib/mobile'
 import { canRunLocally, serverReachable } from '../lib/connectivity'
 import { readOffline, saveOfflineBlocks } from '../lib/offlineStore'
 import { translatePagesLocal } from '../lib/localTranslate'
+import { mapRangeToOther, pairFits } from '../lib/align'
 import type { AnnotationActions } from './Annotations'
 import { loadTargetLang } from '../lib/translation'
 import { loadAutoHighlights, loadDefaultReadingMode } from '../lib/readingPrefs'
@@ -41,9 +44,14 @@ import {
 import { TopBar } from './TopBar'
 import { LeftPanel, PANEL_TABS, type TabKey } from './LeftPanel'
 import { MobileDock } from './MobileDock'
-import { PdfPages } from './PdfPages'
 import { Reader } from './Reader'
 import { SettingsDialog } from './SettingsDialog'
+
+// 原版 PDF 需要 pdf.js（体积不小）：只在切到 PDF 视图时才加载
+const PdfPages = lazy(async () => {
+  const mod = await import('./PdfPages')
+  return { default: mod.PdfPages }
+})
 
 interface Props {
   paperId: string
@@ -421,6 +429,32 @@ export function ReaderView({ paperId, onBack }: Props) {
     }
   }, [paperId, annotationsEnabled])
 
+  // 旧标注、或在译文还没出来时划的荧光笔：等译文就绪后补上另一侧片段，
+  // 这样原文高亮会自动出现在译文里；重译后对不上的也会重算一次。
+  const pairAttempts = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (!paper || !annotationsEnabled || !annotationActions) return
+    const blocks = new Map(paper.blocks.map((b) => [b.id, b]))
+    for (const item of annotations) {
+      const block = blocks.get(item.block_id)
+      if (!block) continue
+      const ownText = item.source === 'en' ? block.text : (block.translated ?? '')
+      const otherText = item.source === 'en' ? (block.translated ?? '') : block.text
+      if (!ownText || !otherText) continue
+      // 已有对侧片段且合得上就跳过
+      if (item.pair?.source !== item.source && pairFits(otherText, item.pair)) continue
+      const attempt = `${item.id}:${ownText.length}:${otherText.length}`
+      if (pairAttempts.current.has(attempt)) continue
+      pairAttempts.current.add(attempt)
+      const pair = mapRangeToOther(ownText, otherText, item.start, item.end, item.source)
+      if (pair) {
+        void annotationActions.update(item.id, { pair }).catch(() => {
+          // 段落刚好在重译、文本变短时后端会拒绝；下一轮文本长度变了再试
+        })
+      }
+    }
+  }, [paper, annotations, annotationsEnabled, annotationActions])
+
   // 设置里切换译文语言：清掉本地旧译文，交给翻译流程按新语言重来
   useEffect(() => {
     if (paperId === 'demo') return
@@ -786,12 +820,25 @@ export function ReaderView({ paperId, onBack }: Props) {
     // 从 PDF 切回重排时 Reader 会重新挂载，必须重新绑定滚动监听
   }, [paper, pdfMode])
 
-  const jump = (id: string) => {
-    const page = pageById.current.get(id)
-    if (pdfMode && page) {
-      // 原版视图没有重排节点，改成滚到这一页
+  const jump = (id: string, page?: number) => {
+    if (page) {
+      // 批注栏里的 PDF 标注：即使当前在重排视图也切回原版并滚到该页
+      if (!pdfMode) {
+        savedScroll.current = scrollRef.current?.scrollTop ?? 0
+        setPdfMode(true)
+        const url = new URL(window.location.href)
+        url.searchParams.set('view', 'pdf')
+        window.history.replaceState({}, '', url)
+      }
       jumpSeq.current += 1
       setPdfJump({ page, token: jumpSeq.current })
+      return
+    }
+    const targetPage = pageById.current.get(id)
+    if (pdfMode && targetPage) {
+      // 原版视图没有重排节点，改成滚到这一页
+      jumpSeq.current += 1
+      setPdfJump({ page: targetPage, token: jumpSeq.current })
       return
     }
     const node = scrollRef.current?.querySelector<HTMLElement>(`#${CSS.escape(id)}`)
@@ -946,16 +993,29 @@ export function ReaderView({ paperId, onBack }: Props) {
           </>
         )}
         {pdfMode ? (
-          <PdfPages
-            paperId={paperId}
-            pageCount={paper.page_count}
-            pageSizes={paper.page_sizes}
-            initialPage={visiblePage}
-            width={pdfWidth}
-            jump={pdfJump}
-            onPageChange={setPdfPage}
-            pageUrls={pageUrls}
-          />
+          <Suspense
+            fallback={
+              <div className="pdf-view">
+                <div className="pdf-pages">
+                  <p className="pdf-page-hint">正在准备原版 PDF…</p>
+                </div>
+              </div>
+            }
+          >
+            <PdfPages
+              paperId={paperId}
+              pageCount={paper.page_count}
+              pageSizes={paper.page_sizes}
+              initialPage={visiblePage}
+              width={pdfWidth}
+              jump={pdfJump}
+              onPageChange={setPdfPage}
+              pageUrls={pageUrls}
+              pdfUrl={pdfHref}
+              annotations={annotations}
+              annotationActions={annotationActions}
+            />
+          </Suspense>
         ) : (
           <Reader
             paper={paper}

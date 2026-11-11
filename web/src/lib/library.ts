@@ -705,10 +705,26 @@ export async function getProvenance(
 export type AnnotationColor = 'yellow' | 'green' | 'blue' | 'pink'
 
 /**
- * highlight：荧光笔，正文填色，进「阅读重点」里的我的标记；
+ * highlight：荧光笔，正文填色，进「批注」栏与「阅读重点」；
  * comment：批注，正文彩色下划线，进左侧「批注」栏。
  */
 export type AnnotationKind = 'highlight' | 'comment'
+
+/** 标注在另一侧文本上的对应片段（原文 ↔ 译文）。 */
+export interface AnnotationPair {
+  source: 'en' | 'zh'
+  start: number
+  end: number
+  quote: string
+}
+
+/** 原版 PDF 页内选中区域；x/y/w/h 相对页面宽高（0~1），缩放后仍能画回原位置。 */
+export interface PdfRect {
+  x: number
+  y: number
+  w: number
+  h: number
+}
 
 export interface Annotation {
   id: string
@@ -720,6 +736,12 @@ export interface Annotation {
   color: AnnotationColor
   note: string
   kind: AnnotationKind
+  /** 另一侧（原文 / 译文）的对应片段；没译文或旧数据时为空 */
+  pair?: AnnotationPair | null
+  /** 原版 PDF 标注的页码（1 起）；重排段落标注为空 */
+  page?: number | null
+  /** 原版 PDF 标注的页内矩形；重排段落标注为空 */
+  rects?: PdfRect[] | null
   created_at: number
   updated_at: number
 }
@@ -734,14 +756,17 @@ export async function listAnnotations(paperId: string): Promise<Annotation[]> {
 export async function addAnnotation(
   paperId: string,
   input: {
-    block_id: string
+    block_id?: string
     source: 'en' | 'zh'
-    start: number
-    end: number
+    start?: number
+    end?: number
     quote: string
     color: AnnotationColor
     kind?: AnnotationKind
     note?: string
+    pair?: AnnotationPair | null
+    page?: number
+    rects?: PdfRect[]
   },
 ): Promise<Annotation> {
   return jsonFetch(`/api/papers/${paperId}/annotations`, {
@@ -754,7 +779,13 @@ export async function addAnnotation(
 export async function updateAnnotation(
   paperId: string,
   annotationId: string,
-  patch: { color?: AnnotationColor; note?: string; start?: number; end?: number },
+  patch: {
+    color?: AnnotationColor
+    note?: string
+    start?: number
+    end?: number
+    pair?: AnnotationPair
+  },
 ): Promise<Annotation> {
   return jsonFetch(`/api/papers/${paperId}/annotations/${annotationId}`, {
     method: 'PATCH',

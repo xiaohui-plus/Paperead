@@ -41,6 +41,56 @@ def _mask(key: str) -> str:
     return f"{key[:4]}****{key[-4:]}"
 
 
+def _shared_answer_models(
+    data_dir: Path,
+) -> tuple[str, list[dict[str, str]]]:
+    """读取设置页保存的统一模型配置，返回当前选中的 id 与全部可用回答模型。"""
+    try:
+        payload = json.loads(
+            (data_dir / "model-settings.json").read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return "", []
+    settings = payload.get("settings") if isinstance(payload, dict) else None
+    if not isinstance(settings, dict):
+        return "", []
+    models = settings.get("models")
+    if not isinstance(models, list):
+        return "", []
+    active = settings.get("active")
+    active_id = str(active.get("answer") or "").strip() if isinstance(active, dict) else ""
+    ready: list[dict[str, str]] = []
+    for item in models:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("kind") or "") != "answer":
+            continue
+        base_url = str(item.get("baseUrl") or "").strip().rstrip("/")
+        api_key = str(item.get("apiKey") or "").strip()
+        model = str(item.get("model") or "").strip()
+        if not (base_url and api_key and model):
+            continue
+        ready.append(
+            {
+                "id": str(item.get("id") or ""),
+                "base_url": base_url,
+                "api_key": api_key,
+                "model": model,
+                "label": str(item.get("label") or ""),
+            }
+        )
+    return active_id, ready
+
+
+def _preferred_entry(
+    entries: list[dict[str, str]], active_id: str
+) -> dict[str, str] | None:
+    for entry in entries:
+        if entry["id"] and entry["id"] == active_id:
+            return entry
+    return entries[0] if entries else None
+
+
 def _join(base: str, path: str) -> str:
     base = base.rstrip("/")
     if base.endswith("/chat/completions") and path == "/chat/completions":
@@ -86,12 +136,42 @@ def build_llm_proxy_router(data_dir: Path, token: str) -> APIRouter:
 
     load()
 
+    def sync_shared() -> None:
+        active_id, entries = _shared_answer_models(data_dir)
+        if not entries:
+            return
+        current = None
+        if state["api_key"]:
+            current = next(
+                (
+                    item
+                    for item in entries
+                    if item["base_url"] == state["base_url"]
+                    and item["model"] == state["model"]
+                ),
+                None,
+            )
+        target = current or _preferred_entry(entries, active_id)
+        if target is None:
+            return
+        picked = {
+            key: target[key]
+            for key in ("base_url", "api_key", "model", "label")
+        }
+        if all(state[key] == picked[key] for key in picked):
+            return
+        state.update(picked)
+        save()
+
+    sync_shared()
+
     def authorize(authorization: str | None) -> None:
         if token and authorization != f"Bearer {token}":
             raise HTTPException(status_code=403, detail="unauthorized")
 
     @router.get("/api/research/model")
     def get_model() -> dict[str, Any]:
+        sync_shared()
         return {
             "base_url": state["base_url"],
             "api_key": _mask(state["api_key"]),
@@ -117,6 +197,7 @@ def build_llm_proxy_router(data_dir: Path, token: str) -> APIRouter:
         authorization: str | None = Header(default=None),
     ):
         authorize(authorization)
+        sync_shared()
         if not state["api_key"]:
             return JSONResponse(
                 {

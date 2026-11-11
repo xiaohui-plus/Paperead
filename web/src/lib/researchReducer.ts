@@ -26,13 +26,20 @@ function turnIndex(state: ChatState, turn: number): number {
   return state.turns.findIndex((item) => item.turn === turn)
 }
 
-/** agent 的 turn.end 原因常是 `{kind: 'completed'}`，取 kind 才能判断是否被中止。 */
-function reasonText(value: unknown): string {
+function turnReason(value: unknown): { kind: string; text: string } {
   if (value && typeof value === 'object') {
-    const kind = (value as Record<string, unknown>).kind
-    if (typeof kind === 'string' && kind) return kind
+    const record = value as Record<string, unknown>
+    const kind = typeof record.kind === 'string' ? record.kind : ''
+    const failure = record.error
+    if (failure && typeof failure === 'object') {
+      const detail = failure as Record<string, unknown>
+      const code = typeof detail.code === 'string' ? detail.code : ''
+      const message = asText(failure)
+      return { kind, text: [code, message].filter(Boolean).join('：') }
+    }
+    return { kind, text: asText(failure) }
   }
-  return asText(value)
+  return { kind: asText(value), text: '' }
 }
 
 function withTurn(state: ChatState, turn: number, at: number): [ChatState, number] {
@@ -125,11 +132,13 @@ export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
 
     case 'turn.end': {
       const [next, index] = withTurn(base, event.turn ?? 1, at)
+      const ended = turnReason(event.reason)
       return {
         ...patchTurn(next, index, (turn) => ({
           ...turn,
           endedAt: at,
-          reason: reasonText(event.reason) || 'done',
+          reason: ended.kind || 'done',
+          errorText: ended.text || undefined,
         })),
         running: false,
       }

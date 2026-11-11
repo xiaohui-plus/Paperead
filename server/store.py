@@ -537,6 +537,9 @@ class LibraryStore:
             "color": data.get("color") or "yellow",
             "kind": data.get("kind") or "highlight",
             "note": data.get("note") or "",
+            "pair": data.get("pair") or None,
+            "page": int(data["page"]) if data.get("page") else None,
+            "rects": data.get("rects") or None,
             "created_at": now,
             "updated_at": now,
         }
@@ -549,7 +552,7 @@ class LibraryStore:
     def update_annotation(
         self, paper_id: str, annotation_id: str, patch: dict[str, Any]
     ) -> dict[str, Any] | None:
-        allowed = {"color", "note", "quote", "start", "end"}
+        allowed = {"color", "note", "quote", "start", "end", "pair"}
         with self._lock:
             rows = self.list_annotations(paper_id)
             for row in rows:

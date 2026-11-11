@@ -2047,6 +2047,30 @@
   font-size: 12.5px;
 }
 
+.turn-block .turn-error {
+  margin: 0;
+  border: 0;
+  background: var(--bg-soft);
+  color: #b91c1c;
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.turn-empty {
+  margin: 0;
+  color: var(--faint);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.turn-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
 .project-session-view .research-chat-composer {
   flex: none;
   margin-top: 12px;

@@ -23,6 +23,28 @@ from pathlib import Path
 from statistics import median
 
 import pymupdf
+import pymupdf.table as _pymupdf_table
+
+
+def _force_accurate_table_bboxes() -> bool:
+    """让 find_tables 始终使用精确字符框。
+
+    PyMuPDF 只在 `pymupdf.layout` 可导入时给表格检测加 TEXT_ACCURATE_BBOXES；
+    发布包为控制体积没有打包该子包，运行时便退回粗略 bbox，把整页正文误判成表。
+    """
+    accurate = getattr(pymupdf, "TEXT_ACCURATE_BBOXES", None)
+    original = getattr(_pymupdf_table, "textpage_flags", None)
+    if accurate is None or original is None:
+        return False
+
+    def textpage_flags():
+        return original() | accurate
+
+    _pymupdf_table.textpage_flags = textpage_flags
+    return True
+
+
+_ACCURATE_TABLE_BBOXES = _force_accurate_table_bboxes()
 
 # ── 文本清洗 ───────────────────────────────────────────────────────────
 
@@ -1316,6 +1338,37 @@ def _table_crop_rect(page: pymupdf.Page, rect: pymupdf.Rect, margin: float = 4.0
     return out
 
 
+def _looks_like_text_table(html: str, cols: int) -> bool:
+    """无框表格策略会把成段正文当成 1~2 行的表，靠行数/单元格长度区分。"""
+    if cols < 2:
+        return True
+    cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", html or "", re.S)
+    if not cells:
+        return False
+    rows = html.count("<tr")
+    text = " ".join(re.sub(r"<[^>]+>", " ", c) for c in cells)
+    text = re.sub(r"\s+", " ", text).strip()
+    if rows > 2 or not text:
+        return False
+    return len(text) / len(cells) > 25
+
+
+def _table_swallows_page(page_no: int, rect: pymupdf.Rect, blocks: list[Block]) -> bool:
+    """表格区域若覆盖本页大部分正文，说明是 find_tables 把正文误判成表。"""
+    covered = 0
+    total = 0
+    for b in blocks:
+        if b.page != page_no or b.kind not in ("para", "heading"):
+            continue
+        n = len((b.text or "").strip())
+        total += n
+        cx = (b.bbox[0] + b.bbox[2]) / 2
+        cy = (b.bbox[1] + b.bbox[3]) / 2
+        if rect.x0 - 2 <= cx <= rect.x1 + 2 and rect.y0 - 2 <= cy <= rect.y1 + 2:
+            covered += n
+    return total >= 800 and covered >= total * 0.6
+
+
 def _extract_tables_structured(
     doc: pymupdf.Document,
     blocks: list[Block],
@@ -1339,6 +1392,8 @@ def _extract_tables_structured(
         ]
         used: set[str] = set()
         for k, (rect, html, _cols) in enumerate(detected[page_no]):
+            if _looks_like_text_table(html, _cols):
+                continue
             cap: Block | None = None
             best_d = 1e9
             for c in captions:
@@ -1355,6 +1410,8 @@ def _extract_tables_structured(
                 if page_no - lp <= 1 and rect.y0 <= page.rect.height * 0.30:
                     cap, continued = last, True
             if cap is None:
+                continue
+            if _table_swallows_page(page_no, rect, blocks):
                 continue
             if not continued:
                 used.add(cap.id)
@@ -1433,7 +1490,7 @@ def _collect_table_rows(
         if p.kind in ("figure", "table", "caption", "equation", "reference", "footnote"):
             break
         gap = (edge - p.bbox[3]) if step < 0 else (p.bbox[1] - edge)
-        if gap < -10 or gap > 26:
+        if gap < -10 or gap > 42:
             break
         h = p.bbox[3] - p.bbox[1]
         if h > 60 or len(p.text.strip()) > 240:
@@ -1479,6 +1536,8 @@ def _extract_tables_by_caption(
             max(blocks[k].bbox[3] for k in picked) + 3,
         )
         rect = _table_crop_rect(page, raw)
+        if _table_swallows_page(b.page, rect, blocks):
+            continue
         img = _crop(
             page, rect, out_dir / f"p{b.page:03d}_tbl_cap{i:04d}.png",
             target_px=TABLE_TARGET_PX,

@@ -5942,6 +5942,7 @@ body.col-resizing * {
 }
 
 .pdf-page-frame {
+  position: relative;
   background: #fff;
   border-radius: 2px;
   box-shadow: 0 2px 16px rgba(17, 24, 39, 0.14);
@@ -5953,6 +5954,80 @@ body.col-resizing * {
   width: 100%;
   height: 100%;
   object-fit: contain;
+}
+
+/* pdf.js 文本层：透明文字叠在页面上，负责划词与选择 */
+.pdf-page-frame .react-pdf__Page {
+  background: #fff;
+}
+
+.pdf-page-frame .textLayer ::selection {
+  background: rgba(59, 130, 246, 0.24);
+}
+
+.pdf-page-loading {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: #fbfbfc;
+}
+
+.pdf-page-hint {
+  margin: 0;
+  padding: 28px 0;
+  color: var(--faint);
+  font-size: 12.5px;
+}
+
+/* PDF 标注层：荧光笔半透明填色 / 批注下划线，不拦截文本选择 */
+.pdf-annot-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.pdf-annot {
+  position: absolute;
+  border-radius: 2px;
+  box-decoration-break: clone;
+}
+
+.pdf-annot-highlight.pdf-annot-yellow {
+  background: rgba(255, 220, 60, 0.38);
+}
+
+.pdf-annot-highlight.pdf-annot-green {
+  background: rgba(94, 211, 133, 0.34);
+}
+
+.pdf-annot-highlight.pdf-annot-blue {
+  background: rgba(96, 165, 250, 0.32);
+}
+
+.pdf-annot-highlight.pdf-annot-pink {
+  background: rgba(244, 114, 182, 0.3);
+}
+
+.pdf-annot-comment {
+  background: transparent;
+  border-bottom: 2px solid;
+}
+
+.pdf-annot-comment.pdf-annot-yellow {
+  border-color: #d4a200;
+}
+
+.pdf-annot-comment.pdf-annot-green {
+  border-color: #3f9e63;
+}
+
+.pdf-annot-comment.pdf-annot-blue {
+  border-color: #3b82f6;
+}
+
+.pdf-annot-comment.pdf-annot-pink {
+  border-color: #e0558c;
 }
 
 .pdf-page figcaption {
@@ -8065,6 +8140,112 @@ body.col-resizing * {
 
 .note-card:hover {
   border-color: var(--line-2);
+}
+
+.notes-intro {
+  margin: -2px 0 2px;
+  color: var(--faint);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.notes-head > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notes-head .link-btn {
+  flex: none;
+}
+
+/* 标注类型色标：荧光笔是实心小方块，批注是彩色细横条 */
+.note-swatch {
+  width: 13px;
+  height: 13px;
+  border-radius: 3px;
+  flex: none;
+}
+
+.note-swatch.note-comment {
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+}
+
+.note-swatch.note-highlight-yellow {
+  background: #fff2a8;
+}
+
+.note-swatch.note-highlight-green {
+  background: #c9f2d6;
+}
+
+.note-swatch.note-highlight-blue {
+  background: #d6e7ff;
+}
+
+.note-swatch.note-highlight-pink {
+  background: #ffd9e8;
+}
+
+.note-swatch.note-comment-yellow {
+  background: #d4a200;
+}
+
+.note-swatch.note-comment-green {
+  background: #3f9e63;
+}
+
+.note-swatch.note-comment-blue {
+  background: #3b82f6;
+}
+
+.note-swatch.note-comment-pink {
+  background: #e0558c;
+}
+
+.note-type {
+  padding: 0 5px;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 15px;
+}
+
+.note-type-quiet {
+  border-color: transparent;
+  color: var(--faint);
+  padding: 0 2px;
+}
+
+.note-quotes {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 6px 0;
+}
+
+.note-quotes .note-quote {
+  margin: 0;
+}
+
+.note-quote-zh {
+  color: var(--ink);
+}
+
+.note-side {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 3px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 14px;
+  vertical-align: 1px;
 }
 
 .note-meta {

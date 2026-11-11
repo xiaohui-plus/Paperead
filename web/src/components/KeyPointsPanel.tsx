@@ -14,7 +14,7 @@ const ORDER: HighlightCategory[] = ['objective', 'method', 'conclusion']
 
 /**
  * 阅读重点：正文翻译完成后自动抽出的研究目标 / 方法 / 结论，按类别分组；
- * 用户自己的荧光笔高亮也收在这里的「我的荧光笔」分组。批注不在这里。
+ * 用户自己的荧光笔高亮也收在这里的「我的荧光笔」分组（批注栏里同样可见）。
  */
 export function KeyPointsPanel({ highlights, points, annotations = [], onJump }: Props) {
   const mine = useMemo(
@@ -90,21 +90,36 @@ export function KeyPointsPanel({ highlights, points, annotations = [], onJump }:
           </div>
           {[...mine]
             .sort((a, b) => a.block_id.localeCompare(b.block_id) || a.start - b.start)
-            .map((item) => (
-              <button
-                key={`${item.id}-${item.updated_at}`}
-                className="kp-card kp-card-user"
-                onClick={() => onJump(item.block_id)}
-                title="跳到原文"
-              >
-                <div className="kp-card-meta">
-                  <span className={`kp-swatch cm-${item.color}`} aria-hidden />
-                  <span>{item.source === 'en' ? '原文' : '译文'}</span>
-                </div>
-                <p className="kp-card-en">{item.quote}</p>
-                {item.note.trim() && <p className="kp-card-zh">{item.note}</p>}
-              </button>
-            ))}
+            .map((item) => {
+              const en =
+                item.source === 'en'
+                  ? item.quote
+                  : item.pair?.source === 'en'
+                    ? item.pair.quote
+                    : ''
+              const zh =
+                item.source === 'zh'
+                  ? item.quote
+                  : item.pair?.source === 'zh'
+                    ? item.pair.quote
+                    : ''
+              return (
+                <button
+                  key={`${item.id}-${item.updated_at}`}
+                  className="kp-card kp-card-user"
+                  onClick={() => onJump(item.block_id)}
+                  title="跳到原文"
+                >
+                  <div className="kp-card-meta">
+                    <span className={`kp-swatch cm-${item.color}`} aria-hidden />
+                    <span>{item.source === 'en' ? '原文' : '译文'}</span>
+                  </div>
+                  {en && <p className="kp-card-en">{en}</p>}
+                  {zh && <p className="kp-card-zh">{zh}</p>}
+                  {item.note.trim() && <p className="kp-card-zh">{item.note}</p>}
+                </button>
+              )
+            })}
         </section>
       )}
     </div>

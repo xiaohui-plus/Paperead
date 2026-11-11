@@ -65,3 +65,39 @@ export async function syncResearchModel(): Promise<void> {
     // 服务未就绪时不打扰用户
   }
 }
+export interface ResearchModelStatus {
+  base_url: string
+  api_key: string
+  model: string
+  label: string
+  configured: boolean
+}
+
+export async function researchModelStatus(): Promise<ResearchModelStatus | null> {
+  try {
+    const response = await fetch(MODEL_API, { cache: 'no-store' })
+    if (!response.ok) return null
+    return (await response.json()) as ResearchModelStatus
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 发送前确认本地 LLM 代理真的拿到了模型配置。
+ * 启动时的那次同步可能早于 sidecar 就绪而被静默丢弃，这里重推一次再复检。
+ */
+export async function ensureResearchModel(): Promise<string | null> {
+  if (!selectedResearchModel()) {
+    return '没有可用的回答模型：请到 设置 → 配置模型 填写 API Key 后再试。'
+  }
+  let status = await researchModelStatus()
+  if (status && !status.configured) {
+    await syncResearchModel()
+    status = await researchModelStatus()
+  }
+  if (status && !status.configured) {
+    return '研究模型没有同步到本地服务：请到 设置 → 配置模型 重新保存一次回答模型。'
+  }
+  return null
+}

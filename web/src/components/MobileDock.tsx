@@ -9,7 +9,7 @@ import { IconClose } from './icons'
 
 interface Props extends PanelProps {
   /** 打开面板时先把阅读区滚到对应段落，再收起面板。 */
-  onJump: (id: string) => void
+  onJump: (id: string, page?: number) => void
 }
 
 /**
@@ -31,8 +31,8 @@ export function MobileDock(props: Props) {
 
   const close = () => setOpen(null)
 
-  const jump = (id: string) => {
-    props.onJump(id)
+  const jump = (id: string, page?: number) => {
+    props.onJump(id, page)
     close()
   }
 

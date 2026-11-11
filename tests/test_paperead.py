@@ -13,8 +13,10 @@ from paperead.layout import (
     _ends_sentence,
     _join_spans,
     _looks_equation,
+    _looks_like_text_table,
     _merge_visual_rows,
     _table_crop_rect,
+    _table_swallows_page,
 )
 from paperead.translate import protect, restore
 
@@ -180,3 +182,47 @@ def test_merge_caption_continuations_joins_tight_lines():
     assert out[0].kind == "caption"
     assert "SELECTBENCH-Case" in out[0].text
     assert out[1].id == "b3"
+
+# ── 表格误判防护 ───────────────────────────────────────────────────────
+
+def test_table_flags_stay_accurate_when_layout_disabled(monkeypatch):
+    """发布包没打包 pymupdf.layout，表格检测仍必须用精确字符框。"""
+    import pymupdf
+    import pymupdf.table as table
+
+    monkeypatch.setattr(pymupdf, "_layout_enabled", False)
+    assert table.textpage_flags() & pymupdf.TEXT_ACCURATE_BBOXES
+
+
+def test_looks_like_text_table_rejects_body_fragment():
+    html = (
+        "<table><tr><td>tures of target nodes , we introduce the "
+        "topological encod -</td><td>ing to encode the structural</td></tr></table>"
+    )
+    assert _looks_like_text_table(html, 2) is True
+
+
+def test_looks_like_text_table_keeps_numeric_table():
+    html = (
+        "<table><tr><td>Model</td><td>AUC</td></tr>"
+        "<tr><td>GCN</td><td>84.7</td></tr>"
+        "<tr><td>MLP</td><td>50.6</td></tr></table>"
+    )
+    assert _looks_like_text_table(html, 2) is False
+
+
+def test_table_swallows_page_detects_full_page_misdetection():
+    import pymupdf
+
+    from paperead.layout import Block
+
+    blocks = [
+        Block(
+            id=f"b{i}", order=i, page=3, kind="para",
+            text="body text " * 20, bbox=(60, 40 + i * 60, 550, 90 + i * 60),
+        )
+        for i in range(10)
+    ]
+
+    assert _table_swallows_page(3, pymupdf.Rect(50, 33, 562, 708), blocks) is True
+    assert _table_swallows_page(3, pymupdf.Rect(50, 40, 300, 100), blocks) is False

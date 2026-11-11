@@ -27,6 +27,7 @@ import {
 import { Katex } from './Katex'
 import { IconCheck, IconClose, IconCopy, IconPlus } from './icons'
 import { configBody, visionModel } from '../lib/settings'
+import { mapRangeToOther } from '../lib/align'
 
 interface Props {
   rb: RenderBlock
@@ -170,6 +171,11 @@ export function BlockView({
     setSelection(null)
     window.getSelection()?.removeAllRanges()
     try {
+      // 原文划线时顺手算出译文对应句子，之后译文翻好也能同步着色
+      const pair =
+        current.source === 'en'
+          ? mapRangeToOther(b.text, b.translated ?? '', current.start, current.end, 'en')
+          : mapRangeToOther(b.translated ?? '', b.text, current.start, current.end, 'zh')
       const row = await annotationActions.create({
         block_id: b.id,
         source: current.source,
@@ -178,9 +184,10 @@ export function BlockView({
         quote: current.quote,
         color,
         kind,
+        pair,
       })
-      // 批注建好后直接打开编辑框，省去再点一次
-      if (kind === 'comment' && row) setEditing({ annotation: row, rect: current.rect })
+      // 荧光笔和批注建好后都打开编辑框：用户可以顺手写一句，也可以直接关掉
+      if (row) setEditing({ annotation: row, rect: current.rect })
     } catch (err) {
       console.warn('添加标注失败：', err)
     }

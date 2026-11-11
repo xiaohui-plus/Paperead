@@ -9,7 +9,9 @@ import type {
   Annotation,
   AnnotationColor,
   AnnotationKind,
+  AnnotationPair,
   HighlightCategory,
+  PdfRect,
   ReadingHighlight,
 } from '../lib/library'
 
@@ -34,17 +36,21 @@ export const HL_COLORS: { key: AnnotationColor; label: string }[] = [
 /** 阅读页传给段落的标注读写接口，统一由 ReaderView 持有状态。 */
 export interface AnnotationActions {
   create: (input: {
-    block_id: string
+    block_id?: string
     source: 'en' | 'zh'
-    start: number
-    end: number
+    start?: number
+    end?: number
     quote: string
     color: AnnotationColor
     kind: AnnotationKind
+    pair?: AnnotationPair | null
+    /** 原版 PDF 标注：页码 + 页内归一化矩形 */
+    page?: number
+    rects?: PdfRect[]
   }) => Promise<Annotation | void>
   update: (
     id: string,
-    patch: { color?: AnnotationColor; note?: string },
+    patch: { color?: AnnotationColor; note?: string; pair?: AnnotationPair },
   ) => Promise<void>
   remove: (id: string) => Promise<void>
 }
@@ -60,12 +66,15 @@ interface Span {
   kind: 'cite' | 'hl' | 'auto' | 'term'
   marker?: string
   annotation?: Annotation
+  /** 这条标注原本画在另一侧，这里是同步过来的对应片段 */
+  mirror?: boolean
   term?: string
   highlight?: ReadingHighlight
 }
 
 /**
  * 把原文/译文切成互不重叠的片段：引用编号优先，其次用户高亮、自动重点，最后术语。
+ * 同一条标注如果记录了另一侧片段，也会画在那一侧（原文高亮自动同步到译文）。
  * 重叠时保留优先级高的那个，避免嵌套 <mark> 造成布局错乱。
  */
 function buildSpans(
@@ -89,16 +98,30 @@ function buildSpans(
   }
 
   for (const annotation of annotations) {
-    let start = annotation.start
-    let end = annotation.end
+    let start: number
+    let end: number
+    let quote: string
+    let mirror = false
+    if (annotation.source === source) {
+      start = annotation.start
+      end = annotation.end
+      quote = annotation.quote
+    } else if (annotation.pair && annotation.pair.source === source) {
+      start = annotation.pair.start
+      end = annotation.pair.end
+      quote = annotation.pair.quote
+      mirror = true
+    } else {
+      continue
+    }
     // 重新解析或重译后偏移可能失配：按原文片段重新定位，找不到就不画
-    if (text.slice(start, end) !== annotation.quote) {
-      const found = annotation.quote ? text.indexOf(annotation.quote) : -1
+    if (text.slice(start, end) !== quote) {
+      const found = quote ? text.indexOf(quote) : -1
       if (found < 0) continue
       start = found
-      end = found + annotation.quote.length
+      end = found + quote.length
     }
-    if (end > start) spans.push({ start, end, kind: 'hl', annotation })
+    if (end > start) spans.push({ start, end, kind: 'hl', annotation, mirror })
   }
 
   for (const highlight of highlights) {
@@ -161,13 +184,7 @@ export function RichText({
   onCite,
   onAnnotationClick,
 }: RichProps) {
-  const spans = buildSpans(
-    text,
-    source,
-    annotations.filter((a) => a.source === source),
-    highlights,
-    terms,
-  )
+  const spans = buildSpans(text, source, annotations, highlights, terms)
   const nodes: ReactNode[] = []
   let cursor = 0
   // 悬停稍等一下再开预览，划词或快速划过整段时不会频繁弹层
@@ -216,7 +233,11 @@ export function RichText({
       const annotation = span.annotation
       const spanText = text.slice(span.start, span.end)
       const isComment = annotation.kind === 'comment'
-      const title = annotation.note || (isComment ? '点击编辑这条批注' : '点击编辑这条高亮')
+      const isMirror = Boolean(span.mirror)
+      const ownLabel = annotation.source === 'en' ? '原文' : '译文'
+      const title = isMirror
+        ? `${ownLabel}上的${isComment ? '批注' : '荧光笔'}，这里是同步对应内容`
+        : annotation.note || (isComment ? '点击编辑这条批注' : '点击编辑这条高亮')
       const onPick = (e: ReactMouseEvent<HTMLElement>) => {
         e.stopPropagation()
         onAnnotationClick?.(annotation, (e.target as HTMLElement).getBoundingClientRect())
@@ -225,8 +246,9 @@ export function RichText({
         isComment ? (
           <span
             key={`h${span.start}`}
-            className={`cm cm-${annotation.color}`}
+            className={`cm cm-${annotation.color}${isMirror ? ' cm-pair' : ''}`}
             data-aid={annotation.id}
+            data-pair={isMirror ? '1' : undefined}
             title={title}
             onClick={onPick}
           >
@@ -235,8 +257,9 @@ export function RichText({
         ) : (
           <mark
             key={`h${span.start}`}
-            className={`hl hl-${annotation.color}`}
+            className={`hl hl-${annotation.color}${isMirror ? ' hl-pair' : ''}`}
             data-aid={annotation.id}
+            data-pair={isMirror ? '1' : undefined}
             title={title}
             onClick={onPick}
           >
@@ -306,7 +329,9 @@ export function SelectionToolbar({
       style={{ left, top }}
       onMouseDown={(e) => e.preventDefault()}
     >
-      <span className="hl-toolbar-label">荧光笔</span>
+      <span className="hl-toolbar-label" title="原文划线会同步标到译文对应句子">
+        荧光笔
+      </span>
       {HL_COLORS.map((c) => (
         <button
           key={c.key}
@@ -366,11 +391,16 @@ export function AnnotationPopover({
   return (
     <div className="hl-editor" style={{ left, top, width }} onMouseDown={(e) => e.stopPropagation()}>
       <div className="hl-editor-head">
-        <span className="hl-editor-kind">{isComment ? '批注' : '高亮'}</span>
+        <span className="hl-editor-kind">{isComment ? '批注' : '荧光笔'}</span>
         <span className="hl-editor-quote" title={annotation.quote}>
           “{annotation.quote}”
         </span>
-        <button type="button" className="icon-btn" onClick={onClose} title="关闭">
+        <button
+          type="button"
+          className="icon-btn"
+          onClick={onClose}
+          title={isComment ? '关闭' : '关闭（荧光笔保留）'}
+        >
           ×
         </button>
       </div>
@@ -389,7 +419,10 @@ export function AnnotationPopover({
       <textarea
         className="hl-editor-note"
         value={note}
-        placeholder={isComment ? '写下你的批注…' : '写点笔记…（留空则只保留高亮）'}
+        autoFocus
+        placeholder={
+          isComment ? '写下你的批注…' : '写点笔记…（可不填，直接关闭也保留荧光笔）'
+        }
         onChange={(e) => setNote(e.target.value)}
         rows={3}
       />

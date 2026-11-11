@@ -152,6 +152,12 @@ class _AgentEventPump:
                 try:
                     raw = await asyncio.wait_for(iterator.__anext__(), timeout=timeout)
                 except StopAsyncIteration:
+                    # 还没等到本轮 turn.end 就断流，说明 agent 侧异常退出，
+                    # 不能静默停泵让会话永远停在 running。
+                    if deadline is None:
+                        self._errors[session_id] = (
+                            "研究 agent 事件流提前结束，本轮没有收到结束事件"
+                        )
                     break
                 except asyncio.TimeoutError:
                     # 这里必须退出：wait_for 取消的是异步生成器，继续读会立刻结束。

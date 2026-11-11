@@ -38,7 +38,8 @@ export interface PanelProps {
   outline: Block[]
   points: KeyPoint[]
   activeId: string
-  onJump: (id: string) => void
+  /** 跳到段落；带 page 时跳到原版 PDF 对应页（PDF 标注用） */
+  onJump: (id: string, page?: number) => void
   onOpenSettings: (kind?: ModelKind) => void
   settingsVersion?: number
   annotations: Annotation[]

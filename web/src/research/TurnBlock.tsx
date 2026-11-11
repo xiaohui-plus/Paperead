@@ -36,17 +36,44 @@ function PlanList({ items }: { items: PlanItem[] }) {
 }
 
 /** 一轮助手输出：思考行 + 计划 + 工具行 + 正文 + 弱化收尾。 */
+const FAILED_REASONS = new Set(['error', 'blocked', 'max-tokens'])
+
+function failureHint(text?: string): string | null {
+  if (!text) return null
+  if (/MISSING_CREDENTIAL|no API key/i.test(text)) {
+    return '研究 agent 没有拿到模型密钥：请到 设置 → 配置模型 重新保存一次回答模型。'
+  }
+  if (/AUTH|401|invalid api key|unauthorized/i.test(text)) {
+    return '模型密钥被拒绝：请检查 API Key 是否正确、是否具备该模型的权限。'
+  }
+  if (/TRANSPORT|ECONN|ENOTFOUND|certificate|timed? ?out|连接模型服务失败/i.test(text)) {
+    return '连不上模型服务：请检查网络、代理，以及模型配置里的 base_url 是否可用。'
+  }
+  if (/Cannot find module|ERR_MODULE_NOT_FOUND|ENOENT|EISDIR|EACCES/i.test(text)) {
+    return '研究 agent 缺少运行文件或依赖：请把上面的错误原文反馈给我们。'
+  }
+  return null
+}
+
 export function TurnBlock({ turn, now }: { turn: ChatTurn; now: number }) {
   const running = !turn.endedAt
   const duration = formatDuration((turn.endedAt ?? now) - turn.startedAt)
   const cancelled = turn.reason === 'cancelled' || turn.reason === 'aborted'
+  const interrupted = turn.reason === 'interrupted'
+  const failed =
+    !running &&
+    !cancelled &&
+    !interrupted &&
+    (FAILED_REASONS.has(turn.reason ?? '') || Boolean(turn.errorText))
+  const hint = failed || interrupted ? failureHint(turn.errorText) : null
   const groups = groupTools(turn.tools)
   const lead = splitLeadHeading(turn.text)
   const body = lead ? lead.body : turn.text
   const empty = !turn.reasoning && !body.trim() && groups.length === 0
+  const emptyReply = !running && !cancelled && !interrupted && !failed && empty
 
   return (
-    <article className="turn-block" data-running={running}>
+    <article className="turn-block" data-running={running} data-failed={failed}>
       {turn.reasoning && (
         <ReasoningPanel
           text={turn.reasoning}
@@ -68,13 +95,22 @@ export function TurnBlock({ turn, now }: { turn: ChatTurn; now: number }) {
         </div>
       )}
       {running && empty && <p className="turn-pending">正在准备下一步…</p>}
-      {!running && (cancelled || !turn.reasoning) && (
+      {(failed || interrupted) && turn.errorText && (
+        <p className="turn-error">{turn.errorText}</p>
+      )}
+      {hint && <p className="turn-hint">{hint}</p>}
+      {emptyReply && (
+        <p className="turn-empty">
+          模型这一轮没有返回任何内容。可在设置里确认回答模型，或换个问法重试。
+        </p>
+      )}
+      {!running && (cancelled || interrupted || failed || !turn.reasoning) && (
         <footer className="turn-foot">
-          <span>{cancelled ? '已停止' : '已完成'}</span>
+          <span>
+            {cancelled ? '已停止' : interrupted ? '已中断' : failed ? '失败' : '已完成'}
+          </span>
           {!turn.reasoning && <em>· 用时 {duration}</em>}
-          {turn.tools.length > 0 && (
-            <em>· {turn.tools.length} 次工具调用</em>
-          )}
+          {turn.tools.length > 0 && <em>· {turn.tools.length} 次工具调用</em>}
         </footer>
       )}
     </article>

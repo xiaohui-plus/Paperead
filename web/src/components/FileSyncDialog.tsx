@@ -609,10 +609,10 @@ function ZoteroSyncPane({ onSynced }: { onSynced: () => void }) {
       {direction === 'pull' ? (
         <>
           <SyncGuide
-            title="Zotero 拉取：3 步"
+            title="Zotero 拉取：3 步（无需 API Key）"
             steps={[
-              <>打开 Zotero 7 桌面版，在「设置 → 高级 → 杂项」勾选“允许此计算机上的其他应用程序与 Zotero 通讯”。</>,
-              <>完全退出并重新打开 Zotero，再回到这里点「刷新状态」；能看到论文卡片就说明已经连上。</>,
+              <>打开 Zotero 桌面版，确认论文已经同步到本机，并下载了 PDF；应用会直接读取本机 Zotero 数据库，不需要任何 Key。</>,
+              <>如果列表为空，再到 Zotero「设置 → 高级」勾选“允许此计算机上的其他应用程序与 Zotero 通讯”并重启 Zotero，作为兼容回退。</>,
               <>勾选论文后点「拉取选中」；想全部导入就点「全部拉取」。</>,
             ]}
           />
@@ -648,7 +648,9 @@ function ZoteroSyncPane({ onSynced }: { onSynced: () => void }) {
           ) : loadingItems ? (
             <p className="file-sync-empty">正在读取 Zotero 论文…</p>
           ) : items.length === 0 ? (
-            <p className="file-sync-empty">没有找到带 PDF 的 Zotero 论文。</p>
+            <p className="file-sync-empty">
+              没有找到带 PDF 的 Zotero 论文。无需 API Key；请确认 Zotero 已把论文和 PDF 同步到本机。
+            </p>
           ) : (
             <div className="file-sync-list">
               {items.map((item) => (

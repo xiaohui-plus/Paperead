@@ -3,6 +3,7 @@ import { ErrorBoundary } from '../components/ErrorBoundary'
 import { relativeTime, researchApi, type ProjectFile, type SessionSummary } from '../lib/researchApi'
 import { EMPTY_CHAT, type AgentEvent, type ChatState } from '../lib/researchTypes'
 import { addLocalMessage, applyEvents } from '../lib/researchReducer'
+import { ensureResearchModel } from '../lib/researchModel'
 import { streamSessionEvents, type StreamState } from '../lib/researchStream'
 import { Composer } from './Composer'
 import { splitLeadHeading } from './leadHeading'
@@ -100,6 +101,11 @@ export function SessionView({
       const value = text.trim()
       if (!value) return
       setSendError(null)
+      const modelProblem = await ensureResearchModel()
+      if (modelProblem) {
+        setSendError(modelProblem)
+        return
+      }
       setChat((prev) => addLocalMessage(prev, value))
       try {
         await researchApi.sendMessage(session.id, value)

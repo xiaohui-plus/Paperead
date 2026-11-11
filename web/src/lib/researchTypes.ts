@@ -17,7 +17,7 @@ export interface AgentEvent {
   step?: number
   text?: string
   title?: string
-  reason?: string
+  reason?: unknown
   level?: 'info' | 'warn' | 'error'
   code?: string
   callId?: string
@@ -54,6 +54,7 @@ export interface ChatTurn {
   startedAt: number
   endedAt: number | null
   reason: string | null
+  errorText?: string
   text: string
   reasoning: string
   tools: ToolCall[]
