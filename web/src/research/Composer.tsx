@@ -654,7 +654,7 @@ export function Composer({
             </button>
           </div>
           <div className="rc-right">
-            <span className="rc-hint">{hintText}</span>
+            {hintText && <span className="rc-hint">{hintText}</span>}
             <ModelPicker models={models} current={model} onChoose={chooseModel} />
             {running ? (
               <button className="rc-send is-stop" title="停止" onClick={onStop}>

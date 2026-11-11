@@ -163,11 +163,9 @@ export function ResearchHome({ kind, projects, onStart }: Props) {
               <option value="new">新项目</option>
             </select>
           </label>
-          <span className="research-composer-hint">
-            {filled
-              ? '示例已填入，可修改后发送'
-              : '发送后自动建会话，可随时回到项目继续'}
-          </span>
+          {filled && (
+            <span className="research-composer-hint">示例已填入，可修改后发送</span>
+          )}
         </div>
         <div className="research-composer-scope">
           <WorkspacePicker
@@ -199,7 +197,7 @@ export function ResearchHome({ kind, projects, onStart }: Props) {
               ? '描述你想研究的问题，/ 调用指令，@ 引用文件或论文'
               : '描述综述主题与目标读者，/ 调用指令，@ 引用文件或论文'
           }
-          hint={filled ? '示例已填入，可修改后发送' : '发送后自动建会话，可随时回到项目继续'}
+          hint={filled ? '示例已填入，可修改后发送' : ''}
           onSend={(text) => void run(text, text.slice(0, 40))}
           onStop={() => undefined}
         />
