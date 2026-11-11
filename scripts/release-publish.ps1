@@ -122,6 +122,8 @@ if (-not $SkipGitee) {
     function Get-GiteeRelease([string]$TagName) {
         try {
             $res = Invoke-RestMethod -Uri "$giteeApi/releases/tags/$TagName"
+            # Gitee 有时把单个发行版也包成数组；不摊平会让后面 $Release.id 变成数组
+            if ($res -is [System.Array]) { $res = @($res) | Select-Object -First 1 }
             # Gitee 对不存在的 tag 有时返回空数组而不是 404，没有 id 一律当作不存在
             if (-not $res -or -not $res.id) { return $null }
             return $res
@@ -177,17 +179,28 @@ if (-not $SkipGitee) {
     }
 
     function Publish-GiteeFile($Release, [string]$Path) {
+        # Gitee 偶发把 release id / 附件字段包成数组；统一取第一个标量再转换，
+        # 否则 [int64]$old.size 会抛 "Cannot convert System.Object[] to System.Int64"。
+        $releaseId = [int64](@($Release.id)[0])
         $name = Split-Path -Leaf $Path
-        $old = Get-GiteeAttachments $Release.id | Where-Object { $_.name -eq $name } | Select-Object -First 1
-        if ($old -and [int64]$old.size -eq (Get-Item $Path).Length) {
+        $old = $null
+        $oldSize = 0
+        foreach ($item in @(Get-GiteeAttachments $releaseId)) {
+            if ($item.name -eq $name) {
+                $old = $item
+                $oldSize = [int64](@($item.size)[0])
+                break
+            }
+        }
+        if ($old -and $oldSize -eq (Get-Item $Path).Length) {
             Write-Host "  $name 已存在且大小一致，跳过"
             return
         }
         if ($old) {
             Write-Host "  替换同名附件 $name"
-            Remove-GiteeFile -ReleaseId $Release.id -AttachId $old.id
+            Remove-GiteeFile -ReleaseId $releaseId -AttachId ([int64](@($old.id)[0]))
         }
-        Add-GiteeFile -ReleaseId $Release.id -Path $Path | Out-Null
+        Add-GiteeFile -ReleaseId $releaseId -Path $Path | Out-Null
         Write-Host "  已上传 $name"
     }
 
