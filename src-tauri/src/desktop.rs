@@ -10,9 +10,11 @@ mod paths;
 #[path = "sidecar.rs"]
 mod sidecar;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::UpdaterExt;
@@ -20,6 +22,8 @@ use url::Url;
 
 use agent_sidecar::AgentSidecar;
 use sidecar::Sidecar;
+
+static TRAY_READY: AtomicBool = AtomicBool::new(false);
 
 struct AppState {
     port: u16,
@@ -44,6 +48,19 @@ pub fn run_desktop() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![install_update])
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // 研究/综述任务在 sidecar 里跑；有托盘时关窗只收起界面，别杀掉任务。
+                if !TRAY_READY.load(Ordering::Relaxed) {
+                    return;
+                }
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .setup(|app| {
             let handle = app.handle().clone();
             let data_dir = paths::ensure_data_dir(&handle);
@@ -102,6 +119,12 @@ pub fn run_desktop() {
             if let Err(error) = setup_menu(app) {
                 paths::log_line(&handle, &format!("setup menu failed: {error}"));
                 return Err(Box::new(error));
+            }
+            if let Err(error) = setup_tray(app) {
+                // 托盘失败时不拦截关窗，否则窗口藏起来就再也找不回来。
+                paths::log_line(&handle, &format!("setup tray failed: {error}"));
+            } else {
+                TRAY_READY.store(true, Ordering::Relaxed);
             }
 
             paths::log_line(&handle, "desktop ready");
@@ -251,6 +274,38 @@ fn focus_main(app: &AppHandle) {
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
+    let show = MenuItemBuilder::with_id("tray_show", "显示主窗口").build(app)?;
+    let quit = MenuItemBuilder::with_id("tray_quit", "退出").build(app)?;
+    let menu = MenuBuilder::new(app).items(&[&show, &quit]).build()?;
+
+    let mut builder = TrayIconBuilder::with_id("main-tray")
+        .menu(&menu)
+        .tooltip("Paperead · 研究与综述任务在后台继续运行")
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "tray_show" => focus_main(app),
+            "tray_quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                focus_main(tray.app_handle());
+            }
+        });
+
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    builder.build(app)?;
+    Ok(())
 }
 
 fn maybe_onboard(app: &AppHandle, port: u16, data_dir: &std::path::Path) {

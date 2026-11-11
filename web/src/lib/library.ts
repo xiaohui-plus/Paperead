@@ -224,6 +224,7 @@ export interface ZoteroItem {
   date_added: string
   pdf: { key: string; filename: string } | null
   imported: boolean
+  thumb_url?: string | null
 }
 
 export interface ZoteroPage {
@@ -348,6 +349,15 @@ export async function testZoteroWeb(): Promise<{
 
 export async function runZoteroWebSync(): Promise<ZoteroWebReport> {
   return jsonFetch('/api/zotero/web/sync', { method: 'POST' })
+}
+
+/** 只推送选中的本地论文（空数组表示全部），同时拉取远端更新。 */
+export async function pushZoteroWeb(paperIds: string[]): Promise<ZoteroWebReport> {
+  return jsonFetch('/api/zotero/web/push', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paper_ids: paperIds }),
+  })
 }
 
 // ── 导读 ────────────────────────────────────────────────

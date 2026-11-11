@@ -718,6 +718,28 @@ class LibraryStore:
             json.dumps(blocks, ensure_ascii=False), encoding="utf-8"
         )
 
+    def update_block_latex(self, paper_id: str, block_id: str, latex: str) -> bool:
+        """把阅读时按需识别出的 LaTeX 回写到该论文的 blocks.json。
+
+        只改指定块，保留译文、图表等其他字段；用锁串行化，避免多个公式
+        同时识别时互相覆盖。
+        """
+        if not block_id or not latex:
+            return False
+        with self._lock:
+            blocks = self.read_blocks(paper_id)
+            if blocks is None:
+                return False
+            for block in blocks:
+                if block.get("id") != block_id:
+                    continue
+                if block.get("latex") == latex:
+                    return True
+                block["latex"] = latex
+                self.write_blocks(paper_id, blocks)
+                return True
+        return False
+
 
 # ── PDF 探测 ────────────────────────────────────────────
 

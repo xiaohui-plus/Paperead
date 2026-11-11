@@ -11,7 +11,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS projects (
   research_question TEXT NOT NULL DEFAULT '',
   instructions TEXT NOT NULL DEFAULT '',
   workspace TEXT NOT NULL,
+  root_path TEXT NOT NULL DEFAULT '',
   default_model TEXT NOT NULL DEFAULT 'deepseek-v4-flash',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -136,5 +137,13 @@ def init_db(db_path: Path) -> None:
                 # v1 → v2：记录已消费到的 agent 游标（当前事件表也用它续订）。
                 conn.execute(
                     "ALTER TABLE sessions ADD COLUMN agent_seq INTEGER NOT NULL DEFAULT 0"
+                )
+            project_columns = {
+                item["name"] for item in conn.execute("PRAGMA table_info(projects)")
+            }
+            if "root_path" not in project_columns:
+                # v2 → v3：项目可以绑定电脑上的任意文件夹作为工作目录。
+                conn.execute(
+                    "ALTER TABLE projects ADD COLUMN root_path TEXT NOT NULL DEFAULT ''"
                 )
             conn.execute("UPDATE schema_meta SET version = ?", (SCHEMA_VERSION,))

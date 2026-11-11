@@ -6,6 +6,7 @@ import {
   type ChatTurn,
   type PlanItem,
 } from '../lib/researchTypes'
+import { splitLeadHeading } from './leadHeading'
 import { ReasoningPanel } from './ReasoningPanel'
 import { ToolGroup, groupTools } from './ToolGroup'
 
@@ -40,7 +41,9 @@ export function TurnBlock({ turn, now }: { turn: ChatTurn; now: number }) {
   const duration = formatDuration((turn.endedAt ?? now) - turn.startedAt)
   const cancelled = turn.reason === 'cancelled' || turn.reason === 'aborted'
   const groups = groupTools(turn.tools)
-  const empty = !turn.reasoning && !turn.text && groups.length === 0
+  const lead = splitLeadHeading(turn.text)
+  const body = lead ? lead.body : turn.text
+  const empty = !turn.reasoning && !body.trim() && groups.length === 0
 
   return (
     <article className="turn-block" data-running={running}>
@@ -59,9 +62,9 @@ export function TurnBlock({ turn, now }: { turn: ChatTurn; now: number }) {
           ))}
         </div>
       )}
-      {turn.text && (
+      {body.trim() && (
         <div className="turn-text">
-          <Markdown text={turn.text} />
+          <Markdown text={body} />
         </div>
       )}
       {running && empty && <p className="turn-pending">正在准备下一步…</p>}

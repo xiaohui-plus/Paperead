@@ -4,7 +4,6 @@ import {
   checkUpdate,
   formatCheckTime,
   installUpdateInApp,
-  isDesktopApp,
   loadUpdateCache,
   parseUpdateNotes,
   UPDATE_DAY_MS,
@@ -34,11 +33,11 @@ import {
   type ProviderPreset,
 } from '../lib/settings'
 import { Katex } from './Katex'
-import { ScholarReadPanel } from './ScholarReadPanel'
 import { ReviewTemplatePanel } from './ReviewTemplatePanel'
 import { ToolchainPanel } from './ToolchainPanel'
 import { MobileServerPanel } from './MobileSetup'
-import { DesktopDeviceSyncPanel, MobileDeviceSyncPanel } from './DeviceSync'
+import { FileSyncDialog, type FileSyncTarget } from './FileSyncDialog'
+import { FileSyncSettingsPanel } from './FileSyncSettingsPanel'
 import { isMobileShell } from '../lib/mobile'
 import {
   deleteOffline,
@@ -48,18 +47,12 @@ import {
   type OfflineSummary,
 } from '../lib/offlineStore'
 import { loadScholarSettings, saveScholarSettings } from '../lib/scholarConfig'
-import {
-  getOnboarding,
-  postOnboarding,
-  type OnboardingState,
-} from '../lib/onboarding'
 import { tourBus } from '../tour/tourBus'
+import type { ViewMode } from '../types'
 import {
   IconBack,
   IconBook,
-  IconChat,
   IconCheck,
-  IconDownload,
   IconPlus,
   IconRefresh,
   IconSearch,
@@ -74,6 +67,11 @@ import {
 import {
   loadAutoHighlights,
   saveAutoHighlights,
+  loadReadingFonts,
+  saveReadingFonts,
+  loadDefaultReadingMode,
+  saveDefaultReadingMode,
+  type ReadingFonts,
 } from '../lib/readingPrefs'
 
 interface Props {
@@ -82,6 +80,7 @@ interface Props {
   /** 阅读页当前论文里的一张公式裁图，用来测试识图模型 */
   sampleImage?: string
   onSaved?: (settings: ModelSettings) => void
+  onLibraryChanged?: () => void
   initialKind?: ModelKind
 }
 
@@ -210,23 +209,13 @@ export function SettingsDialog({
   onClose,
   sampleImage,
   onSaved,
+  onLibraryChanged,
   initialKind = 'answer',
 }: Props) {
   const [settings, setSettings] = useState<ModelSettings>(loadModelSettings)
   const [kind, setKind] = useState<ModelKind>(initialKind)
   const [tab, setTab] = useState<
-    | 'models'
-    | 'translation'
-    | 'reading'
-    | 'scholar'
-    | 'scholaread'
-    | 'tools'
-    | 'review'
-    | 'tour'
-    | 'update'
-    | 'server'
-    | 'sync'
-    | 'offline'
+    'models' | 'reading' | 'scholar' | 'review' | 'sync' | 'general'
   >('models')
   const [editor, setEditor] = useState<EditorState | null>(null)
   const [showKey, setShowKey] = useState(false)
@@ -243,15 +232,14 @@ export function SettingsDialog({
   const [installing, setInstalling] = useState(false)
   const [installError, setInstallError] = useState('')
   const [closing, setClosing] = useState(false)
-  const [tourVisible, setTourVisible] = useState(false)
+  const [syncTarget, setSyncTarget] = useState<FileSyncTarget | null>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
   const closeTimer = useRef<number | null>(null)
-  const desktop = isDesktopApp()
   const mobile = isMobileShell()
 
-  // 安卓端没有研究与综述，误入这些分类时回到配置模型
+  // 安卓端不显示论文模板入口，误入时回到配置模型
   useEffect(() => {
-    if (mobile && (tab === 'tools' || tab === 'review' || tab === 'tour' || tab === 'update')) {
+    if (mobile && tab === 'review') {
       setTab('models')
     }
   }, [mobile, tab])
@@ -268,29 +256,7 @@ export function SettingsDialog({
   }, [onClose])
 
   useEffect(() => {
-    if (!open || !desktop) {
-      setTourVisible(false)
-      return
-    }
-    let alive = true
-    void getOnboarding()
-      .then((state) => {
-        if (alive) setTourVisible(!state.dismissed)
-      })
-      .catch(() => {
-        if (alive) setTourVisible(false)
-      })
-    return () => {
-      alive = false
-    }
-  }, [desktop, open])
 
-  const hideTour = useCallback(() => {
-    setTourVisible(false)
-    setTab('models')
-  }, [])
-
-  useEffect(() => {
     if (!open) return
     setClosing(false)
     if (closeTimer.current != null) {
@@ -683,52 +649,28 @@ export function SettingsDialog({
 
   const pageTitle =
     tab === 'models'
-      ? '配置模型'
-      : tab === 'translation'
-        ? '译文语言'
-        : tab === 'reading'
-          ? '自动阅读'
-          : tab === 'scholar'
-            ? '文献检索'
-            : tab === 'scholaread'
-              ? '学术阅读同步'
-              : tab === 'tools'
-              ? '写作工具'
-              : tab === 'review'
-                ? '综述模板'
-                : tab === 'tour'
-                  ? '新手教程'
-                  : tab === 'server'
-                    ? '服务器连接'
-                    : tab === 'sync'
-                      ? '设备同步'
-                      : tab === 'offline'
-                        ? '离线库'
-                        : '检查版本更新'
+      ? '配置模型与密钥'
+      : tab === 'reading'
+        ? '阅读界面'
+        : tab === 'scholar'
+          ? '文献检索'
+          : tab === 'review'
+            ? '论文模板'
+            : tab === 'sync'
+              ? '文件同步'
+              : '常规设置'
   const pageHint =
     tab === 'models'
       ? '回答模型负责问答与翻译，识图模型负责论文里的图片识别；两者可以分开配置，修改会自动保存在本机。'
-      : tab === 'translation'
-        ? '设置阅读页把英文论文翻译成哪种语言。切换后，已翻译的论文会按新语言重新翻译；原文、标注和笔记不受影响。'
-        : tab === 'reading'
-          ? '控制阅读时是否自动提取研究目标、研究方法和主要结论。关闭后不再发起额外的模型调用，已经生成的重点仍会保留。'
-          : tab === 'scholar'
-            ? '这里配置 Semantic Scholar 与 CORE 的检索密钥；密钥只保存在本机，不会上传到服务器。'
-            : tab === 'scholaread'
-              ? '手动从本机学术阅读拉取论文与阅读进度，学术阅读退出后可把 Paperead 的进度写回去。目录会自动定位，通常不需要配置。'
-              : tab === 'tools'
-              ? '导出 PDF 需要本机的 LaTeX 引擎；这里可以检测并快速安装。只检测本机工具，不会上传任何文件。'
+      : tab === 'reading'
+        ? '调整译文语言、正文字号与默认视图；改动会立即作用到当前打开的论文。'
+        : tab === 'scholar'
+          ? '这里配置 Semantic Scholar 与 CORE 的检索密钥；密钥只保存在本机，不会上传到服务器。'
           : tab === 'review'
-            ? '设定写综述时用的章节骨架：可以用系统默认、上传自己的模板，或从文献库选一篇综述。模板不会上传文献或密钥。'
-            : tab === 'tour'
-              ? '只在桌面客户端首次启动时自动出现一次。之后可以在这里重新观看或继续上次的进度。'
-              : tab === 'server'
-                ? '手机端通过这里连接运行 Paperead 后端的电脑或服务器。地址和口令只保存在本机。'
-                : tab === 'sync'
-                  ? '手机扫描电脑上的二维码即可完成配对，服务器地址、访问口令和模型配置会一起同步到本机。'
-                  : tab === 'offline'
-                  ? '下载到本机的论文、从 StoryReader 导入的书都存在这里。离开电脑后仍可阅读，译文和问答会直接调用模型。'
-                  : '应用每天自动检查一次新版本，也可以随时手动检查。'
+            ? '设定写论文时用的章节骨架：可以用系统默认、上传自己的模板，或从文献库选一篇综述当参考。模板不会上传文献或密钥。'
+            : tab === 'sync'
+              ? 'Zotero、学术阅读与手机的文件同步都收在这里；打开同步窗口后可以先查看目标里的论文，再选择拉取或推送。'
+              : '应用更新、离线库、服务器连接与写作工具等不常改的设置都收在这里。'
 
   return (
     <div
@@ -761,19 +703,11 @@ export function SettingsDialog({
             </button>
             <button
               className="library-nav-item"
-              data-active={tab === 'translation'}
-              onClick={() => setTab('translation')}
-            >
-              <IconChat />
-              <span>译文语言</span>
-            </button>
-            <button
-              className="library-nav-item"
               data-active={tab === 'reading'}
               onClick={() => setTab('reading')}
             >
-              <IconSpark />
-              <span>自动阅读</span>
+              <IconBook />
+              <span>阅读界面</span>
             </button>
             <button
               className="library-nav-item"
@@ -783,99 +717,37 @@ export function SettingsDialog({
               <IconSearch />
               <span>文献检索</span>
             </button>
-            {mobile && (
-              <>
-                <button
-                  className="library-nav-item"
-                  data-active={tab === 'sync'}
-                  onClick={() => setTab('sync')}
-                >
-                  <IconSpark />
-                  <span>设备同步</span>
-                </button>
-                <button
-                  className="library-nav-item"
-                  data-active={tab === 'server'}
-                  onClick={() => setTab('server')}
-                >
-                  <IconRefresh />
-                  <span>服务器连接</span>
-                </button>
-                <button
-                  className="library-nav-item"
-                  data-active={tab === 'offline'}
-                  onClick={() => setTab('offline')}
-                >
-                  <IconDownload />
-                  <span>离线库</span>
-                </button>
-              </>
-            )}
+            <button
+              className="library-nav-item"
+              data-active={tab === 'sync'}
+              onClick={() => setTab('sync')}
+            >
+              <IconRefresh />
+              <span>文件同步</span>
+            </button>
             {!mobile && (
-              <>
-                <button
-                  className="library-nav-item"
-                  data-active={tab === 'sync'}
-                  onClick={() => setTab('sync')}
-                >
-                  <IconSpark />
-                  <span>设备同步</span>
-                </button>
-                <button
-                  className="library-nav-item"
-                  data-active={tab === 'scholaread'}
-                  onClick={() => setTab('scholaread')}
-                >
-                  <IconRefresh />
-                  <span>Scholaread 同步</span>
-                </button>
-                <button
-                  className="library-nav-item"
-                  data-active={tab === 'tools'}
-                  onClick={() => setTab('tools')}
-                >
-                  <IconDownload />
-                  <span>写作工具</span>
-                </button>
-                <button
-                  className="library-nav-item"
-                  data-active={tab === 'review'}
-                  onClick={() => setTab('review')}
-                >
-                  <IconBook />
-                  <span>综述模板</span>
-                </button>
-              </>
-            )}
-            {desktop && tourVisible && (
               <button
                 className="library-nav-item"
-                data-active={tab === 'tour'}
-                onClick={() => setTab('tour')}
+                data-active={tab === 'review'}
+                onClick={() => setTab('review')}
               >
                 <IconSpark />
-                <span>新手教程</span>
+                <span>论文模板</span>
               </button>
             )}
-            {!mobile && (
-              <button
-                className="library-nav-item"
-                data-active={tab === 'update'}
-                onClick={() => setTab('update')}
-              >
-                <IconRefresh />
-                <span>检查版本更新</span>
-                {updateInfo?.has_update && (
-                  <i className="settings-nav-dot" title="发现新版本" />
-                )}
-              </button>
-            )}
+            <button
+              className="library-nav-item"
+              data-active={tab === 'general'}
+              onClick={() => setTab('general')}
+            >
+              <IconRefresh />
+              <span>常规设置</span>
+              {updateInfo?.has_update && (
+                <i className="settings-nav-dot" title="发现新版本" />
+              )}
+            </button>
           </nav>
           <div className="settings-sidebar-foot">
-            <button className="library-nav-item" onClick={requestClose}>
-              <IconBack />
-              <span>返回主界面</span>
-            </button>
             <span className="settings-nav-version">v{updateInfo?.current || '—'}</span>
           </div>
         </aside>
@@ -1271,240 +1143,168 @@ export function SettingsDialog({
           </div>
         )}
       </>
-    ) : tab === 'translation' ? (
-      <TranslationPanel />
     ) : tab === 'reading' ? (
       <ReadingPanel />
     ) : tab === 'scholar' ? (
       <ScholarConfigPanel />
-    ) : tab === 'scholaread' ? (
-      <ScholarReadPanel />
-    ) : tab === 'tools' ? (
-      <ToolchainPanel />
     ) : tab === 'review' ? (
       <ReviewTemplatePanel />
-    ) : tab === 'tour' && tourVisible ? (
-      <TourPanel onClose={requestClose} onDismissed={hideTour} />
-    ) : tab === 'server' ? (
-      <MobileServerPanel />
     ) : tab === 'sync' ? (
-      mobile ? <MobileDeviceSyncPanel /> : <DesktopDeviceSyncPanel />
-    ) : tab === 'offline' ? (
-      <OfflineLibraryPanel />
+      <FileSyncSettingsPanel onOpen={setSyncTarget} />
     ) : (
-              <div className="modal-body update-panel" ref={bodyRef}>
-                <section className="update-current">
-                  <div className="update-current-info">
-                    <span className="update-label">当前版本</span>
-                    <div className="update-current-line">
-                      <b className="update-version">v{updateInfo?.current || '—'}</b>
-                      {updateChecking ? (
-                        <span className="update-status is-muted">检查中…</span>
-                      ) : updateError ? (
-                        <span className="update-status is-warn">检查失败</span>
-                      ) : updateInfo?.has_update ? (
-                        <span className="update-status is-new">
-                          可更新至 v{updateInfo.latest}
-                        </span>
-                      ) : updateInfo ? (
-                        <span className="update-status is-latest">
-                          <IconCheck /> 已是最新版本
-                        </span>
-                      ) : (
-                        <span className="update-status is-muted">尚未检查</span>
-                      )}
-                    </div>
-                    <span className="update-time">
-                      上次检查：{formatCheckTime(updateCheckedAt)}
-                      {updateInfo?.cached ? ' · 当天缓存' : ''}
+      <div className="modal-body settings-general" ref={bodyRef}>
+        <div className="general-section">
+          <div className="modal-body update-panel">
+            <section className="update-current">
+              <div className="update-current-info">
+                <span className="update-label">当前版本</span>
+                <div className="update-current-line">
+                  <b className="update-version">v{updateInfo?.current || '—'}</b>
+                  {updateChecking ? (
+                    <span className="update-status is-muted">检查中…</span>
+                  ) : updateError ? (
+                    <span className="update-status is-warn">检查失败</span>
+                  ) : updateInfo?.has_update ? (
+                    <span className="update-status is-new">
+                      可更新至 v{updateInfo.latest}
                     </span>
-                  </div>
-                  <button
-                    className="btn update-check-btn"
-                    onClick={() => void runUpdateCheck(true)}
-                    disabled={updateChecking}
-                  >
-                    {updateChecking ? '检查中…' : '检查更新'}
-                  </button>
-                </section>
+                  ) : updateInfo ? (
+                    <span className="update-status is-latest">
+                      <IconCheck /> 已是最新版本
+                    </span>
+                  ) : (
+                    <span className="update-status is-muted">尚未检查</span>
+                  )}
+                </div>
+                <span className="update-time">
+                  上次检查：{formatCheckTime(updateCheckedAt)}
+                  {updateInfo?.cached ? ' · 当天缓存' : ''}
+                </span>
+              </div>
+              <button
+                className="btn update-check-btn"
+                onClick={() => void runUpdateCheck(true)}
+                disabled={updateChecking}
+              >
+                {updateChecking ? '检查中…' : '检查更新'}
+              </button>
+            </section>
 
-                {updateError && (
-                  <div className="update-error">
-                    检查失败：{updateError}
-                    <br />
-                    可以稍后重试，或直接打开发布页查看。
-                  </div>
-                )}
-
-                {updateInfo?.has_update && !updateError && (
-                  <section className="update-release">
-                    <div className="update-release-head">
-                      <b>v{updateInfo.latest}</b>
-                      {updateInfo.pub_date && (
-                        <span>{updateInfo.pub_date.slice(0, 10)}</span>
-                      )}
-                    </div>
-                    {updateInfo.notes && (
-                      <div className="update-notes-card">
-                        <div className="update-notes-head">更新内容</div>
-                        <ul className="update-notes-list">
-                          {parseUpdateNotes(updateInfo.notes).map((line, i) => (
-                            <li key={i}>{line}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                    <div className="update-release-actions">
-                      {canInstallInApp() ? (
-                        <button
-                          className="btn primary"
-                          onClick={() => void installUpdate()}
-                          disabled={installing}
-                        >
-                          {installing
-                            ? '正在下载并安装…'
-                            : `立即更新到 v${updateInfo.latest}`}
-                        </button>
-                      ) : (
-                        <a
-                          className="btn primary"
-                          href={updateInfo.url || updateInfo.release_url}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          下载安装包 ↗
-                        </a>
-                      )}
-                      {canInstallInApp() && !installing && (
-                        <a
-                          className="update-alt-link"
-                          href={updateInfo.url || updateInfo.release_url}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          手动下载
-                        </a>
-                      )}
-                    </div>
-                    {installing && (
-                      <p className="update-install-hint">
-                        下载完成后应用会自动关闭并启动安装程序，请勿关闭窗口。
-                      </p>
-                    )}
-                    {installError && (
-                      <div className="update-error">自动更新失败：{installError}</div>
-                    )}
-                  </section>
-                )}
-
-                <p className="update-meta">
-                  <span>应用每天自动检查一次</span>
-                  <span aria-hidden="true">·</span>
-                  <span>
-                    {canInstallInApp() ? '桌面版支持应用内更新' : '浏览器版需手动下载安装包'}
-                  </span>
-                  <a
-                    href={
-                      updateInfo?.release_url ||
-                      'https://github.com/xiaohui-plus/Paperead/releases/latest'
-                    }
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    打开发布页 ↗
-                  </a>
-                </p>
+            {updateError && (
+              <div className="update-error">
+                检查失败：{updateError}
+                <br />
+                可以稍后重试，或直接打开发布页查看。
               </div>
             )}
-        </main>
-      </div>
-    </div>
-  )
-}
 
-/** 设置 → 新手教程：桌面端手动重看或继续上次进度。 */
-function TourPanel({
-  onClose,
-  onDismissed,
-}: {
-  onClose: () => void
-  onDismissed: () => void
-}) {
-  const [state, setState] = useState<OnboardingState | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
+            {updateInfo?.has_update && !updateError && (
+              <section className="update-release">
+                <div className="update-release-head">
+                  <b>v{updateInfo.latest}</b>
+                  {updateInfo.pub_date && (
+                    <span>{updateInfo.pub_date.slice(0, 10)}</span>
+                  )}
+                </div>
+                {updateInfo.notes && (
+                  <div className="update-notes-card">
+                    <div className="update-notes-head">更新内容</div>
+                    <ul className="update-notes-list">
+                      {parseUpdateNotes(updateInfo.notes).map((line, i) => (
+                        <li key={i}>{line}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                <div className="update-release-actions">
+                  {canInstallInApp() ? (
+                    <button
+                      className="btn primary"
+                      onClick={() => void installUpdate()}
+                      disabled={installing}
+                    >
+                      {installing
+                        ? '正在下载并安装…'
+                        : `立即更新到 v${updateInfo.latest}`}
+                    </button>
+                  ) : (
+                    <a
+                      className="btn primary"
+                      href={updateInfo.url || updateInfo.release_url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      下载安装包 ↗
+                    </a>
+                  )}
+                  {canInstallInApp() && !installing && (
+                    <a
+                      className="update-alt-link"
+                      href={updateInfo.url || updateInfo.release_url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      手动下载
+                    </a>
+                  )}
+                </div>
+                {installing && (
+                  <p className="update-install-hint">
+                    下载完成后应用会自动关闭并启动安装程序，请勿关闭窗口。
+                  </p>
+                )}
+                {installError && (
+                  <div className="update-error">自动更新失败：{installError}</div>
+                )}
+              </section>
+            )}
 
-  useEffect(() => {
-    void getOnboarding()
-      .then(setState)
-      .catch(() => setState(null))
-  }, [])
-
-  const inProgress = state?.status === 'in_progress' && Boolean(state.stepId)
-  const label = inProgress
-    ? '继续上次的教程'
-    : state?.status === 'completed' || state?.status === 'skipped'
-      ? '重新观看教程'
-      : '开始新手教程'
-
-  const start = () => {
-    window.dispatchEvent(
-      new CustomEvent('paperead:tour-start', {
-        detail: { resume: inProgress },
-      }),
-    )
-    onClose()
-  }
-
-  const dismiss = async () => {
-    if (busy) return
-    setBusy(true)
-    setError('')
-    try {
-      await postOnboarding('dismiss')
-      // 如果教程正开着，一起收起，避免关掉设置后又弹出
-      window.dispatchEvent(new Event('paperead:tour-stop'))
-      // 设置里也不再保留新手教程入口
-      onDismissed()
-    } catch {
-      setError('操作失败，请重试')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <div className="modal-body tour-settings">
-      <div className="tour-settings-card">
-        <span className="tour-settings-icon">
-          <IconSpark />
-        </span>
-        <div>
-          <h3>{inProgress ? '继续上次的新手教程' : '第一次使用 Paperead？'}</h3>
-          <p>
-            教程会贴着真实界面走一遍：上传论文、生成导读、找文献、建研究项目、写一篇综述。
-            每一步完成后再进入下一步，不会一次塞给你一堆说明。
-          </p>
+            <p className="update-meta">
+              <span>应用每天自动检查一次</span>
+              <span aria-hidden="true">·</span>
+              <span>
+                {canInstallInApp() ? '桌面版支持应用内更新' : '浏览器版需手动下载安装包'}
+              </span>
+              <a
+                href={
+                  updateInfo?.release_url ||
+                  'https://github.com/xiaohui-plus/Paperead/releases/latest'
+                }
+                target="_blank"
+                rel="noreferrer"
+              >
+                打开发布页 ↗
+              </a>
+            </p>
+          </div>
         </div>
-      </div>
-      <div className="tour-settings-actions">
-        <button className="btn primary tour-settings-start" onClick={start}>
-          {label}
-        </button>
-        {inProgress && (
-          <button
-            className="tour-settings-dismiss"
-            onClick={() => void dismiss()}
-            disabled={busy}
-          >
-            {busy ? '处理中…' : '不再提醒'}
-          </button>
+
+        {mobile ? (
+          <>
+            <div className="general-section">
+              <MobileServerPanel />
+            </div>
+            <div className="general-section">
+              <OfflineLibraryPanel />
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="general-section">
+              <ToolchainPanel />
+            </div>
+          </>
         )}
       </div>
-      {error && <p className="tour-settings-error">{error}</p>}
-      <p className="tour-settings-note">
-        只会在桌面客户端首次启动时自动出现一次；网页端不显示这个入口。
-      </p>
+    )}
+        </main>
+      </div>
+      <FileSyncDialog
+        open={Boolean(syncTarget)}
+        initialTarget={syncTarget ?? 'zotero'}
+        onClose={() => setSyncTarget(null)}
+        onSynced={() => onLibraryChanged?.()}
+      />
     </div>
   )
 }
@@ -1636,69 +1436,205 @@ function ScholarConfigPanel() {
   )
 }
 
-/** 设置 → 译文语言：只影响阅读页翻译，问答与导读仍用中文。 */
-function TranslationPanel() {
-  const [lang, setLang] = useState(loadTargetLang)
+const FONT_STEPS = [
+  { value: 0.9, label: '小' },
+  { value: 1, label: '标准' },
+  { value: 1.08, label: '稍大' },
+  { value: 1.16, label: '大' },
+  { value: 1.25, label: '特大' },
+]
 
+function FontSizeStepper({
+  title,
+  hint,
+  value,
+  onChange,
+}: {
+  title: string
+  hint: string
+  value: number
+  onChange: (value: number) => void
+}) {
+  const active = FONT_STEPS.reduce(
+    (best, step, index) =>
+      Math.abs(step.value - value) < Math.abs(FONT_STEPS[best].value - value)
+        ? index
+        : best,
+    0,
+  )
+  const step = FONT_STEPS[active]
   return (
-    <div className="modal-body">
-      <section className="model-section">
-        <div className="section-head">
-          <h3>阅读页译文语言</h3>
-        </div>
-        <p className="model-empty">
-          英文论文会翻译成这里选择的语言。术语表、引用编号、公式和数字都会原样保留；
-          问答、导读和脉络不受影响，仍按中文回答。
-        </p>
-        <label className="field-label" htmlFor="target-lang">
-          翻译成
-        </label>
-        <select
-          id="target-lang"
-          className="input"
-          value={lang}
-          onChange={(event) => {
-            setLang(event.target.value)
-            saveTargetLang(event.target.value)
-          }}
+    <div className="reading-row">
+      <div className="reading-row-label">
+        <b>{title}</b>
+        <span>{hint}</span>
+      </div>
+      <div className="reading-stepper">
+        <button
+          type="button"
+          aria-label={`调小${title}`}
+          disabled={active === 0}
+          onClick={() => onChange(FONT_STEPS[Math.max(0, active - 1)].value)}
         >
-          {TRANSLATION_LANGS.map((item) => (
-            <option key={item.key} value={item.key}>
-              {item.label}
-            </option>
-          ))}
-        </select>
-        <p className="hint">
-          切换后，已经翻译过的论文会在下次打开时按新语言重新翻译；原文、高亮和笔记不受影响。
-          只对当前这台机器生效。
-        </p>
-      </section>
+          −
+        </button>
+        <span>
+          {step.label}
+          <em>{Math.round(value * 100)}%</em>
+        </span>
+        <button
+          type="button"
+          aria-label={`调大${title}`}
+          disabled={active === FONT_STEPS.length - 1}
+          onClick={() =>
+            onChange(FONT_STEPS[Math.min(FONT_STEPS.length - 1, active + 1)].value)
+          }
+        >
+          ＋
+        </button>
+      </div>
     </div>
   )
 }
 
-/** 设置 → 自动阅读：控制是否在翻译后自动提取研究目标 / 方法 / 结论。 */
+const READING_MODES: { value: ViewMode; label: string }[] = [
+  { value: 'bilingual', label: '双语对照' },
+  { value: 'zh', label: '仅译文' },
+  { value: 'en', label: '仅原文' },
+]
+
+/** 设置 → 阅读界面：译文语言、原文/译文字号、默认阅读模式与自动阅读重点。 */
 function ReadingPanel() {
+  const [lang, setLang] = useState(loadTargetLang)
+  const [fonts, setFonts] = useState<ReadingFonts>(loadReadingFonts)
+  const [mode, setMode] = useState<ViewMode>(loadDefaultReadingMode)
   const [enabled, setEnabled] = useState(loadAutoHighlights)
 
-  return (
-    <div className="modal-body">
-      <section className="model-section">
-        <div className="section-head">
-          <h3>阅读时自动提取重点</h3>
-        </div>
-        <p className="model-empty">
-          每翻完一页，自动识别这一页里的研究目标、研究方法和主要结论，用蓝、绿、橙三种颜色标在原文和译文上，
-          同时摘录到左侧「阅读重点」。论文里没写的内容不会硬标。
-        </p>
+  const changeFonts = (patch: Partial<ReadingFonts>) => {
+    const next = { ...fonts, ...patch }
+    setFonts(next)
+    saveReadingFonts(next)
+  }
 
-        <div className="setting-row">
-          <div className="setting-row-text">
+  return (
+    <div className="modal-body settings-reading">
+      <section className="reading-card">
+        <header className="reading-card-head">
+          <div>
+            <h3>译文语言</h3>
+            <p>英文论文翻译成这里选择的语言；问答、导读和脉络仍用中文。</p>
+          </div>
+          <span className="reading-badge">即时生效</span>
+        </header>
+        <div className="reading-row">
+          <div className="reading-row-label">
+            <b>翻译成</b>
+            <span>术语表、引用编号、公式和数字都会原样保留。</span>
+          </div>
+          <select
+            id="target-lang"
+            className="input reading-select"
+            value={lang}
+            onChange={(event) => {
+              setLang(event.target.value)
+              saveTargetLang(event.target.value)
+            }}
+          >
+            {TRANSLATION_LANGS.map((item) => (
+              <option key={item.key} value={item.key}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <p className="reading-note">
+          切换后，已经翻译过的论文会在下次打开时按新语言重新翻译；原文、高亮和笔记不受影响。只对当前这台机器生效。
+        </p>
+      </section>
+
+      <section className="reading-card">
+        <header className="reading-card-head">
+          <div>
+            <h3>正文字号</h3>
+            <p>原文和译文分别缩放；顶栏的「+ / −」会在此基础上继续缩放整页。</p>
+          </div>
+          <span className="reading-badge">即时生效</span>
+        </header>
+        <FontSizeStepper
+          title="原文字号"
+          hint="影响双栏对照里的英文段落。"
+          value={fonts.en}
+          onChange={(value) => changeFonts({ en: value })}
+        />
+        <FontSizeStepper
+          title="译文字号"
+          hint="影响中文译文段落，以及纯译文模式下的正文。"
+          value={fonts.zh}
+          onChange={(value) => changeFonts({ zh: value })}
+        />
+        <div className="reading-preview">
+          <span className="reading-preview-label">字号预览</span>
+          <span
+            className="reading-preview-en"
+            style={{ fontSize: `${15 * fonts.en}px` }}
+          >
+            The quick brown fox jumps over the lazy dog.
+          </span>
+          <span
+            className="reading-preview-zh"
+            style={{ fontSize: `${15 * fonts.zh}px` }}
+          >
+            中文译文会按同一段落对照显示。
+          </span>
+        </div>
+      </section>
+
+      <section className="reading-card">
+        <header className="reading-card-head">
+          <div>
+            <h3>默认视图</h3>
+            <p>新打开一篇论文时默认显示的阅读模式。</p>
+          </div>
+        </header>
+        <div className="reading-row">
+          <div className="reading-row-label">
+            <b>打开论文时</b>
+            <span>没有译文的论文会自动按原文显示。</span>
+          </div>
+          <div className="reading-segment" role="radiogroup" aria-label="默认阅读模式">
+            {READING_MODES.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                role="radio"
+                aria-checked={mode === option.value}
+                data-active={mode === option.value}
+                onClick={() => {
+                  setMode(option.value)
+                  saveDefaultReadingMode(option.value)
+                }}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <p className="reading-note">
+          阅读页顶栏仍可随时切换，这里只决定初始状态。
+        </p>
+      </section>
+
+      <section className="reading-card">
+        <header className="reading-card-head">
+          <div>
+            <h3>阅读重点</h3>
+            <p>自动识别每一页里的研究目标、研究方法和主要结论。</p>
+          </div>
+        </header>
+        <div className="reading-row">
+          <div className="reading-row-label">
             <b>自动标记阅读重点</b>
-            <span>
-              关闭后不再自动生成新的标记，也不会发起额外的模型调用；已经生成的重点仍会保留。
-              每个看过的页会多 1 次模型调用。
-            </span>
+            <span>用蓝、绿、橙三种颜色标在原文和译文上，并摘录到左侧「阅读重点」。</span>
           </div>
           <button
             type="button"
@@ -1716,9 +1652,8 @@ function ReadingPanel() {
             <i />
           </button>
         </div>
-
-        <p className="hint">
-          这个开关只影响自动标记；你自己划词的高亮和笔记不受影响。
+        <p className="reading-note">
+          关闭后不再生成新的标记，也不会发起额外的模型调用；已经生成的重点仍会保留，自己划词的高亮和笔记不受影响。
         </p>
       </section>
     </div>

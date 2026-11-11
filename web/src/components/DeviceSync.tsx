@@ -7,18 +7,31 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import QRCode from 'qrcode'
 import jsQR from 'jsqr'
-import { Format, checkPermissions, requestPermissions, scan } from '@tauri-apps/plugin-barcode-scanner'
+import {
+  Format,
+  cancel,
+  checkPermissions,
+  openAppSettings,
+  requestPermissions,
+  scan,
+} from '@tauri-apps/plugin-barcode-scanner'
 import {
   buildSyncCode,
+  exportSyncPackage,
   fetchRemotePapers,
   fetchScholarReadInfo,
   fetchServerModelSettings,
   fetchSyncInfo,
   importScholarReadLibrary,
+  importSyncPackage,
   parseSyncCode,
+  saveSyncPackageFile,
   syncFromServer,
   type RemotePaper,
   type ScholarReadInfo,
+  type SyncExportReport,
+  type SyncImportProgress,
+  type SyncImportReport,
   type SyncInfo,
   type SyncMode,
   type SyncReport,
@@ -26,10 +39,16 @@ import {
 import {
   installMobileFetch,
   loadMobileServer,
+  mediaUrl,
   saveMobileServer,
   testMobileServer,
 } from '../lib/mobile'
 import { formatBytes, listOffline, type OfflineSummary } from '../lib/offlineStore'
+import {
+  loadExportHistory,
+  markExported,
+  type ExportHistory,
+} from '../lib/syncHistory'
 
 function CopyButton({ value, label }: { value: string; label: string }) {
   const [copied, setCopied] = useState(false)
@@ -55,8 +74,248 @@ function lanCommand(port: number) {
   return `set PAPEREAD_HOST=0.0.0.0\nset PAPEREAD_PORT=${port || 8010}\npython -m server.main`
 }
 
+type SaveOutcome = 'saved' | 'cancelled' | 'downloaded' | 'path'
+
+/** 电脑端：勾选论文，导出一个不需要网络的 .paperead 同步包。 */
+export function PackageExportPanel({
+  pendingFirst = false,
+}: {
+  pendingFirst?: boolean
+} = {}) {
+  const [papers, setPapers] = useState<RemotePaper[]>([])
+  const [history, setHistory] = useState<ExportHistory>(loadExportHistory)
+  const [checked, setChecked] = useState<Set<string>>(new Set())
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [hint, setHint] = useState('')
+  const [result, setResult] = useState<{
+    report: SyncExportReport
+    saved: SaveOutcome
+  } | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const list = await fetchRemotePapers()
+      const exported = loadExportHistory()
+      setPapers(list)
+      setHistory(exported)
+      setChecked(
+        new Set(
+          list
+            .filter((item) => item.status === 'ready')
+            .filter((item) => !pendingFirst || !exported[item.id])
+            .map((item) => item.id),
+        ),
+      )
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : '读取文献列表失败')
+    } finally {
+      setLoading(false)
+    }
+  }, [pendingFirst])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const ready = papers.filter((item) => item.status === 'ready')
+  const pending = ready.filter((item) => !history[item.id])
+
+  const toggle = (paperId: string) => {
+    setChecked((prev) => {
+      const next = new Set(prev)
+      if (next.has(paperId)) next.delete(paperId)
+      else next.add(paperId)
+      return next
+    })
+  }
+
+  const runExport = async () => {
+    if (busy || checked.size === 0) return
+    setBusy(true)
+    setError('')
+    setResult(null)
+    setHint('正在打包论文、页图与正文图片，篇幅多时会慢一些…')
+    try {
+      const report = await exportSyncPackage([...checked])
+      let saved: SaveOutcome = 'path'
+      try {
+        const outcome = await saveSyncPackageFile(report)
+        saved = outcome
+      } catch (saveError) {
+        setHint(
+          `同步包已生成，但保存对话框没有完成：${
+            saveError instanceof Error ? saveError.message : '未知错误'
+          }。可直接复制下面的路径。`,
+        )
+      }
+      setResult({ report, saved })
+      markExported([...checked])
+      setHistory(loadExportHistory())
+      if (saved === 'cancelled') {
+        setHint('已取消保存；同步包仍保留在电脑上。')
+      } else if (saved === 'saved') {
+        setHint('同步包已保存。把它发到手机后，在手机「设备同步」里导入。')
+      } else if (saved === 'downloaded') {
+        setHint('已触发浏览器下载；如果没有出现，可复制下面的电脑路径。')
+      }
+    } catch (exportError) {
+      setHint('')
+      setError(exportError instanceof Error ? exportError.message : '导出失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="model-section sync-package-export">
+      <div className="section-head">
+        <h3>文件同步（无需网络）</h3>
+        <button className="mini-btn" onClick={() => void load()} disabled={loading || busy}>
+          刷新
+        </button>
+      </div>
+      <p className="hint">
+        {pendingFirst
+          ? '默认只勾选还没发送过的新论文。导出一个 .paperead 文件，发到手机后在文献库点「导入同步包」。'
+          : '勾选论文后导出成一个 .paperead 文件，再用数据线、微信文件传输助手或网盘发到手机；手机在文献库点「导入同步包」。全程不需要 Wi-Fi、端口或服务器。'}
+        篇数多、页图多时包会比较大，建议一次导出 5–10 篇。
+      </p>
+
+      {loading ? (
+        <p className="hint">正在读取文献库…</p>
+      ) : papers.length === 0 ? (
+        <p className="hint">文献库还没有论文。先导入并等待解析完成，再来导出。</p>
+      ) : (
+        <>
+          <div className="sync-package-toolbar">
+            <span>
+              已就绪 <b>{ready.length}</b> 篇 · 已发送 <b>{ready.length - pending.length}</b> 篇
+            </span>
+            <button
+              className="mini-btn"
+              onClick={() => setChecked(new Set(pending.map((item) => item.id)))}
+              disabled={busy || pending.length === 0}
+            >
+              仅选未发送
+            </button>
+            <button
+              className="mini-btn"
+              onClick={() => setChecked(new Set(ready.map((item) => item.id)))}
+              disabled={busy}
+            >
+              全选
+            </button>
+            <button
+              className="mini-btn"
+              onClick={() => setChecked(new Set())}
+              disabled={busy}
+            >
+              清空
+            </button>
+          </div>
+          <div className="sync-card-grid">
+            {papers.map((paper) => {
+              const isReady = paper.status === 'ready'
+              const initial = (paper.title || '?').trim().slice(0, 1).toUpperCase()
+              return (
+                <label
+                  key={paper.id}
+                  className="sync-card"
+                  data-checked={checked.has(paper.id) || undefined}
+                  data-disabled={!isReady || undefined}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked.has(paper.id)}
+                    disabled={!isReady || busy}
+                    onChange={() => toggle(paper.id)}
+                  />
+                  <div className="sync-card-cover" data-tone="phone">
+                    {paper.thumbUrl ? (
+                      <img
+                        src={mediaUrl(paper.thumbUrl)}
+                        alt=""
+                        loading="lazy"
+                      />
+                    ) : (
+                      <span>{initial}</span>
+                    )}
+                    <em>
+                      {!isReady ? '解析中' : history[paper.id] ? '已发送' : ''}
+                    </em>
+                  </div>
+                  <div className="sync-card-info">
+                    <b title={paper.title}>{paper.title}</b>
+                    <span>
+                      {paper.authors || '作者未知'} · {paper.pages} 页 ·{' '}
+                      {formatBytes(paper.size)}
+                    </span>
+                  </div>
+                </label>
+              )
+            })}
+          </div>
+          {pendingFirst && pending.length === 0 && (
+            <p className="hint">
+              所有已就绪论文都发送过了。需要重新发送时，点上面的「全选」再导出。
+            </p>
+          )}
+          <button
+            className="btn primary"
+            onClick={() => void runExport()}
+            disabled={busy || checked.size === 0}
+          >
+            {busy
+              ? '正在打包…'
+              : pendingFirst
+                ? `发送 ${checked.size} 篇新论文`
+                : `导出同步包（${checked.size} 篇）`}
+          </button>
+        </>
+      )}
+
+      {hint && <p className="hint">{hint}</p>}
+      {error && <p className="settings-error">{error}</p>}
+
+      {result && (
+        <div className="sync-report">
+          <b>同步包已生成</b>
+          <p>
+            {result.report.count} 篇 · {formatBytes(result.report.size)}
+          </p>
+          <p className="sync-package-path">
+            在电脑上：<code>{result.report.path}</code>
+            <CopyButton value={result.report.path} label="复制路径" />
+          </p>
+          {result.saved === 'saved' && <p>已保存到你选择的位置。</p>}
+          {result.saved === 'downloaded' && (
+            <p>已触发浏览器下载；若没有出现，可直接使用上面的路径。</p>
+          )}
+          {result.report.skipped.length > 0 && (
+            <ul>
+              {result.report.skipped.slice(0, 5).map((item) => (
+                <li key={item.id}>
+                  {item.title}：{item.reason}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      <p className="hint">
+        传输方式：数据线拷贝、微信「文件传输助手」、QQ、网盘、隔空投送都可以，文件不会被上传到 Paperead 的服务器。
+      </p>
+    </section>
+  )
+}
+
 /** 电脑端：二维码 + 连接信息。 */
-export function DesktopDeviceSyncPanel() {
+function WifiPairPanel() {
   const [info, setInfo] = useState<SyncInfo | null>(null)
   const [qr, setQr] = useState('')
   const [error, setError] = useState('')
@@ -95,10 +354,10 @@ export function DesktopDeviceSyncPanel() {
     void load()
   }, [load])
 
-  if (loading) return <div className="modal-body"><p className="hint">正在读取本机连接信息…</p></div>
+  if (loading) return <div className="sync-wifi"><p className="hint">正在读取本机连接信息…</p></div>
 
   return (
-    <div className="modal-body">
+    <div className="sync-wifi">
       <section className="model-section">
         <div className="section-head">
           <h3>手机配对</h3>
@@ -160,6 +419,19 @@ export function DesktopDeviceSyncPanel() {
   )
 }
 
+/** 设置 → 设备同步（电脑端）：文件同步为主，Wi-Fi 直连收进高级。 */
+export function DesktopDeviceSyncPanel() {
+  return (
+    <div className="modal-body">
+      <PackageExportPanel />
+      <details className="sync-advanced">
+        <summary>Wi-Fi 直连（高级，可选）</summary>
+        <WifiPairPanel />
+      </details>
+    </div>
+  )
+}
+
 /** 从相册图片里识别二维码。 */
 async function decodeQrImage(file: File): Promise<string | null> {
   const url = URL.createObjectURL(file)
@@ -185,6 +457,126 @@ async function decodeQrImage(file: File): Promise<string | null> {
 }
 
 type SyncView = 'main' | 'select'
+
+/** 手机端：从系统文件选择器导入电脑导出的 .paperead，不依赖网络。 */
+function PackageImportPanel({
+  onImported,
+  onDone,
+}: {
+  onImported?: () => void
+  onDone?: () => void
+}) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [progress, setProgress] = useState<SyncImportProgress | null>(null)
+  const [report, setReport] = useState<SyncImportReport | null>(null)
+
+  const choose = () => {
+    setError('')
+    setReport(null)
+    inputRef.current?.click()
+  }
+
+  const run = async (file: File | null) => {
+    if (!file || busy) return
+    setBusy(true)
+    setError('')
+    setReport(null)
+    setProgress({ done: 0, total: 0, title: '' })
+    try {
+      const result = await importSyncPackage(file, setProgress)
+      setReport(result)
+      onImported?.()
+    } catch (importError) {
+      setError(
+        importError instanceof Error ? importError.message : '导入同步包失败',
+      )
+    } finally {
+      setBusy(false)
+      setProgress(null)
+    }
+  }
+
+  return (
+    <section className="model-section sync-package-import">
+      <div className="section-head">
+        <h3>从电脑导入同步包</h3>
+      </div>
+      <p className="hint">
+        电脑上打开「设置 → 设备同步 → 文件同步」，导出 <code>.paperead</code> 文件，
+        再通过微信、数据线或网盘发到手机。不需要和电脑连同一个 Wi-Fi；同一篇论文会覆盖手机上的旧副本。
+      </p>
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".paperead,.zip,application/zip"
+        hidden
+        onChange={(event) => {
+          const file = event.target.files?.[0] ?? null
+          event.target.value = ''
+          void run(file)
+        }}
+      />
+      <button className="btn primary" onClick={choose} disabled={busy}>
+        {busy ? '正在导入…' : '选择 .paperead 文件'}
+      </button>
+
+      {busy && progress && (
+        <div className="sync-progress">
+          <div className="sync-progress-bar">
+            <span
+              style={{
+                width: `${
+                  progress.total
+                    ? Math.round((progress.done / progress.total) * 100)
+                    : 8
+                }%`,
+              }}
+            />
+          </div>
+          <span className="sync-progress-text">
+            {progress.total
+              ? `已导入 ${Math.min(progress.done, progress.total)}/${progress.total} · ${
+                  progress.title || '…'
+                }`
+              : '正在读取同步包…'}
+          </span>
+        </div>
+      )}
+
+      {error && <p className="settings-error">{error}</p>}
+
+      {report && (
+        <div className="sync-report">
+          <b>导入完成</b>
+          <p>
+            共 {report.total} 篇：新增 {report.imported} 篇
+            {report.updated ? `，覆盖 ${report.updated} 篇` : ''}。
+          </p>
+          {report.failed.length > 0 && (
+            <ul>
+              {report.failed.slice(0, 5).map((item) => (
+                <li key={item.title}>
+                  {item.title}：{item.reason}
+                </li>
+              ))}
+              {report.failed.length > 5 && (
+                <li>还有 {report.failed.length - 5} 篇失败…</li>
+              )}
+            </ul>
+          )}
+          <p className="hint">回到文献库即可离线阅读。</p>
+          {onDone && (
+            <button className="btn primary sync-done-btn" onClick={onDone}>
+              进入离线文献库
+            </button>
+          )}
+        </div>
+      )}
+    </section>
+  )
+}
 
 /** 手机端：配对后直接选同步方式；没配对时先扫码 / 相册 / 粘贴同步码。 */
 export function MobileDeviceSyncPanel({
@@ -216,6 +608,8 @@ export function MobileDeviceSyncPanel({
   } | null>(null)
   const [report, setReport] = useState<SyncReport | null>(null)
   const [confirmFull, setConfirmFull] = useState(false)
+  const [scanning, setScanning] = useState(false)
+  const cancelledByUser = useRef(false)
 
   const paired = Boolean(server.base)
   const localIds = new Set(local.map((item) => item.id))
@@ -246,6 +640,24 @@ export function MobileDeviceSyncPanel({
   useEffect(() => {
     void loadRemote()
   }, [loadRemote])
+
+  const refreshLocal = useCallback(async () => {
+    try {
+      setLocal(await listOffline())
+    } catch {
+      // 读不到本机列表时保持原样，不影响导入结果展示
+    }
+  }, [])
+
+  // 扫码时把网页变成透明取景层，让插件叠加在 WebView 下面的相机画面透出来。
+  useEffect(() => {
+    if (!scanning) return
+    const root = document.documentElement
+    root.dataset.scanning = '1'
+    return () => {
+      delete root.dataset.scanning
+    }
+  }, [scanning])
 
   const apply = useCallback(
     async (raw: string) => {
@@ -290,6 +702,7 @@ export function MobileDeviceSyncPanel({
   const startScan = useCallback(async () => {
     setError('')
     setNotice('')
+    cancelledByUser.current = false
     try {
       let state = await checkPermissions().catch(() => null)
       if (state !== 'granted') {
@@ -298,13 +711,22 @@ export function MobileDeviceSyncPanel({
       if (state !== 'granted') {
         throw new Error('没有相机权限，请在系统设置里允许 Paperead 使用相机')
       }
+      // 权限拿到后再切透明取景层，避免权限弹窗期间页面被隐藏。
+      setScanning(true)
       const result = await scan({ windowed: true, formats: [Format.QRCode] })
       await apply(result.content)
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
-      // 用户主动取消不算错误
-      if (/cancel/i.test(message)) return
+      if (/cancel/i.test(message)) {
+        // 用户自己点了取消就安静收起；插件/系统提前结束扫描时给个可见提示。
+        if (!cancelledByUser.current) {
+          setNotice('扫描已取消，可以再试一次，或点「从相册识别」')
+        }
+        return
+      }
       setError(`${message}；也可以点「从相册识别」或粘贴同步码`)
+    } finally {
+      setScanning(false)
     }
   }, [apply])
 
@@ -390,7 +812,35 @@ export function MobileDeviceSyncPanel({
 
   return (
     <div className="modal-body">
-      {paired && !pairOpen ? (
+      {scanning && (
+        <div
+          className="scan-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="扫描二维码"
+        >
+          <div className="scan-frame" />
+          <p>把电脑「设备同步」里的二维码放进框内</p>
+          <button
+            className="btn ghost"
+            onClick={() => {
+              cancelledByUser.current = true
+              void cancel()
+            }}
+          >
+            取消扫描
+          </button>
+        </div>
+      )}
+      <PackageImportPanel
+        onImported={() => void refreshLocal()}
+        onDone={onDone}
+      />
+      <details className="sync-advanced">
+        <summary>
+          {paired ? 'Wi-Fi 直连（已连接）' : 'Wi-Fi 直连（高级，可选）'}
+        </summary>
+        {paired && !pairOpen ? (
         <section className="model-section">
           <div className="section-head">
             <h3>同步电脑端文献</h3>
@@ -528,34 +978,47 @@ export function MobileDeviceSyncPanel({
               {remote.length === 0 ? (
                 <p className="hint">电脑端还没有文献。</p>
               ) : (
-                <ul className="sync-paper-list">
+                <div className="sync-card-grid">
                   {remote.map((paper) => {
                     const saved = localIds.has(paper.id)
                     const ready = paper.status === 'ready'
+                    const initial = (paper.title || '?').trim().slice(0, 1).toUpperCase()
                     return (
-                      <li key={paper.id} className={saved ? 'is-saved' : undefined}>
-                        <label>
-                          <input
-                            type="checkbox"
-                            checked={checked.has(paper.id)}
-                            disabled={saved || !ready || running}
-                            onChange={() => toggle(paper.id)}
-                          />
-                          <span className="sync-paper-meta">
-                            <b>{paper.title}</b>
-                            <span>
-                              {paper.authors || '作者未知'} · {paper.pages} 页 ·{' '}
-                              {formatBytes(paper.size)}
-                            </span>
+                      <label
+                        key={paper.id}
+                        className="sync-card"
+                        data-checked={checked.has(paper.id) || undefined}
+                        data-disabled={saved || !ready || undefined}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked.has(paper.id)}
+                          disabled={saved || !ready || running}
+                          onChange={() => toggle(paper.id)}
+                        />
+                        <div className="sync-card-cover" data-tone="phone">
+                          {paper.thumbUrl ? (
+                            <img
+                              src={mediaUrl(paper.thumbUrl)}
+                              alt=""
+                              loading="lazy"
+                            />
+                          ) : (
+                            <span>{initial}</span>
+                          )}
+                          <em>{saved ? '已在本机' : ready ? '' : '解析中'}</em>
+                        </div>
+                        <div className="sync-card-info">
+                          <b title={paper.title}>{paper.title}</b>
+                          <span>
+                            {paper.authors || '作者未知'} · {paper.pages} 页 ·{' '}
+                            {formatBytes(paper.size)}
                           </span>
-                          <span className="sync-paper-tag">
-                            {saved ? '已在本机' : ready ? '' : '解析中'}
-                          </span>
-                        </label>
-                      </li>
+                        </div>
+                      </label>
                     )
                   })}
-                </ul>
+                </div>
               )}
               <button
                 className="btn primary"
@@ -665,8 +1128,20 @@ export function MobileDeviceSyncPanel({
 
           <div className="sync-scan-actions">
             {native && (
-              <button className="btn primary" onClick={() => void startScan()} disabled={busy}>
+              <button
+                className="btn primary"
+                onClick={() => void startScan()}
+                disabled={busy || scanning}
+              >
                 扫描二维码
+              </button>
+            )}
+            {native && (
+              <button
+                className="mini-btn"
+                onClick={() => void openAppSettings()}
+              >
+                相机权限
               </button>
             )}
             <button
@@ -724,8 +1199,9 @@ export function MobileDeviceSyncPanel({
             当前连接：<code>{server.base || '未配置'}</code>
             {server.token ? '（已设置口令）' : ''}
           </p>
-        </section>
-      )}
+</section>
+        )}
+      </details>
     </div>
   )
 }

@@ -26,6 +26,7 @@ $tag = "v$Version"
 
 $installer    = Join-Path $root "release\Paperead_${Version}_x64-setup.exe"
 $installerZip = Join-Path $root "release\Paperead_${Version}_x64-setup.zip"
+$portable     = Join-Path $root "release\Paperead_${Version}_portable_x64.zip"
 $android      = Get-ChildItem (Join-Path $root "release\Paperead_${Version}_android-*.apk") -ErrorAction SilentlyContinue | Select-Object -First 1
 $pandoc       = Get-ChildItem (Join-Path $root "release\pandoc-*.zip") -ErrorAction SilentlyContinue | Select-Object -First 1
 $latestJson   = Join-Path $root "release\latest.json"
@@ -33,7 +34,7 @@ $sums         = Join-Path $root "release\SHA256SUMS.txt"
 
 # ---------- 前置检查 ----------
 $missing = @()
-foreach ($f in @($installer, $latestJson, $sums)) {
+foreach ($f in @($installer, $portable, $latestJson, $sums)) {
     if (-not (Test-Path $f)) { $missing += $f }
 }
 if (-not $pandoc) { $missing += "release\pandoc-*.zip" }
@@ -184,7 +185,7 @@ if (-not $SkipGitee) {
         Write-Host "Gitee: 发行版 $tag 已存在，补齐附件（描述如需修改请手动编辑）"
     }
 
-    $files = @($installer, $android.FullName, $sums, $latestJson, $pandoc.FullName)
+    $files = @($installer, $portable, $android.FullName, $sums, $latestJson, $pandoc.FullName)
     if (Test-Path $installerZip) { $files += $installerZip }
     if ($SourceZip -and (Test-Path $SourceZip)) { $files += $SourceZip }
     else { Write-Host "  提示：未提供源码 zip（-SourceZip），跳过" }
@@ -208,6 +209,7 @@ Write-Host ""
 Write-Host "==== 下载自检 ===="
 $checks = @(
     "https://gitee.com/$GiteeRepo/releases/download/$tag/$(Split-Path -Leaf $installer)",
+    "https://gitee.com/$GiteeRepo/releases/download/$tag/$(Split-Path -Leaf $portable)",
     "https://gitee.com/$GiteeRepo/releases/download/$tag/$(Split-Path -Leaf $android.FullName)",
     "https://gitee.com/$GiteeRepo/releases/download/latest/latest.json"
 )

@@ -37,11 +37,11 @@ from paperead.scholar.cite import build_bibtex
 from paperead.scholar.http import FriendlyError
 from paperead.scholar.models import paper_from_dict
 from paperead.scholar.search import SOURCE_KEYS, SearchInput
-from server.research import templates as template_store
+from server.research import explorer, templates as template_store
 from server.research.citations import audit_review
 from server.research.deck import build_deck, parse_outline
 from server.research.docx_edit import DocxError, edit_docx, read_docx
-from server.research.files import files_root, safe_name, save_bytes
+from server.research.files import safe_name, save_bytes_in
 from server.research.latex import (
     bib_stem,
     build_tex,
@@ -50,6 +50,7 @@ from server.research.latex import (
     has_cjk,
     read_text,
 )
+from server.research.review_standard import BUILTIN_TEMPLATES
 from server.research.review_standard import evaluate as evaluate_review
 from server.research.review_standard import list_templates, resolve_template
 from server.research.store import ResearchStore
@@ -201,12 +202,12 @@ def _project_payload(
 ) -> dict[str, Any]:
     project_template = _read_review_template(research, str(project["id"]))
     global_template = template_store.read_choice(_global_template_root(research))
-    template = project_template or global_template or ""
-    guide: dict[str, Any] = {}
-    if template.startswith("paper:") and library is not None:
-        guide = template_store.paper_guide(
-            _global_template_root(research), library, template[6:]
-        )
+    template = project_template or global_template or "default"
+    # 模板详情（章节骨架 + 每节约束 + 图表/语言指南）一次解析后一起给 agent，
+    # 避免 agent 只拿到 id 却不知道每一节该写什么。
+    detail = template_store.describe(
+        template, _global_template_root(research), library
+    )
     return {
         "id": project["id"],
         "kind": project["kind"],
@@ -219,9 +220,16 @@ def _project_payload(
         "reviewTemplateSource": (
             "project" if project_template else "global" if global_template else "default"
         ),
+        # 论文/综述模板的类型、章节、每节约束与完整 Markdown；upload/paper 也会有。
+        "reviewTemplateKind": detail.get("kind") or "review",
+        "reviewTemplateOutline": detail.get("outline") or [],
+        "reviewTemplateSections": detail.get("sections") or [],
+        "reviewTemplateMarkdown": detail.get("markdown") or "",
         # 论文模板的结构、图表放置与语言风格；upload/default 时为空。
-        "reviewTemplateGuide": guide,
+        "reviewTemplateGuide": detail.get("guide") or {},
         "workspace": project["workspace"],
+        # 用户选择的本地工作文件夹；为空时项目文件在 workspace/files。
+        "rootPath": project.get("root_path") or "",
         "createdAt": project["created_at"],
         "updatedAt": project["updated_at"],
     }
@@ -264,6 +272,7 @@ def _export_source(
     产物 / 文件，方便“把当前综述导出”这类不带参数的说法。
     """
     workspace = Path(research.workspace(project_id))
+    root = Path(research.workspace_root(project_id))
     items = research.list_items(project_id)
     artifacts = research.list_artifacts(project_id)
 
@@ -291,8 +300,8 @@ def _export_source(
                 title, text = _item_text(item)
                 if text:
                     return title, text
-        direct = _read_text(workspace / "artifacts" / name) or _read_text(
-            workspace / "files" / name
+        direct = _read_text(root / name) or _read_text(
+            workspace / "artifacts" / name
         )
         if direct:
             return Path(name).stem, direct
@@ -400,6 +409,7 @@ def _find_source_path(
     if not source:
         return None
     workspace = Path(research.workspace(project_id))
+    root = Path(research.workspace_root(project_id))
     name = safe_name(source)
     for row in research.list_artifacts(project_id):
         if source in {row.get("title"), row.get("path")} or Path(
@@ -415,7 +425,7 @@ def _find_source_path(
             path = research.item_path(project_id, item)
             if path.is_file():
                 return path
-    for candidate in (workspace / "files" / name, workspace / "artifacts" / name):
+    for candidate in (root / name, workspace / "artifacts" / name):
         if candidate.is_file():
             return candidate
     return None
@@ -431,6 +441,7 @@ def _find_ppt_template(
     if not source:
         return None, ""
     workspace = Path(research.workspace(project_id))
+    root = Path(research.workspace_root(project_id))
     name = safe_name(source)
     for item in research.list_items(project_id):
         path = research.item_path(project_id, item)
@@ -438,7 +449,7 @@ def _find_ppt_template(
             continue
         if source in {item.get("title"), item.get("path")} or path.name == name:
             return path, str(item.get("title") or path.name)
-    for candidate in (workspace / "files" / name, workspace / "artifacts" / name):
+    for candidate in (root / name, workspace / "artifacts" / name):
         if candidate.is_file() and candidate.suffix.lower() in _PPT_SUFFIXES:
             return candidate, candidate.name
     return None, ""
@@ -476,7 +487,7 @@ def _export_pptx(
 ) -> dict[str, Any]:
     """把结构化 slides（或 markdown 提纲）渲染成 16:9 的 .pptx。"""
     pid = str(project["id"])
-    workspace = Path(project["workspace"])
+    workspace = Path(research.workspace_root(pid))
     title = (body.title or "").strip()
     slides = [item for item in (body.deck or []) if isinstance(item, dict)]
 
@@ -525,7 +536,7 @@ def _export_pptx(
     filename = safe_name(body.filename or f"{title or '汇报'}.pptx")
     if not filename.lower().endswith(".pptx"):
         filename += ".pptx"
-    relative, size = save_bytes(workspace, filename, blob)
+    relative, size = save_bytes_in(workspace, filename, blob)
     item = research.add_item(
         pid,
         "file",
@@ -566,6 +577,7 @@ def _export_latex(
     """
     pid = str(project["id"])
     workspace = Path(project["workspace"])
+    root = Path(research.workspace_root(pid))
     source_path = _find_source_path(research, pid, body.source)
     title = (body.title or "").strip()
     text = body.content or ""
@@ -594,7 +606,7 @@ def _export_latex(
         else None
     )
     files: list[dict[str, Any]] = []
-    source_root = files_root(workspace)
+    source_root = root
     # 只有项目文件树里的 .tex 才就地编译；产物里的 .tex 复制一份到 files/ 再编译，
     # 保证新增条目的 path 始终是 files/ 内的相对路径。
     existing_tex = (
@@ -674,7 +686,7 @@ def _export_latex(
             filename += ".tex"
         # bibtex 对带点的 jobname 容易失败，统一把主干里的点换成短横线。
         filename = f"{Path(filename).stem.replace('.', '-')}.tex"
-        relative, size = save_bytes(workspace, filename, tex.encode("utf-8"))
+        relative, size = save_bytes_in(root, filename, tex.encode("utf-8"))
         item = research.add_item(
             pid, "file", filename, path=relative, mime="text/x-tex", size=size
         )
@@ -1006,14 +1018,11 @@ def build_router(
             for tag in row.get("tags") or []:
                 if tag not in tags:
                     tags.append(str(tag))
-        return {
-            "session": {
-                "id": session["id"],
-                "title": session["title"],
-                "status": session["status"],
-            },
-            "project": _project_payload(project, research, library),
-            "files": [
+        project_id = str(project["id"])
+        if str(project.get("root_path") or "").strip():
+            files = explorer.project_files(Path(research.workspace_root(project_id)))
+        else:
+            files = [
                 {
                     "name": item["title"],
                     "path": item.get("path") or "",
@@ -1021,8 +1030,16 @@ def build_router(
                     "paperId": item.get("ref_id") or None,
                     "size": int(item.get("size") or 0),
                 }
-                for item in research.list_items(str(project["id"]))
-            ],
+                for item in research.list_items(project_id)
+            ]
+        return {
+            "session": {
+                "id": session["id"],
+                "title": session["title"],
+                "status": session["status"],
+            },
+            "project": _project_payload(project, research, library),
+            "files": files,
             "artifacts": [
                 _artifact_payload(row)
                 for row in research.list_artifacts(str(project["id"]))
@@ -1050,6 +1067,37 @@ def build_router(
         _session, project = _session_project(session_id)
         project_id = str(project["id"])
         wanted = path.strip()
+        root = Path(research.workspace_root(project_id))
+        if str(project.get("root_path") or "").strip():
+            name = safe_name(wanted)
+            entries = explorer.project_files(root)
+            match = next(
+                (
+                    entry
+                    for entry in entries
+                    if wanted in {entry["path"], entry["name"]}
+                ),
+                None,
+            ) or next(
+                (entry for entry in entries if entry["name"] == name),
+                None,
+            )
+            if match is not None:
+                file_path = root / str(match["path"])
+                if file_path.is_file():
+                    text = _read_text(file_path)
+                    return {
+                        "file": {
+                            "name": match["name"],
+                            "path": match["path"],
+                            "kind": match["kind"],
+                            "size": int(match["size"]),
+                        },
+                        "content": text,
+                        "binary": not text
+                        and file_path.suffix.lower() not in TEXT_SUFFIXES,
+                        "truncated": "…（已截断）" in text,
+                    }
         items = research.list_items(project_id)
         item = next(
             (
@@ -1096,7 +1144,7 @@ def build_router(
         _check(x_internal_token)
         _session, project = _session_project(session_id)
         project_id = str(project["id"])
-        files_dir = files_root(research.workspace(project_id))
+        files_dir = Path(research.workspace_root(project_id))
         global_root = _global_template_root(research)
         project_choice = _read_review_template(research, project_id)
         global_choice = template_store.read_choice(global_root)
@@ -1149,12 +1197,17 @@ def build_router(
         choice = _effective_template_choice(research, project_id, template)
         sections, label, error = _resolve_review_template(
             choice,
-            files_root(research.workspace(project_id)),
+            Path(research.workspace_root(project_id)),
             research,
             library,
         )
+        template_kind = BUILTIN_TEMPLATES.get(choice, {}).get("kind", "review")
         report["standard"] = evaluate_review(
-            text, report, sections=sections, template_label=label
+            text,
+            report,
+            sections=sections,
+            template_label=label,
+            kind=template_kind,
         )
         if error:
             report["standard"]["error"] = error
@@ -1214,10 +1267,10 @@ def build_router(
     ) -> dict[str, Any]:
         _check(x_internal_token)
         _session, project = _session_project(session_id)
-        workspace = Path(project["workspace"])
+        workspace = Path(research.workspace_root(str(project["id"])))
         fallback = (body.title or "未命名").strip() + ".md"
         filename = safe_name(body.filename or fallback)
-        relative, size = save_bytes(workspace, filename, body.content.encode("utf-8"))
+        relative, size = save_bytes_in(workspace, filename, body.content.encode("utf-8"))
         kind = body.kind if body.kind in {"file", "note"} else "note"
         item = research.add_item(
             str(project["id"]),
@@ -1242,6 +1295,19 @@ def build_router(
         """把路径 / 标题 / 文件名定位到项目里的 .docx 文件。"""
         project_id = str(project["id"])
         target = wanted.strip()
+        root = Path(research.workspace_root(project_id))
+        if str(project.get("root_path") or "").strip():
+            try:
+                direct = explorer.project_file(root, target)
+            except (FileNotFoundError, ValueError):
+                direct = None
+            if direct is not None and direct.suffix.lower() == ".docx":
+                relative = direct.relative_to(root).as_posix()
+                return (
+                    project_id,
+                    {"id": "", "path": relative, "title": direct.name},
+                    direct,
+                )
         items = research.list_items(project_id)
         item = next(
             (
@@ -1285,7 +1351,7 @@ def build_router(
         except DocxError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         result["file"].update(
-            {"path": item.get("path") or "", "itemId": item["id"]}
+            {"path": item.get("path") or "", "itemId": item.get("id") or None}
         )
         return result
 
@@ -1300,12 +1366,19 @@ def build_router(
         _session, project = _session_project(session_id)
         project_id, item, file_path = _docx_target(project, body.path)
         try:
-            result = edit_docx(file_path, body.operations, Path(project["workspace"]))
+            result = edit_docx(
+                file_path,
+                body.operations,
+                Path(research.workspace_root(project_id)),
+            )
         except DocxError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
-        research.set_item_size(project_id, str(item["id"]), result["file"]["size"])
+        if item.get("id"):
+            research.set_item_size(
+                project_id, str(item["id"]), result["file"]["size"]
+            )
         result["file"].update(
-            {"path": item.get("path") or "", "itemId": item["id"]}
+            {"path": item.get("path") or "", "itemId": item.get("id") or None}
         )
         return result
 
@@ -1472,6 +1545,7 @@ def build_router(
         _session, project = _session_project(session_id)
         pid = str(project["id"])
         workspace = Path(project["workspace"])
+        root = Path(research.workspace_root(pid))
         fmt = (body.format or "docx").strip().lower()
         if fmt == "tex":
             fmt = "latex"
@@ -1489,7 +1563,7 @@ def build_router(
             filename = safe_name(body.filename or "references.bib")
             if not filename.lower().endswith(".bib"):
                 filename += ".bib"
-            relative, size = save_bytes(workspace, filename, text.encode("utf-8"))
+            relative, size = save_bytes_in(root, filename, text.encode("utf-8"))
             item = research.add_item(
                 pid, "file", filename, path=relative, mime="text/plain", size=size
             )
@@ -1571,7 +1645,7 @@ def build_router(
             return {"format": "docx", "files": [], "error": f"pandoc 转换失败：{detail}"}
         data = tmp.read_bytes()
         tmp.unlink(missing_ok=True)
-        relative, size = save_bytes(workspace, filename, data)
+        relative, size = save_bytes_in(root, filename, data)
         item = research.add_item(
             pid,
             "file",

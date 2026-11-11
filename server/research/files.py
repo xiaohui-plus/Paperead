@@ -1,7 +1,8 @@
 """项目文件落盘与路径校验。
 
-所有文件都必须在 ``projects/<projectId>/files/`` 之内；拒绝 ``..``、
-绝对路径与符号链接逃逸。
+默认文件都必须在 ``projects/<projectId>/files/`` 之内；项目绑定外部
+工作文件夹后，文件根目录换成用户选择的本地文件夹。两种模式都拒绝
+``..``、越界绝对路径与符号链接逃逸。
 """
 
 from __future__ import annotations
@@ -33,25 +34,28 @@ def files_root(workspace: Path) -> Path:
     return (Path(workspace) / "files").resolve()
 
 
-def resolve_in_files(workspace: Path, relative: str) -> Path:
-    """把相对路径解析到 files 目录内；越界直接抛 ValueError。"""
-    root = files_root(workspace)
-    target = (root / relative).resolve()
-    if target != root and root not in target.parents:
-        raise ValueError("path escapes project files")
+def resolve_in_root(root: Path, relative: str) -> Path:
+    """把相对路径解析到任意根目录内；越界直接抛 ValueError。"""
+    base = Path(root).resolve()
+    target = (base / relative).resolve()
+    if target != base and base not in target.parents:
+        raise ValueError("path escapes project root")
     return target
 
 
-def save_bytes(workspace: Path, filename: str, data: bytes, parent: str = "") -> tuple[str, int]:
-    """写入 ``files/<parent>/<name>``，重名自动加 ``-1`` 后缀。
+def resolve_in_files(workspace: Path, relative: str) -> Path:
+    """把相对路径解析到 files 目录内；越界直接抛 ValueError。"""
+    return resolve_in_root(files_root(workspace), relative)
 
-    返回 ``(相对路径, 字节数)``，相对路径用 ``/`` 分隔，便于前端展示。
-    """
-    base = resolve_in_files(workspace, parent) if parent else files_root(workspace)
+
+def save_bytes_in(
+    root: Path, filename: str, data: bytes, parent: str = ""
+) -> tuple[str, int]:
+    """写入 ``<root>/<parent>/<name>``，重名自动加 ``-1`` 后缀。"""
+    base = resolve_in_root(root, parent) if parent else Path(root).resolve()
     try:
         base.mkdir(parents=True, exist_ok=True)
     except OSError as error:
-        # 历史数据里可能残留 Windows 非法目录名，把它当参数错误而不是 500。
         raise ValueError(f"invalid folder path: {parent}") from error
     name = safe_name(filename)
     target = base / name
@@ -63,15 +67,27 @@ def save_bytes(workspace: Path, filename: str, data: bytes, parent: str = "") ->
                 target = candidate
                 break
     target.write_bytes(data)
-    relative = target.relative_to(files_root(workspace)).as_posix()
+    relative = target.relative_to(Path(root).resolve()).as_posix()
     return relative, len(data)
 
 
+def save_bytes(workspace: Path, filename: str, data: bytes, parent: str = "") -> tuple[str, int]:
+    """写入 ``files/<parent>/<name>``，重名自动加 ``-1`` 后缀。
+
+    返回 ``(相对路径, 字节数)``，相对路径用 ``/`` 分隔，便于前端展示。
+    """
+    return save_bytes_in(files_root(workspace), filename, data, parent)
+
+
 def remove_file(workspace: Path, relative: str) -> None:
+    remove_file_in(files_root(workspace), relative)
+
+
+def remove_file_in(root: Path, relative: str) -> None:
     if not relative:
         return
     try:
-        target = resolve_in_files(workspace, relative)
+        target = resolve_in_root(root, relative)
     except ValueError:
         return
     target.unlink(missing_ok=True)

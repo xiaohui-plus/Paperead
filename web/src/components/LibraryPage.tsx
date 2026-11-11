@@ -17,9 +17,18 @@ import { PaperCard } from './PaperCard'
 import { Sidebar } from './Sidebar'
 import type { NavKey } from './Sidebar'
 import { SettingsDialog } from './SettingsDialog'
-import { ZoteroImportDialog } from './ZoteroImportDialog'
-import { ZoteroSyncDialog } from './ZoteroSyncDialog'
-import { IconBack, IconFolder, IconGrid, IconRefresh, IconRows, IconSettings, IconUpload } from './icons'
+import { SendToPhoneDialog } from './SendToPhoneDialog'
+import { FileSyncDialog } from './FileSyncDialog'
+import {
+  IconBack,
+  IconDownload,
+  IconFolder,
+  IconGrid,
+  IconRefresh,
+  IconRows,
+  IconSettings,
+  IconUpload,
+} from './icons'
 import { LibraryFolders } from './LibraryFolders'
 import { tourBus } from '../tour/tourBus'
 import { isMobileShell } from '../lib/mobile'
@@ -30,6 +39,7 @@ import {
   type OfflineSummary,
 } from '../lib/offlineStore'
 import { importStoryFile } from '../lib/storyImport'
+import { importSyncPackage } from '../lib/deviceSync'
 import { SCHOLAREAD_SYNCED } from '../lib/scholareadSync'
 
 type Filter = 'all' | 'ready' | 'reading' | 'unread' | 'finished' | 'untranslated' | 'failed'
@@ -52,7 +62,6 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
   const [toast, setToast] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null)
   // 设置只由用户点齿轮/侧栏打开；刷新页面不自动弹
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [zoteroOpen, setZoteroOpen] = useState(false)
   const [zoteroSyncOpen, setZoteroSyncOpen] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [folders, setFolders] = useState<Folder[]>([])
@@ -76,6 +85,9 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
   const [offlineMode, setOfflineMode] = useState(false)
   const [downloads, setDownloads] = useState<Record<string, { done: number; total: number }>>({})
   const [importing, setImporting] = useState(false)
+  const [sendOpen, setSendOpen] = useState(false)
+  const [syncImporting, setSyncImporting] = useState(false)
+  const syncInputRef = useRef<HTMLInputElement>(null)
 
   const errorText = (error: unknown) =>
     error instanceof Error ? error.message : '操作失败，请重试'
@@ -135,6 +147,29 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
     const timer = window.setInterval(() => void refresh(), 1800)
     return () => window.clearInterval(timer)
   }, [papers, demoMode, refresh])
+
+  const doImportSync = async (file: File | null) => {
+    if (!file) return
+    setSyncImporting(true)
+    try {
+      const report = await importSyncPackage(file)
+      await refresh()
+      if (report.failed.length > 0) {
+        notify(
+          `导入 ${report.imported + report.updated} 篇，${report.failed.length} 篇失败`,
+          'err',
+        )
+      } else if (report.updated > 0) {
+        notify(`已导入 ${report.imported} 篇，覆盖 ${report.updated} 篇`)
+      } else {
+        notify(`已导入 ${report.imported} 篇`)
+      }
+    } catch (error) {
+      notify(`导入同步包失败：${errorText(error)}`, 'err')
+    } finally {
+      setSyncImporting(false)
+    }
+  }
 
   const doUpload = async (files: File[]) => {
     if (offlineMode) {
@@ -595,21 +630,45 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
             {!mobile && (
               <button
                 className="btn ghost"
-                onClick={() => setZoteroOpen(true)}
-                title="从本机 Zotero 选择带 PDF 的条目导入"
-              >
-                从 Zotero 导入
-              </button>
-            )}
-            {!mobile && (
-              <button
-                className="btn ghost"
                 data-tour="zotero-sync"
                 onClick={() => setZoteroSyncOpen(true)}
                 title="与 Zotero 云端双向同步文献、分类和 PDF"
               >
                 Zotero 同步
               </button>
+            )}
+            {!mobile && (
+              <button
+                className="btn ghost"
+                onClick={() => setSendOpen(true)}
+                title="导出同步包，手机导入后离线阅读"
+              >
+                <IconDownload />
+                发送到手机
+              </button>
+            )}
+            {mobile && (
+              <button
+                className="btn ghost"
+                onClick={() => syncInputRef.current?.click()}
+                disabled={syncImporting}
+                title="导入电脑导出的 .paperead 同步包"
+              >
+                {syncImporting ? '导入中…' : '导入同步包'}
+              </button>
+            )}
+            {mobile && (
+              <input
+                ref={syncInputRef}
+                type="file"
+                accept=".paperead,.zip,application/zip"
+                hidden
+                onChange={(event) => {
+                  const file = event.target.files?.[0] ?? null
+                  event.target.value = ''
+                  void doImportSync(file)
+                }}
+              />
             )}
             {mobile && (
               <button
@@ -806,6 +865,11 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
         </div>
       )}
 
+      <SendToPhoneDialog
+        open={sendOpen}
+        onClose={() => setSendOpen(false)}
+      />
+
       <SettingsDialog
         open={settingsOpen}
         onClose={() => {
@@ -814,30 +878,15 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
           void refresh()
         }}
         onSaved={() => notify('模型配置已更新')}
+        onLibraryChanged={() => void refresh()}
       />
 
-      <ZoteroSyncDialog
+      <FileSyncDialog
         open={zoteroSyncOpen}
+        initialTarget="zotero"
         onClose={() => setZoteroSyncOpen(false)}
         onSynced={() => {
           void refresh()
-        }}
-      />
-
-      <ZoteroImportDialog
-        open={zoteroOpen}
-        onClose={() => setZoteroOpen(false)}
-        onImported={(imported, skipped) => {
-          void refresh()
-          if (imported > 0) {
-            notify(
-              `已从 Zotero 导入 ${imported} 篇${
-                skipped ? `，跳过 ${skipped} 篇` : ''
-              }${activeFolderId ? '到全部文献（未自动归档）' : ''}，正在解析…`,
-            )
-          } else {
-            notify(skipped ? '所选条目都无法导入（无 PDF 或已在库中）' : '没有导入任何条目', 'err')
-          }
         }}
       />
       {dragPaper && (dragPaper.folder_id || dragOutDone) && (

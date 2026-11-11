@@ -12,6 +12,7 @@ import { syncScholarConfig } from './lib/scholarConfig'
 import { autoCheckUpdate, isDesktopApp } from './lib/update'
 import { hasMobileServer, installMobileFetch, isMobileShell } from './lib/mobile'
 import { pullModelSettings, restoreModelSettings } from './lib/settingsSync'
+import { applyReadingFonts } from './lib/readingPrefs'
 
 const TourRoot = lazy(() =>
   import('./tour/TourRoot').then((module) => ({ default: module.TourRoot })),
@@ -33,6 +34,7 @@ if (mobile && hasMobileServer()) {
 }
 
 migrateLegacyStorage()
+applyReadingFonts()
 
 async function boot() {
   if (!mobile) {

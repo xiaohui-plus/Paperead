@@ -1,6 +1,8 @@
 # 运行产物
 output/
 assets/
+!web/src/assets/
+!web/src/assets/**
 *.blocks.json
 
 # 前端
@@ -35,6 +37,11 @@ data/
 .tmp/
 .tauri/
 tmp-*
+.tmp-*
+.dsh_review/
+.review_wt/
+tmp*/
+src-tauri/gen/android/.kotlin/
 .venv-build/
 build-sidecar/
 dist-sidecar/

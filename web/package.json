@@ -1,7 +1,7 @@
 {
   "name": "paperead-web",
   "private": true,
-  "version": "0.1.8",
+  "version": "0.1.9",
   "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {
@@ -14,6 +14,7 @@
     "@tauri-apps/plugin-barcode-scanner": "^2.5.3",
     "docx-preview": "^0.4.1",
     "jsqr": "^1.4.0",
+    "jszip": "^3.10.2",
     "katex": "^0.16.11",
     "pdfjs-dist": "^5.4.296",
     "pptx-preview": "^1.0.7",

@@ -111,6 +111,30 @@ def _cache_key(image: bytes) -> str:
     return hashlib.sha1(image).hexdigest()
 
 
+def read_cached_latex(image: bytes) -> str:
+    """读取按图片 sha1 缓存的 LaTeX；没有则返回空串。
+
+    供阅读页按需识别前先查缓存：同一张公式裁图只应调一次模型。
+    """
+    try:
+        path = _cache_dir() / f"{_cache_key(image)}.tex"
+        return path.read_text(encoding="utf-8") if path.exists() else ""
+    except Exception:
+        return ""
+
+
+def write_cached_latex(image: bytes, latex: str) -> None:
+    """把识别结果写入 sha1 缓存，下次直接命中，不再调用模型。"""
+    if not latex:
+        return
+    try:
+        (_cache_dir() / f"{_cache_key(image)}.tex").write_text(
+            latex, encoding="utf-8"
+        )
+    except Exception:
+        logger.warning("公式缓存写入失败", exc_info=True)
+
+
 async def recognize_latex(image: bytes, model: str | None = None, backend=None) -> str:
     """单张公式图 → LaTeX（失败返回空串）。
 

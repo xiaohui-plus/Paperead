@@ -17,8 +17,8 @@ from typing import Any, Iterator
 from server.research.db import connect, init_db
 from server.research.files import (
     files_root,
-    remove_file,
-    resolve_in_files,
+    remove_file_in,
+    resolve_in_root,
     safe_name,
 )
 
@@ -38,6 +38,23 @@ def _now() -> int:
 def _clean(value: str | None, limit: int, fallback: str) -> str:
     text = (value or "").strip()
     return (text or fallback)[:limit]
+
+
+def normalize_root(value: str | None) -> str:
+    """校验并规范化用户选择的工作文件夹；空字符串表示用默认文件夹。"""
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    path = Path(raw).expanduser()
+    try:
+        path = path.resolve(strict=True)
+    except OSError as error:
+        raise ValueError(f"工作文件夹不存在：{raw}") from error
+    if not path.is_dir():
+        raise ValueError("工作文件夹不是目录")
+    if path.parent == path:
+        raise ValueError("不能把磁盘根目录作为项目工作文件夹")
+    return str(path)
 
 
 class ResearchStore:
@@ -67,12 +84,14 @@ class ResearchStore:
         kind: str,
         name: str | None = None,
         description: str = "",
+        root_path: str | None = None,
     ) -> dict[str, Any]:
         kind = (kind or "research").strip()
         if kind not in PROJECT_KINDS:
             raise ValueError("invalid project kind")
         project_id = f"p_{uuid.uuid4().hex[:12]}"
         display = _clean(name, MAX_NAME, "新项目")
+        external = normalize_root(root_path)
         workspace = self.projects_dir / project_id
         (workspace / "files").mkdir(parents=True, exist_ok=True)
         (workspace / "artifacts").mkdir(parents=True, exist_ok=True)
@@ -83,6 +102,7 @@ class ResearchStore:
                     "id": project_id,
                     "kind": kind,
                     "name": display,
+                    "root_path": external,
                     "created_at": now,
                 },
                 ensure_ascii=False,
@@ -94,10 +114,20 @@ class ResearchStore:
             conn.execute(
                 """
                 INSERT INTO projects
-                  (id, kind, name, description, workspace, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                  (id, kind, name, description, workspace, root_path,
+                   created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (project_id, kind, display, description or "", str(workspace), now, now),
+                (
+                    project_id,
+                    kind,
+                    display,
+                    description or "",
+                    str(workspace),
+                    external,
+                    now,
+                    now,
+                ),
             )
         row = self.get_project(project_id)
         assert row is not None
@@ -162,6 +192,9 @@ class ResearchStore:
         if "archived" in patch:
             fields.append("archived = ?")
             values.append(1 if patch.get("archived") else 0)
+        if "root_path" in patch:
+            fields.append("root_path = ?")
+            values.append(normalize_root(patch.get("root_path")))
         if not fields:
             return self.get_project(project_id)
         fields.append("updated_at = ?")
@@ -213,6 +246,18 @@ class ResearchStore:
         if project is None:
             raise LookupError("project not found")
         return Path(project["workspace"])
+
+    def workspace_root(self, project_id: str) -> Path:
+        """项目实际的文件根：用户选择的本地文件夹，未选择时是 workspace/files。"""
+        project = self.get_project(project_id)
+        if project is None:
+            raise LookupError("project not found")
+        raw = str(project.get("root_path") or "").strip()
+        if raw:
+            path = Path(raw)
+            if path.is_dir():
+                return path.resolve()
+        return files_root(Path(project["workspace"]))
 
     # ── 项目文件树 ──────────────────────────────────────
 
@@ -331,7 +376,7 @@ class ResearchStore:
 
     def item_path(self, project_id: str, item: dict[str, Any]) -> Path:
         relative = str(item.get("path") or "")
-        return resolve_in_files(self.workspace(project_id), relative)
+        return resolve_in_root(self.workspace_root(project_id), relative)
 
     def remove_item(self, item_id: str) -> bool:
         item = self.get_item(item_id)
@@ -367,15 +412,15 @@ class ResearchStore:
                 "UPDATE projects SET updated_at = ? WHERE id = ?",
                 (_now(), project_id),
             )
-        workspace = self.workspace(project_id)
+        root = self.workspace_root(project_id)
         for relative in paths:
-            remove_file(workspace, relative)
+            remove_file_in(root, relative)
         # 目录自下而上删除，避免留下空文件夹。
         for relative in sorted(
             folder_paths, key=lambda value: value.count("/"), reverse=True
         ):
             try:
-                target = resolve_in_files(workspace, relative)
+                target = resolve_in_root(root, relative)
             except ValueError:
                 continue
             shutil.rmtree(target, ignore_errors=True)
@@ -415,9 +460,9 @@ class ResearchStore:
     ) -> None:
         if not old_relative or old_relative == new_relative:
             return
-        workspace = self.workspace(project_id)
-        old_path = resolve_in_files(workspace, old_relative)
-        new_path = resolve_in_files(workspace, new_relative)
+        workspace = self.workspace_root(project_id)
+        old_path = resolve_in_root(workspace, old_relative)
+        new_path = resolve_in_root(workspace, new_relative)
         if not old_path.exists():
             # paper/note 等只在库里有记录时无需动盘。
             return
@@ -538,9 +583,9 @@ class ResearchStore:
         ).fetchall()
         existing = {str(row["title"]) for row in rows}
         base = (
-            resolve_in_files(workspace, parent_path)
+            resolve_in_root(workspace, parent_path)
             if workspace is not None and parent_path
-            else files_root(workspace) if workspace is not None else None
+            else Path(workspace).resolve() if workspace is not None else None
         )
 
         def available(candidate: str) -> bool:
@@ -582,7 +627,7 @@ class ResearchStore:
                 raise ValueError("parent is not a folder")
             parent_path = str(parent["path"] or "")
 
-        workspace = self.workspace(project_id)
+        workspace = self.workspace_root(project_id)
         # 标题可能不含扩展名（如笔记记录），复制时补上原文件后缀，
         # 否则新文件的路径会丢掉扩展名，预览时无法识别类型。
         copy_title = str(item["title"])
@@ -619,11 +664,11 @@ class ResearchStore:
         old_path = str(item.get("path") or "")
         new_path = str(new_item.get("path") or "")
         if item["kind"] == "folder":
-            resolve_in_files(workspace, new_path).mkdir(parents=True, exist_ok=True)
+            resolve_in_root(workspace, new_path).mkdir(parents=True, exist_ok=True)
         elif old_path and new_path:
-            source = resolve_in_files(workspace, old_path)
+            source = resolve_in_root(workspace, old_path)
             if source.is_file():
-                target = resolve_in_files(workspace, new_path)
+                target = resolve_in_root(workspace, new_path)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, target)
 

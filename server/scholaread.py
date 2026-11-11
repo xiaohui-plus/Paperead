@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -31,12 +32,14 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import quote
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from paperead.env import env
-from server.store import LibraryStore
+from server.store import LibraryStore, render_thumbnail
 
 log = logging.getLogger("paperead.scholaread")
 
@@ -57,6 +60,8 @@ class SyncReq(BaseModel):
     pull: bool = True
     push: bool = True
     limit: int = Field(500, ge=1, le=5000)
+    # 非空时只拉取选中的学术阅读条目；写回仍按已有进度全量处理。
+    reading_ids: list[str] = Field(default_factory=list)
 
 
 def default_data_dir() -> Path:
@@ -556,12 +561,105 @@ def _status(data_dir: Path) -> dict[str, Any]:
     return out
 
 
+def _papers(
+    store: LibraryStore, data_dir: Path, limit: int = 500
+) -> dict[str, Any]:
+    """列出学术阅读里可拉取的论文，供「文件同步」界面勾选。"""
+    db = _db_path(data_dir)
+    payload: dict[str, Any] = {
+        "ok": False,
+        "data_dir": str(data_dir),
+        "running": _is_running(),
+        "total": 0,
+        "items": [],
+        "error": "",
+    }
+    if not db.is_file():
+        payload["error"] = "未找到学术阅读数据，请先安装并登录学术阅读"
+        return payload
+    try:
+        con, tmp = _open_snapshot(db)
+        try:
+            if not _schema_ok(con):
+                payload["error"] = "学术阅读数据库版本不兼容"
+                return payload
+            items: list[dict[str, Any]] = []
+            for row in _entry_rows(con, limit):
+                title = str(row.get("title") or row.get("name") or "").strip()
+                if _is_welcome_doc(title):
+                    continue
+                key = _reading_key(row)
+                pdf = _pdf_path(data_dir, row)
+                has_pdf = bool(
+                    pdf is not None
+                    and pdf.is_file()
+                    and pdf.stat().st_size <= MAX_PDF_BYTES
+                )
+                existing = store.find_by_source(f"scholaread:{key}")
+                items.append(
+                    {
+                        "id": key,
+                        "title": title or (pdf.stem if pdf else key),
+                        "authors": _authors(row.get("authors")),
+                        "readPercent": round(_point(row.get("read_point")) * 100, 1),
+                        "hasPdf": has_pdf,
+                        "imported": existing is not None,
+                        "paperId": str(existing.get("id") or "") if existing else "",
+                        "thumbUrl": (
+                            "/api/scholaread/papers/thumb"
+                            f"?key={quote(key, safe='')}"
+                            f"&data_dir={quote(str(data_dir), safe='')}"
+                            if has_pdf
+                            else ""
+                        ),
+                    }
+                )
+            payload.update(ok=True, total=len(items), items=items)
+        finally:
+            _cleanup(con, tmp)
+    except Exception as exc:
+        payload["error"] = f"读取学术阅读数据失败：{exc}"
+    return payload
+
+
+def _thumb(store: LibraryStore, data_dir: Path, key: str) -> Path | None:
+    """把靠岸学术某篇论文的 PDF 首页渲染成缓存缩略图。"""
+    db = _db_path(data_dir)
+    if not db.is_file():
+        return None
+    digest = hashlib.sha1(f"{data_dir}|{key}".encode("utf-8")).hexdigest()[:16]
+    cache = store.root / "thumb-cache" / f"scholaread-{digest}.png"
+    if cache.is_file():
+        return cache
+    try:
+        con, tmp = _open_snapshot(db)
+    except Exception:
+        return None
+    try:
+        if not _schema_ok(con):
+            return None
+        for row in _entry_rows(con, 5000):
+            if _reading_key(row) != key:
+                continue
+            pdf = _pdf_path(data_dir, row)
+            if pdf is None or not pdf.is_file():
+                return None
+            render_thumbnail(pdf, cache)
+            return cache
+        return None
+    except Exception:
+        return None
+    finally:
+        _cleanup(con, tmp)
+
+
 def _run_sync(
     store: LibraryStore,
     data_dir_raw: str,
     pull: bool,
     push: bool,
     limit: int,
+    reading_ids: list[str] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     started = time.time()
     data_dir = _resolve_dir(data_dir_raw)
@@ -599,6 +697,9 @@ def _run_sync(
                 result["duration_ms"] = int((time.time() - started) * 1000)
                 return result, new_ids
             rows = _entry_rows(con, limit)
+            if reading_ids:
+                wanted = {str(item).strip() for item in reading_ids if str(item).strip()}
+                rows = [row for row in rows if _reading_key(row) in wanted]
             if pull:
                 pulled, new_ids = _pull(store, data_dir, rows)
                 result["pull"] = pulled
@@ -629,11 +730,34 @@ def build_router(
     async def status(data_dir: str = Query("")) -> dict[str, Any]:
         return await asyncio.to_thread(_status, _resolve_dir(data_dir))
 
+    @router.get("/papers/thumb")
+    async def paper_thumb(
+        key: str = Query(..., max_length=200),
+        data_dir: str = Query(""),
+    ) -> FileResponse:
+        path = await asyncio.to_thread(
+            _thumb, store, _resolve_dir(data_dir), key
+        )
+        if path is None:
+            raise HTTPException(status_code=404, detail="没有可用的缩略图")
+        return FileResponse(path, media_type="image/png")
+
+    @router.get("/papers")
+    async def papers(data_dir: str = Query(""), limit: int = Query(500, ge=1, le=5000)) -> dict[str, Any]:
+        """学术阅读里可拉取的论文列表（只读快照，不会改动原库）。"""
+        return await asyncio.to_thread(_papers, store, _resolve_dir(data_dir), limit)
+
     @router.post("/sync")
     async def sync(req: SyncReq) -> dict[str, Any]:
         async with lock:
             data, new_ids = await asyncio.to_thread(
-                _run_sync, store, req.data_dir, req.pull, req.push, req.limit
+                _run_sync,
+                store,
+                req.data_dir,
+                req.pull,
+                req.push,
+                req.limit,
+                req.reading_ids,
             )
         for paper_id in new_ids:
             schedule_parse(paper_id)

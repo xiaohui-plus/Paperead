@@ -9,10 +9,12 @@
 
 from paperead.layout import (
     Line,
+    _continues_paragraph,
     _ends_sentence,
     _join_spans,
     _looks_equation,
     _merge_visual_rows,
+    _table_crop_rect,
 )
 from paperead.translate import protect, restore
 
@@ -64,6 +66,31 @@ def test_ends_sentence_ignores_abbreviation():
     assert _ends_sentence("results from Kipf et al.") is False
     assert _ends_sentence("the adjacency matrix.") is True
     assert _ends_sentence("see Fig.") is False
+
+
+def test_continues_paragraph_does_not_swallow_caption():
+    """右栏首行是图注时，不能被上一栏停在逗号/连字符的正文续段吞并。"""
+    prev = "indicating the presence of 4 common citations who are not widely cited,"
+    assert _continues_paragraph(prev, "Figure 3: Time consumption of SIEG.") is False
+    assert _continues_paragraph(prev, "which should be an important reason.") is True
+
+
+# ── 表格裁图范围 ───────────────────────────────────────────────────────
+
+def test_table_crop_ignores_text_in_other_column():
+    """双栏页的表格裁图只扩到本栏，不能把另一栏正文裁进来。"""
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((54, 285), "left column body text that must stay out")
+    page.insert_text((340, 280), "Model Hits MRR")
+    rect = pymupdf.Rect(335, 260, 542, 306)
+
+    crop = _table_crop_rect(page, rect)
+
+    assert crop.x0 > 300      # 左栏文字（x0=54）没有被吸进来
+    assert crop.x1 <= 560
 
 
 # ── 视觉行合并 ─────────────────────────────────────────────────────────
@@ -127,3 +154,29 @@ def test_protect_keeps_gene_symbol():
     masked, pieces = protect("OsDREB1A is induced by drought.")
     assert "OsDREB1A" not in masked
     assert restore(masked, pieces) == "OsDREB1A is induced by drought."
+
+
+# ── 图注续行合并 ───────────────────────────────────────────────────────
+
+def test_merge_caption_continuations_joins_tight_lines():
+    from paperead.layout import Block, _merge_caption_continuations
+
+    cap = Block(
+        id="b1", order=0, page=8, kind="caption",
+        text="Figure 3: Baseline performance", bbox=(108, 300, 504, 312),
+    )
+    cont = Block(
+        id="b2", order=1, page=8, kind="para",
+        text="on SELECTBENCH-Case.", bbox=(108, 313, 504, 324),
+    )
+    body = Block(
+        id="b3", order=2, page=8, kind="para",
+        text="Body paragraph far below.", bbox=(108, 400, 504, 420),
+    )
+
+    out = _merge_caption_continuations([cap, cont, body])
+
+    assert len(out) == 2
+    assert out[0].kind == "caption"
+    assert "SELECTBENCH-Case" in out[0].text
+    assert out[1].id == "b3"

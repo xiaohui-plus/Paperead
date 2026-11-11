@@ -25,7 +25,7 @@ import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import httpx
 import pymupdf
@@ -47,7 +47,12 @@ from starlette.background import BackgroundTask
 
 from paperead import __version__
 from paperead.env import env
-from paperead.formula import recognize_equations, recognize_latex
+from paperead.formula import (
+    read_cached_latex,
+    recognize_equations,
+    recognize_latex,
+    write_cached_latex,
+)
 from paperead.highlights import CATEGORIES as HIGHLIGHT_CATEGORIES
 from paperead.highlights import extract_highlights
 from paperead.layout import Block, parse_pdf
@@ -74,9 +79,11 @@ from server.store import (
     FolderExistsError,
     FolderNameError,
     LibraryStore,
+    render_thumbnail,
 )
 from server.scholar_api import build_router as build_scholar_router
 from server.scholaread import build_router as build_scholaread_router
+from server.sync_package import build_router as build_sync_router
 from server import zotero_web
 from server.research import ResearchStore
 from server.research import build_router as build_research_router
@@ -150,6 +157,7 @@ app.include_router(
 app.include_router(toolchain_router)
 app.include_router(build_onboarding_router(onboarding_store, _has_user_data))
 app.include_router(build_scholaread_router(store, _schedule_parse))
+app.include_router(build_sync_router(store, DATA_DIR))
 
 # 研究 agent 的工具接口：本机调用，自带 token，不走 /api 的 cookie 鉴权。
 app.include_router(
@@ -227,6 +235,9 @@ class FormulaReq(BaseModel):
     config: LLMConfigIn
     image_base64: str
     mime: str = "image/png"
+    # 阅读页按需识别时带上出处，识别结果会回写到该论文的 blocks.json
+    paper_id: str = ""
+    block_id: str = ""
 
 
 class PingReq(BaseModel):
@@ -246,6 +257,10 @@ class ZoteroWebIn(BaseModel):
     user_id: str = ""
     library_type: str = "user"
     group_id: str = ""
+
+
+class ZoteroPushIn(BaseModel):
+    paper_ids: list[str] = Field(default_factory=list)
 
 
 class PaperFolderIn(BaseModel):
@@ -499,14 +514,31 @@ async def research_proxy(path: str, request: Request):
 
 @app.post("/api/formula")
 async def formula(req: FormulaReq) -> dict:
-    """一张公式裁图 → LaTeX。"""
+    """一张公式裁图 → LaTeX。
+
+    识别结果按图片 sha1 缓存；请求里带 paper_id/block_id 时还会回写该论文的
+    blocks.json，下次打开直接走 KaTeX，不再重复调用模型。
+    """
+
+    async def persist(latex: str) -> None:
+        if latex and req.paper_id and req.block_id:
+            await asyncio.to_thread(
+                store.update_block_latex, req.paper_id, req.block_id, latex
+            )
+
     if MOCK:
         time.sleep(0.4)  # 模拟网络耗时，方便前端调 loading 态
-        return {"ok": True, "latex": MOCK_LATEX, "ms": 400, "mock": True}
+        await persist(MOCK_LATEX)
+        return {"ok": True, "latex": MOCK_LATEX, "ms": 400, "mock": True, "cached": False}
 
     image = _decode(req.image_base64)
     if len(image) < 200:
         raise HTTPException(status_code=400, detail="图片过小，可能不是有效的公式裁图")
+
+    cached = read_cached_latex(image)
+    if cached:
+        await persist(cached)
+        return {"ok": True, "latex": cached, "ms": 0, "mock": False, "cached": True}
 
     backend = OpenAICompatBackend(
         LLMConfig(
@@ -524,7 +556,10 @@ async def formula(req: FormulaReq) -> dict:
         raise HTTPException(status_code=502, detail=f"模型调用失败：{e}") from e
 
     ms = int((time.time() - started) * 1000)
-    return {"ok": bool(latex), "latex": latex, "ms": ms, "mock": False}
+    if latex:
+        write_cached_latex(image, latex)
+        await persist(latex)
+    return {"ok": bool(latex), "latex": latex, "ms": ms, "mock": False, "cached": False}
 
 
 # 解析阶段要把公式裁图转成 LaTeX，需要一个视觉模型配置。密钥仍然只存在浏览器
@@ -778,6 +813,26 @@ async def sync_zotero_web() -> dict:
     try:
         return await zotero_web.sync_library(
             DATA_DIR, store, _schedule_parse
+        )
+    except zotero_web.ZoteroWebError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    finally:
+        _zotero_syncing = False
+
+
+@app.post("/api/zotero/web/push")
+async def push_zotero_web(body: ZoteroPushIn) -> dict:
+    """只把选中的本地论文推送到 Zotero（空列表表示全部）。"""
+    global _zotero_syncing
+    if _zotero_syncing:
+        raise HTTPException(status_code=409, detail="同步正在进行，请稍后再试")
+    _zotero_syncing = True
+    try:
+        return await zotero_web.sync_library(
+            DATA_DIR,
+            store,
+            _schedule_parse,
+            paper_ids=body.paper_ids,
         )
     except zotero_web.ZoteroWebError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -2619,6 +2674,11 @@ async def zotero_items(
                     else None
                 ),
                 "imported": bool(duplicate),
+                "thumb_url": (
+                    f"/api/zotero/thumb?key={quote(str(key or ''))}"
+                    if pdf
+                    else None
+                ),
             }
         )
     return {
@@ -2628,6 +2688,35 @@ async def zotero_items(
         "limit": limit,
         "has_more": start + len(items) < total,
     }
+
+
+@app.get("/api/zotero/thumb")
+async def zotero_thumb(key: str = Query(..., max_length=40)) -> FileResponse:
+    """按需把 Zotero 条目的 PDF 首页渲染成缩略图，缓存到数据目录。"""
+    safe = "".join(ch for ch in key if ch.isalnum() or ch in "-_") or "item"
+    cache = DATA_DIR / "thumb-cache" / f"zotero-{safe}.png"
+    if cache.is_file():
+        return FileResponse(cache, media_type="image/png")
+    try:
+        async with _zotero_client() as client:
+            pairs, _total = await _zotero_candidates(
+                client, keys=[key], limit=1
+            )
+            if not pairs or not pairs[0][1]:
+                raise HTTPException(status_code=404, detail="Zotero 条目没有 PDF")
+            blob = await _zotero_file_bytes(client, pairs[0][1])
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+    tmp = DATA_DIR / "thumb-cache" / f"zotero-{safe}.pdf"
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_bytes(blob)
+    try:
+        await asyncio.to_thread(render_thumbnail, tmp, cache)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return FileResponse(cache, media_type="image/png")
 
 
 class ZoteroImportReq(BaseModel):

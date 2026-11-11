@@ -219,6 +219,14 @@ function recordBytes(record: OfflineRecord): number {
   );
 }
 
+/** 同步包导入：直接写入一条完整离线记录，同 id 会覆盖手机上的旧副本。 */
+export async function importOfflineRecord(
+  record: OfflineRecord,
+): Promise<OfflineSummary> {
+  await putRecord(record);
+  return summarize(record);
+}
+
 /**
  * 本机翻译写回：只更新这篇的 blocks 与目标语言，不动图片和 PDF。
  * 没有离线副本时静默忽略（说明用户只是在线阅读）。

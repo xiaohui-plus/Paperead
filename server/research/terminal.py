@@ -120,11 +120,11 @@ def run_command(
             )
             raise PermissionError(f"命令被拒绝：{reason}。")
 
-    root = (Path(research.workspace(project_id)) / "files").resolve()
+    root = Path(research.workspace_root(project_id)).resolve()
     root.mkdir(parents=True, exist_ok=True)
     target = (root / (cwd or ".")).resolve()
     if target != root and root not in target.parents:
-        raise PermissionError("工作目录必须位于项目 files/ 内。")
+        raise PermissionError("工作目录必须位于项目工作文件夹内。")
     if not target.is_dir():
         raise ValueError(f"工作目录不存在：{cwd}")
 

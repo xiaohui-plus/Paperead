@@ -482,6 +482,7 @@ async def sync_library(
     data_dir,
     store,
     schedule_parse: Callable[[str], None],
+    paper_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """执行一次双向同步，返回可以直接展示给用户的统计。"""
     config = load_config(data_dir)
@@ -737,7 +738,12 @@ async def sync_library(
             store.update(str(row["id"]), **patch)
 
         # ── 5. 本地 → 远端（新建论文 + PDF）──────────────
+        selected_ids = {
+            str(item) for item in (paper_ids or []) if str(item).strip()
+        } or None
         for row in store.list():
+            if selected_ids is not None and str(row.get("id")) not in selected_ids:
+                continue
             if row.get("project_id"):
                 continue
             # 上次推送成功但 PDF 上传失败的条目，这次补传。

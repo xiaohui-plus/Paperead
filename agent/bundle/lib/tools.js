@@ -220,7 +220,7 @@ export function apply(ctx, config = {}) {
     defineTool({
       name: 'run_command',
       description:
-        'Run one shell command inside the project files/ directory (PowerShell on Windows). Use it for compiling LaTeX, running python/R analysis, git status and file conversion. Do not install system software, modify permissions or run destructive commands. The terminal may be disabled by the user; a 403 error means it is off.',
+        'Run one shell command inside the project working folder (PowerShell on Windows). Use it for compiling LaTeX, running python/R analysis, git status and file conversion. Do not install system software, modify permissions or run destructive commands. The terminal may be disabled by the user; a 403 error means it is off.',
       parameters: {
         command: {
           type: 'string',
@@ -229,7 +229,7 @@ export function apply(ctx, config = {}) {
         },
         cwd: {
           type: 'string',
-          description: 'Relative working directory inside project files/. Defaults to the project files root.',
+          description: 'Relative working directory inside the project working folder. Defaults to the folder root.',
         },
         timeoutMs: {
           type: 'number',
@@ -539,7 +539,7 @@ export function apply(ctx, config = {}) {
         reviewTemplate: {
           type: 'string',
           description:
-            'Review template for this project: "default", a builtin id ("narrative" / "systematic"), an uploaded template file name in the project files (e.g. "我的5A模板.md"), an app-level upload ("upload:我的模板.md"), or a library paper ("paper:<paperId>"). Leave empty to fall back to app settings.',
+            'Writing template for this project: "default" (通用综述五段式), a builtin id ("paper-empirical" for IMRaD research papers, "narrative" / "systematic" for reviews), an uploaded template file name in the project files (e.g. "我的5A模板.md"), an app-level upload ("upload:我的模板.md"), or a library paper ("paper:<paperId>"). Leave empty to fall back to app settings.',
         },
       },
       output: {

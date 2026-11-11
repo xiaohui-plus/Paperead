@@ -27,6 +27,26 @@ export interface ScholarReadPull {
   errors: { title: string; error: string }[]
 }
 
+export interface ScholarReadPaper {
+  id: string
+  title: string
+  authors: string
+  readPercent: number
+  hasPdf: boolean
+  imported: boolean
+  paperId: string
+  thumbUrl: string
+}
+
+export interface ScholarReadPaperList {
+  ok: boolean
+  data_dir: string
+  running: boolean | null
+  total: number
+  items: ScholarReadPaper[]
+  error: string
+}
+
 export interface ScholarReadPush {
   updated: number
   skipped: number
@@ -93,6 +113,17 @@ export async function probeScholarRead(dataDir = ''): Promise<ScholarReadStatus>
   return data as ScholarReadStatus
 }
 
+export async function listScholarReadPapers(
+  dataDir = '',
+): Promise<ScholarReadPaperList> {
+  const res = await fetch(
+    `/api/scholaread/papers?data_dir=${encodeURIComponent(dataDir)}&limit=500`,
+  )
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error((data as any).detail || `HTTP ${res.status}`)
+  return data as ScholarReadPaperList
+}
+
 let syncing = false
 
 export function isScholarReadSyncing(): boolean {
@@ -103,6 +134,7 @@ export async function runScholarReadSync(options?: {
   dataDir?: string
   pull?: boolean
   push?: boolean
+  readingIds?: string[]
 }): Promise<ScholarReadSyncResult | null> {
   if (syncing) return null
   syncing = true
@@ -116,6 +148,7 @@ export async function runScholarReadSync(options?: {
         pull: options?.pull !== false,
         push: options?.push !== false,
         limit: 500,
+        reading_ids: options?.readingIds ?? [],
       }),
     })
     const data = await res.json().catch(() => ({}))

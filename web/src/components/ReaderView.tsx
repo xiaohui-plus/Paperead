@@ -30,7 +30,7 @@ import { readOffline, saveOfflineBlocks } from '../lib/offlineStore'
 import { translatePagesLocal } from '../lib/localTranslate'
 import type { AnnotationActions } from './Annotations'
 import { loadTargetLang } from '../lib/translation'
-import { loadAutoHighlights } from '../lib/readingPrefs'
+import { loadAutoHighlights, loadDefaultReadingMode } from '../lib/readingPrefs'
 import {
   loadModelSettings,
   readyModel,
@@ -80,7 +80,7 @@ export function ReaderView({ paperId, onBack }: Props) {
   const [paper, setPaper] = useState<Paper | null>(null)
   const [error, setError] = useState('')
   const [parsing, setParsing] = useState(false)
-  const [mode, setMode] = useState<ViewMode>('bilingual')
+  const [mode, setMode] = useState<ViewMode>(loadDefaultReadingMode)
   const [scale, setScale] = useState(1)
   const [activeId, setActiveId] = useState('')
   const [visiblePage, setVisiblePage] = useState(1)
@@ -361,6 +361,16 @@ export function ReaderView({ paperId, onBack }: Props) {
     window.addEventListener('paperead:auto-highlights-changed', onChanged)
     return () =>
       window.removeEventListener('paperead:auto-highlights-changed', onChanged)
+  }, [])
+
+  // 设置里切换「默认阅读模式」：当前论文立即跟着换视图
+  useEffect(() => {
+    const onChanged = (event: Event) => {
+      setMode((event as CustomEvent<ViewMode>).detail)
+    }
+    window.addEventListener('paperead:reading-mode-changed', onChanged)
+    return () =>
+      window.removeEventListener('paperead:reading-mode-changed', onChanged)
   }, [])
 
   const mergeHighlights = useCallback((page: number, items: ReadingHighlight[]) => {

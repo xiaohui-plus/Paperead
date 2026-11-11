@@ -15,12 +15,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from server.research import agent_client, templates as review_templates
-from server.research.files import safe_name, save_bytes
+from server.research import agent_client, explorer, templates as review_templates
+from server.research.files import safe_name, save_bytes_in
 from server.research.store import ResearchStore
 
 MAX_UPLOAD = 200 * 1024 * 1024
@@ -35,15 +35,25 @@ OFFLINE_NOTICE = {
 
 
 class ProjectCreateIn(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     kind: str
     name: str | None = None
     description: str = ""
+    root_path: str | None = Field(default=None, alias="rootPath")
 
 
 class ProjectPatchIn(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     name: str | None = None
     description: str | None = None
     archived: bool | None = None
+    root_path: str | None = Field(default=None, alias="rootPath")
+
+
+class ProjectRootIn(BaseModel):
+    path: str = ""
 
 
 class ReviewTemplateSelectIn(BaseModel):
@@ -178,6 +188,7 @@ def _project(row: dict[str, Any]) -> dict[str, Any]:
         "name": row["name"],
         "description": row.get("description") or "",
         "archived": bool(row.get("archived")),
+        "rootPath": row.get("root_path") or "",
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
         "sessionCount": int(row.get("session_count") or 0),
@@ -279,6 +290,12 @@ def build_router(
                 store.update_session(str(session["id"]), status="idle")
 
     router.add_event_handler("startup", reconcile_sessions)
+
+    def _local_only(request: Request) -> None:
+        """文件夹浏览只对本机窗口开放，避免局域网设备读取电脑文件。"""
+        host = request.client.host if request.client else ""
+        if host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+            raise HTTPException(status_code=403, detail="只能在桌面本机浏览文件夹")
 
     # ── 综述模板（应用级设置）────────────────────────────
 
@@ -420,7 +437,9 @@ def build_router(
     @router.post("/projects", status_code=201)
     def create_project(body: ProjectCreateIn) -> dict[str, Any]:
         try:
-            row = store.create_project(body.kind, body.name, body.description)
+            row = store.create_project(
+                body.kind, body.name, body.description, body.root_path
+            )
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         return _project(row)
@@ -435,10 +454,45 @@ def build_router(
     @router.patch("/projects/{project_id}")
     def update_project(project_id: str, body: ProjectPatchIn) -> dict[str, Any]:
         patch = body.model_dump(exclude_none=True)
-        row = store.update_project(project_id, **patch)
+        try:
+            row = store.update_project(project_id, **patch)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
         if row is None:
             raise HTTPException(status_code=404, detail="project not found")
         return _project(row)
+
+    @router.patch("/projects/{project_id}/root")
+    def set_project_root(project_id: str, body: ProjectRootIn) -> dict[str, Any]:
+        """把项目工作文件夹切换到本机任意文件夹；空路径恢复项目默认文件夹。"""
+        try:
+            row = store.update_project(project_id, root_path=body.path)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        if row is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        return _project(row)
+
+    @router.get("/fs/roots")
+    def fs_roots(request: Request) -> dict[str, Any]:
+        """盘符与常用位置，供 Jupyter 式文件夹选择器使用。"""
+        _local_only(request)
+        return {"items": explorer.quick_roots()}
+
+    @router.get("/fs/list")
+    def fs_list(
+        request: Request, path: str = Query(default="")
+    ) -> dict[str, Any]:
+        """列出本机某个文件夹；path 为空时返回盘符/常用位置。"""
+        _local_only(request)
+        try:
+            return explorer.browse(path)
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except NotADirectoryError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except PermissionError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
 
     @router.delete("/projects/{project_id}")
     def archive_project(project_id: str) -> dict[str, Any]:
@@ -470,6 +524,48 @@ def build_router(
         if store.get_project(project_id) is None:
             raise HTTPException(status_code=404, detail="project not found")
         return {"items": [_item(row) for row in store.list_items(project_id)]}
+
+    @router.get("/projects/{project_id}/explorer")
+    def project_explorer(
+        request: Request,
+        project_id: str,
+        path: str = Query(default=""),
+    ) -> dict[str, Any]:
+        """按真实目录浏览项目工作文件夹，供 Jupyter 式文件面板使用。"""
+        _local_only(request)
+        try:
+            root = store.workspace_root(project_id)
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail="project not found") from error
+        try:
+            return explorer.list_project(root, path)
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except NotADirectoryError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except PermissionError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.get("/projects/{project_id}/explorer/file")
+    def project_explorer_file(
+        request: Request,
+        project_id: str,
+        path: str = Query(...),
+    ):
+        """读取项目工作文件夹里的文件（只允许文件夹内相对路径）。"""
+        _local_only(request)
+        try:
+            root = store.workspace_root(project_id)
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail="project not found") from error
+        try:
+            file_path = explorer.project_file(root, path)
+        except (FileNotFoundError, ValueError) as error:
+            raise HTTPException(status_code=404, detail="file not found") from error
+        media = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        return FileResponse(str(file_path), media_type=media)
 
     @router.post("/projects/{project_id}/folders", status_code=201)
     def create_folder(project_id: str, body: FolderCreateIn) -> dict[str, Any]:
@@ -510,8 +606,8 @@ def build_router(
 
         name = safe_name(file.filename or "未命名文件")
         try:
-            relative, size = save_bytes(
-                store.workspace(project_id), name, data, parent_path
+            relative, size = save_bytes_in(
+                store.workspace_root(project_id), name, data, parent_path
             )
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
@@ -583,7 +679,7 @@ def build_router(
             folders[key] = row
             return row
 
-        workspace = store.workspace(project_id)
+        workspace = store.workspace_root(project_id)
         added: list[dict[str, Any]] = []
         errors: list[str] = []
         total = 0
@@ -618,7 +714,7 @@ def build_router(
                 parent_path = str(folder["path"] or "")
             name = parts[-1]
             try:
-                relative, size = save_bytes(workspace, name, data, parent_path)
+                relative, size = save_bytes_in(workspace, name, data, parent_path)
                 actual = Path(relative).name
                 mime = mimetypes.guess_type(actual)[0] or (
                     upload.content_type or ""
@@ -812,7 +908,7 @@ def build_router(
         project = store.get_project(session["project_id"])
         if project is None:
             raise HTTPException(status_code=404, detail="project not found")
-        return str(project["workspace"])
+        return str(store.workspace_root(str(project["id"])))
 
     @router.post("/sessions/{session_id}/messages", status_code=202)
     async def post_message(session_id: str, body: MessageIn) -> dict[str, Any]:
@@ -828,7 +924,8 @@ def build_router(
         try:
             await agent_client.ensure_session(session_id, cwd)
             # 订阅先于发送建立：即使页面立刻关掉，后台任务也会把回复落库。
-            await pump.restart(session_id, cwd)
+            # shield 避免浏览器中断 POST 时把 restart 一起取消，导致这一轮没有后台泵。
+            await asyncio.shield(pump.restart(session_id, cwd))
             await agent_client.send_message(session_id, text, cwd)
         except agent_client.AgentUnavailable as error:
             store.append_event(

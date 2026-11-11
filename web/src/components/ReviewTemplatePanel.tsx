@@ -3,6 +3,7 @@ import {
   researchApi,
   type ReviewTemplateGuide,
   type ReviewTemplateOption,
+  type ReviewTemplateOutlineItem,
   type ReviewTemplateState,
   type ReviewTemplateStyle,
 } from '../lib/researchApi'
@@ -91,6 +92,55 @@ function formatRows(guide: ReviewTemplateGuide): Array<[string, string]> {
         (fmt.citationStyle ? `（${CITATION_LABEL[fmt.citationStyle] || fmt.citationStyle}）` : ''),
     ],
   ]
+}
+
+function TemplateOutlineView({
+  outline,
+}: {
+  outline: ReviewTemplateOutlineItem[]
+}) {
+  return (
+    <div className="template-outline">
+      <div className="template-outline-head">
+        <span>章节约束</span>
+        <em>{outline.length} 节 · 点击章节展开</em>
+      </div>
+      {outline.map((item, index) => (
+        <details
+          className="template-outline-item"
+          key={item.title}
+          open={index === 0}
+        >
+          <summary>
+            <b>{item.title}</b>
+            {item.words && <span>{item.words}</span>}
+          </summary>
+          <div className="template-outline-body">
+            {item.points.length > 0 && (
+              <div className="template-outline-block">
+                <h5>必写</h5>
+                <ul>
+                  {item.points.map((point) => (
+                    <li key={point}>{point}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {item.checks.length > 0 && (
+              <div className="template-outline-block is-checks">
+                <h5>自检</h5>
+                <ul>
+                  {item.checks.map((check) => (
+                    <li key={check}>{check}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        </details>
+      ))}
+    </div>
+  )
 }
 
 function TemplateGuideView({
@@ -424,9 +474,44 @@ export function ReviewTemplatePanel() {
 
   const detail = state?.selectedDetail
   const activeSource = detail?.source || 'default'
+  const activeKind = detail?.kind || (activeSource === 'default' ? 'review' : '')
   const uploads = (state?.templates ?? []).filter((item) => item.source === 'upload')
   const builtins = (state?.templates ?? []).filter(
     (item) => item.source === 'default' || item.source === 'builtin',
+  )
+  const paperTemplates = builtins.filter((item) => item.kind === 'paper')
+  const reviewTemplates = builtins.filter((item) => item.kind !== 'paper')
+
+  const renderTemplateCard = (item: ReviewTemplateOption) => (
+    <button
+      key={item.id}
+      type="button"
+      className="template-card"
+      data-active={state?.selected === item.id}
+      disabled={saving}
+      onClick={() => void choose(item.id)}
+    >
+      <div className="template-card-top">
+        <b>{item.name}</b>
+        <span className="template-card-flags">
+          <span className="template-card-kind" data-kind={item.kind || 'review'}>
+            {item.kind === 'paper' ? '论文' : '综述'}
+          </span>
+          {state?.selected === item.id && <IconCheck />}
+        </span>
+      </div>
+      <p>{item.description}</p>
+      {item.sections.length > 0 && (
+        <div className="template-card-sections">
+          {item.sections.slice(0, 3).map((section) => (
+            <span key={section}>{section}</span>
+          ))}
+          {item.sections.length > 3 && (
+            <em>+{item.sections.length - 3}</em>
+          )}
+        </div>
+      )}
+    </button>
   )
 
   const previewGuide = preview?.guide
@@ -449,8 +534,14 @@ export function ReviewTemplatePanel() {
       {detail && (
         <section className="template-current">
           <div className="template-current-main">
-            <span className="template-eyebrow">当前综述模板</span>
-            <b>{detail.name || '系统默认（五段式）'}</b>
+            <span className="template-eyebrow">
+              {activeKind === 'paper'
+                ? '当前论文模板'
+                : activeKind === 'review'
+                  ? '当前综述模板'
+                  : '当前写作模板'}
+            </span>
+            <b>{detail.name || '通用综述（五段式）'}</b>
             <span className="template-source">
               {SOURCE_LABEL[activeSource] || activeSource}
               {detail.sections.length ? ` · ${detail.sections.length} 个章节` : ''}
@@ -459,19 +550,23 @@ export function ReviewTemplatePanel() {
           <span className="template-badge" data-source={activeSource}>
             {activeSource === 'default' ? '默认' : SOURCE_LABEL[activeSource]}
           </span>
-          {detail.sections.length > 0 ? (
+          {detail.sections.length > 0 && (
             <div className="template-chips">
               {detail.sections.map((section) => (
                 <span key={section}>{section}</span>
               ))}
             </div>
-          ) : (
-            <p className="template-hint">
-              默认骨架：摘要 / 引言 / 方法 / 讨论 / 结论，外加至少 3 个主题小节。
-              可以在下面换成本文模板、上传自己的模板，或从文献库选一篇综述。
-            </p>
           )}
-          {detail.guide && <TemplateGuideView guide={detail.guide} />}
+          {detail.outline && detail.outline.length > 0 ? (
+            <TemplateOutlineView outline={detail.outline} />
+          ) : detail.sections.length === 0 ? (
+            <p className="template-hint">
+              这个模板还没有解析出章节骨架。写作时智能体会先读取原文再补出骨架。
+            </p>
+          ) : null}
+          {detail.guide && Object.keys(detail.guide).length > 0 && (
+            <TemplateGuideView guide={detail.guide} />
+          )}
           {detail.source === 'paper' && (
             <button
               type="button"
@@ -492,36 +587,25 @@ export function ReviewTemplatePanel() {
 
       <section className="model-section">
         <div className="section-head">
-          <h3>系统与内置模板</h3>
-          <span>点击卡片即可切换</span>
+          <h3>论文模板</h3>
+          <span>有数据与实验的原创论文 · 点击卡片切换</span>
+        </div>
+        {paperTemplates.length > 0 ? (
+          <div className="preset-grid">
+            {paperTemplates.map(renderTemplateCard)}
+          </div>
+        ) : (
+          <p className="model-empty">当前版本没有内置论文模板。</p>
+        )}
+      </section>
+
+      <section className="model-section">
+        <div className="section-head">
+          <h3>综述模板</h3>
+          <span>系统综述 / 叙述性综述 / 通用五段式</span>
         </div>
         <div className="preset-grid">
-          {builtins.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className="template-card"
-              data-active={state?.selected === item.id}
-              disabled={saving}
-              onClick={() => void choose(item.id)}
-            >
-              <div className="template-card-top">
-                <b>{item.name}</b>
-                {state?.selected === item.id && <IconCheck />}
-              </div>
-              <p>{item.description}</p>
-              {item.sections.length > 0 && (
-                <div className="template-card-sections">
-                  {item.sections.slice(0, 3).map((section) => (
-                    <span key={section}>{section}</span>
-                  ))}
-                  {item.sections.length > 3 && (
-                    <em>+{item.sections.length - 3}</em>
-                  )}
-                </div>
-              )}
-            </button>
-          ))}
+          {reviewTemplates.map(renderTemplateCard)}
         </div>
       </section>
 

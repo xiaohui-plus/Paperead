@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from server.research.review_standard import evaluate, resolve_template, template_sections
+from server.research.review_standard import (
+    BUILTIN_TEMPLATES,
+    DEFAULT_TEMPLATE,
+    evaluate,
+    resolve_template,
+    template_sections,
+)
 
 DRAFT = """# 某主题综述
 
@@ -106,8 +112,8 @@ def test_template_priority_builtin_uploaded_default(tmp_path: Path):
 
     # 明确选内置模板
     sections, label, error = resolve_template("systematic", files)
-    assert label == "系统综述（PRISMA 风格）"
-    assert "检索策略" in sections
+    assert label == "系统综述（PRISMA 2020）"
+    assert "方法" in sections and "结果" in sections
     assert error == ""
 
     # 用户上传的模板在未选择时生效
@@ -121,8 +127,44 @@ def test_template_priority_builtin_uploaded_default(tmp_path: Path):
     # 显式选择优先于上传文件
     sections, label, _ = resolve_template("narrative", files)
     assert label == "叙述性综述"
-    assert "临床证据" in sections
+    assert "机制与证据" in sections
 
     # 选择不存在的文件要报错
     _, _, error = resolve_template("不存在.md", files)
     assert "没有找到模板" in error
+
+
+def test_builtin_templates_cover_paper_and_review_with_constraints():
+    paper = BUILTIN_TEMPLATES["paper-empirical"]
+    assert paper["kind"] == "paper"
+    titles = [item["title"] for item in paper["outline"]]
+    for expected in ["摘要", "引言", "方法", "实验与结果", "结论"]:
+        assert expected in titles
+    assert all(item["words"] and item["points"] and item["checks"] for item in paper["outline"])
+    assert "必写" in paper["markdown"] and "自检" in paper["markdown"]
+
+    for template_id in ("narrative", "systematic"):
+        template = BUILTIN_TEMPLATES[template_id]
+        assert template["kind"] == "review"
+        assert all(item["points"] for item in template["outline"])
+        assert "必写" in template["markdown"]
+
+    assert DEFAULT_TEMPLATE["kind"] == "review"
+    assert any("摘要" in item["title"] for item in DEFAULT_TEMPLATE["outline"])
+
+
+def test_template_options_expose_kind_outline_and_markdown(tmp_path):
+    from server.research import templates
+
+    items = templates.list_options(tmp_path)
+    by_id = {item["id"]: item for item in items}
+    assert by_id["paper-empirical"]["kind"] == "paper"
+    assert by_id["paper-empirical"]["outline"]
+    assert by_id["systematic"]["kind"] == "review"
+    assert by_id["default"]["outline"]
+
+    detail = templates.describe("paper-empirical", tmp_path, None)
+    assert detail["kind"] == "paper"
+    assert detail["markdown"].startswith("# 实证研究论文")
+    assert detail["outline"][0]["checks"]
+    assert detail["sections"][:2] == ["标题与作者", "摘要"]

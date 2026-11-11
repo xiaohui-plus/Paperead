@@ -8,6 +8,7 @@
 
 const SERVER_KEY = 'paperead.mobile.server'
 const TOKEN_KEY = 'paperead.mobile.token'
+const OFFLINE_KEY = 'paperead.mobile.offline'
 
 export interface MobileServer {
   base: string
@@ -69,6 +70,24 @@ export function clearMobileServer(): void {
 
 export function hasMobileServer(): boolean {
   return Boolean(loadMobileServer().base)
+}
+
+/** 没有电脑服务器时，允许手机只用导入的离线同步包。 */
+export function loadOfflineMode(): boolean {
+  try {
+    return localStorage.getItem(OFFLINE_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+export function setOfflineMode(enabled = true): void {
+  try {
+    if (enabled) localStorage.setItem(OFFLINE_KEY, '1')
+    else localStorage.removeItem(OFFLINE_KEY)
+  } catch {
+    // 写不了就只在本次页面生命周期内生效
+  }
 }
 
 /** 把 `/api/...` 拼成当前服务器的绝对地址。 */

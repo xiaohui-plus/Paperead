@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from server.research import agent_client
 from server.research.api import build_router
 from server.research.files import resolve_in_files, save_bytes
 from server.research.store import ResearchStore
@@ -283,6 +286,58 @@ def test_api_session_events_without_agent(
     )
     assert events.status_code == 200
     assert "你好" in events.text
+
+
+def test_background_pump_records_without_sse(
+    client: TestClient, store: ResearchStore, monkeypatch
+):
+    async def fake_ensure(session_id: str, cwd: str) -> None:
+        return None
+
+    async def fake_send(session_id: str, text: str, cwd: str) -> None:
+        return None
+
+    async def fake_stream(session_id: str, after: int):
+        for seq, event in enumerate(
+            (
+                {"type": "turn.start"},
+                {"type": "text.delta", "text": "后台回复"},
+                {"type": "turn.end", "reason": {"kind": "completed"}},
+            ),
+            start=1,
+        ):
+            await asyncio.sleep(0.02)
+            yield {"seq": seq, "at": int(time.time() * 1000), **event}
+
+    monkeypatch.setattr(agent_client, "ensure_session", fake_ensure)
+    monkeypatch.setattr(agent_client, "send_message", fake_send)
+    monkeypatch.setattr(agent_client, "stream_events", fake_stream)
+
+    project = client.post("/api/research/projects", json={"kind": "research"}).json()
+    session = client.post(
+        f"/api/research/projects/{project['id']}/sessions", json={}
+    ).json()
+
+    accepted = client.post(
+        f"/api/research/sessions/{session['id']}/messages", json={"text": "开始"}
+    )
+    assert accepted.status_code == 202
+
+    deadline = time.monotonic() + 3
+    rows = []
+    while time.monotonic() < deadline:
+        rows = store.list_events(session["id"])
+        if any(row["type"] == "turn.end" for row in rows):
+            break
+        time.sleep(0.05)
+
+    assert [row["type"] for row in rows] == [
+        "message.user",
+        "turn.start",
+        "text.delta",
+        "turn.end",
+    ]
+    assert store.get_session(session["id"])["status"] == "idle"
 
 
 def test_api_project_crud(client: TestClient):

@@ -9,7 +9,7 @@ import { ResearchShell } from './research/ResearchShell'
 import { ResearchHome } from './research/ResearchHome'
 import { ProjectPage } from './research/ProjectPage'
 import type { ProjectKind } from './lib/researchApi'
-import { hasMobileServer, isMobileShell } from './lib/mobile'
+import { hasMobileServer, isMobileShell, loadOfflineMode } from './lib/mobile'
 
 /**
  * 极简路由：用 query 参数而不是 hash，把 hash 留给 `#b0013` 这种块级深链。
@@ -156,7 +156,7 @@ export default function App() {
     else goView(key)
   }
 
-  if (isMobileShell() && !hasMobileServer()) {
+  if (isMobileShell() && !hasMobileServer() && !loadOfflineMode()) {
     return <MobileSetupScreen />
   }
 

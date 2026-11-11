@@ -20,6 +20,7 @@ from typing import Any
 from server.research.files import safe_name
 from server.research.review_standard import (
     BUILTIN_TEMPLATES,
+    DEFAULT_TEMPLATE,
     sections_from_markdown,
     template_sections,
 )
@@ -123,7 +124,9 @@ def list_uploads(root: Path) -> list[dict[str, Any]]:
                 "id": f"upload:{path.name}",
                 "name": path.stem,
                 "source": "upload",
+                "kind": "",
                 "description": f"已上传的模板 · {len(sections)} 个章节",
+                "outline": [],
                 "sections": sections,
             }
         )
@@ -145,7 +148,7 @@ def save_upload(root: Path, filename: str, data: bytes) -> dict[str, Any]:
     if "##" not in text:
         raise TemplateError("模板里至少需要一个二级标题（## 章节名）")
 
-    name = safe_name(filename, fallback="综述模板.md")
+    name = safe_name(filename, fallback="写作模板.md")
     target = uploads_dir(root) / name
     target.write_text(text, encoding="utf-8")
     sections = sections_from_markdown(text)
@@ -153,7 +156,9 @@ def save_upload(root: Path, filename: str, data: bytes) -> dict[str, Any]:
         "id": f"upload:{target.name}",
         "name": target.stem,
         "source": "upload",
+        "kind": "",
         "description": f"已上传的模板 · {len(sections)} 个章节",
+        "outline": [],
         "sections": sections,
     }
 
@@ -1073,10 +1078,12 @@ def list_options(root: Path) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = [
         {
             "id": "default",
-            "name": "系统默认（五段式）",
+            "name": DEFAULT_TEMPLATE["name"],
             "source": "default",
-            "description": "摘要 / 引言 / 方法 / 讨论 / 结论 + 3 个主题小节",
-            "sections": [],
+            "kind": DEFAULT_TEMPLATE["kind"],
+            "description": DEFAULT_TEMPLATE["description"],
+            "outline": DEFAULT_TEMPLATE["outline"],
+            "sections": sections_from_markdown(DEFAULT_TEMPLATE["markdown"]),
         }
     ]
     for template_id, meta in BUILTIN_TEMPLATES.items():
@@ -1085,7 +1092,9 @@ def list_options(root: Path) -> list[dict[str, Any]]:
                 "id": template_id,
                 "name": meta["name"],
                 "source": "builtin",
+                "kind": meta["kind"],
                 "description": meta["description"],
+                "outline": meta["outline"],
                 "sections": sections_from_markdown(meta["markdown"]),
             }
         )
@@ -1116,15 +1125,18 @@ def describe(
     root: Path,
     library: Any | None,
 ) -> dict[str, Any]:
-    """给设置页返回当前选择的名称、章节与正文预览。"""
+    """给设置页返回当前选择的名称、章节、详细约束与正文预览。"""
     value = (choice or "default").strip() or "default"
     if value in {"default", "auto"}:
         return {
             "id": "default",
-            "name": "系统默认（五段式）",
+            "name": DEFAULT_TEMPLATE["name"],
             "source": "default",
-            "sections": [],
-            "markdown": "",
+            "kind": DEFAULT_TEMPLATE["kind"],
+            "description": DEFAULT_TEMPLATE["description"],
+            "outline": DEFAULT_TEMPLATE["outline"],
+            "sections": sections_from_markdown(DEFAULT_TEMPLATE["markdown"]),
+            "markdown": DEFAULT_TEMPLATE["markdown"],
             "guide": {},
             "error": "",
         }
@@ -1134,6 +1146,9 @@ def describe(
             "id": value,
             "name": meta["name"],
             "source": "builtin",
+            "kind": meta["kind"],
+            "description": meta["description"],
+            "outline": meta["outline"],
             "sections": sections_from_markdown(meta["markdown"]),
             "markdown": meta["markdown"],
             "guide": {},
@@ -1157,6 +1172,9 @@ def describe(
         "id": value,
         "name": label,
         "source": source,
+        "kind": "",
+        "description": "",
+        "outline": [],
         "sections": sections,
         "markdown": markdown,
         "guide": guide,

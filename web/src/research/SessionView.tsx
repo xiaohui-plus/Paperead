@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { relativeTime, researchApi, type ProjectFile, type SessionSummary } from '../lib/researchApi'
 import { EMPTY_CHAT, type AgentEvent, type ChatState } from '../lib/researchTypes'
 import { addLocalMessage, applyEvents } from '../lib/researchReducer'
 import { streamSessionEvents, type StreamState } from '../lib/researchStream'
 import { Composer } from './Composer'
+import { splitLeadHeading } from './leadHeading'
 import { Transcript } from './Transcript'
 
 interface Props {
@@ -136,10 +137,19 @@ export function SessionView({
 
   const reconnecting = streamState === 'connecting' || streamState === 'error'
 
+  const pageTitle = useMemo(() => {
+    for (let index = chat.turns.length - 1; index >= 0; index -= 1) {
+      const turn = chat.turns[index]
+      const lead = splitLeadHeading(turn.text)
+      if (lead && (lead.complete || turn.endedAt !== null)) return lead.title
+    }
+    return chat.title || session.title
+  }, [chat.turns, chat.title, session.title])
+
   return (
     <div className="project-session-view">
       <header className="project-session-head">
-        <h2>{chat.title || session.title}</h2>
+        <h2>{pageTitle}</h2>
         <div className="session-head-meta">
           <span>{relativeTime(session.updatedAt)}</span>
           {chat.running && <i className="project-running" />}

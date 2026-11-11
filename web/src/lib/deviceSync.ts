@@ -2,8 +2,17 @@
  * 设备同步：电脑端把「服务器地址 + 访问口令 + 模型配置」做成二维码，
  * 手机端扫码后直接写入本机，之后就能独立同步数据、离线阅读。
  */
+import JSZip from 'jszip'
 import { apiFetch, normalizeServerBase } from './mobile'
-import { deleteOffline, downloadPaper, listOffline } from './offlineStore'
+import {
+  deleteOffline,
+  downloadPaper,
+  importOfflineRecord,
+  listOffline,
+  pageImagePath,
+  type OfflineAsset,
+  type OfflineRecord,
+} from './offlineStore'
 
 export interface SyncInfo {
   base: string
@@ -299,6 +308,257 @@ export async function syncFromServer(options: SyncOptions): Promise<SyncReport> 
     }
   }
 
+  return report
+}
+
+// ── 离线同步包：电脑导出、手机导入，不依赖网络 ─────────────
+
+export interface SyncPackageSkipped {
+  id: string
+  title: string
+  reason: string
+}
+
+export interface SyncExportReport {
+  ok: boolean
+  file: string
+  path: string
+  url: string
+  size: number
+  count: number
+  skipped: SyncPackageSkipped[]
+}
+
+export interface SyncImportProgress {
+  done: number
+  total: number
+  title: string
+}
+
+export interface SyncImportReport {
+  total: number
+  imported: number
+  updated: number
+  failed: { title: string; reason: string }[]
+  device?: string
+  appVersion?: string
+}
+
+interface PackagePaper {
+  id?: unknown
+  title?: unknown
+  authors?: unknown
+  pages?: unknown
+  files?: {
+    blocks?: unknown
+    pdf?: unknown
+    thumb?: unknown
+    pages?: Record<string, unknown>
+    assets?: Record<string, unknown>
+  }
+}
+
+interface PackageManifest {
+  format?: unknown
+  version?: unknown
+  device?: unknown
+  appVersion?: unknown
+  papers?: unknown
+}
+
+/** 电脑端：把勾选的论文打成 .paperead 同步包。 */
+export async function exportSyncPackage(ids: string[]): Promise<SyncExportReport> {
+  const response = await apiFetch('/api/sync/export', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids }),
+  })
+  const data = (await response.json().catch(() => ({}))) as Record<string, unknown>
+  if (!response.ok) {
+    throw new Error(String(data.detail || `导出失败（HTTP ${response.status}）`))
+  }
+  return {
+    ok: data.ok === true,
+    file: String(data.file ?? ''),
+    path: String(data.path ?? ''),
+    url: String(data.url ?? ''),
+    size: Number(data.size ?? 0),
+    count: Number(data.count ?? 0),
+    skipped: Array.isArray(data.skipped)
+      ? data.skipped.map((item) => {
+          const row = item as Record<string, unknown>
+          return {
+            id: String(row.id ?? ''),
+            title: String(row.title ?? '未命名'),
+            reason: String(row.reason ?? '未导出'),
+          }
+        })
+      : [],
+  }
+}
+
+/** 电脑端：把刚生成的同步包保存到用户选择的位置。 */
+export async function saveSyncPackageFile(
+  report: SyncExportReport,
+): Promise<'saved' | 'cancelled' | 'downloaded'> {
+  if (!report.url) throw new Error('同步包下载地址为空')
+  const response = await apiFetch(report.url)
+  if (!response.ok) throw new Error(`读取同步包失败（HTTP ${response.status}）`)
+
+  type PickerOptions = {
+    suggestedName?: string
+    types?: { description?: string; accept?: Record<string, string[]> }[]
+  }
+  const picker = (
+    window as Window & {
+      showSaveFilePicker?: (
+        options: PickerOptions,
+      ) => Promise<{ createWritable: () => Promise<WritableStream<Uint8Array>> }>
+    }
+  ).showSaveFilePicker
+
+  if (typeof picker === 'function' && response.body) {
+    let handle: { createWritable: () => Promise<WritableStream<Uint8Array>> }
+    try {
+      handle = await picker({
+        suggestedName: report.file || 'paperead-sync.paperead',
+        types: [
+          {
+            description: 'Paperead 同步包',
+            accept: { 'application/zip': ['.paperead'] },
+          },
+        ],
+      })
+    } catch (error) {
+      if ((error as { name?: string })?.name === 'AbortError') return 'cancelled'
+      throw error
+    }
+    await response.body.pipeTo(await handle.createWritable())
+    return 'saved'
+  }
+
+  const blob = await response.blob()
+  const href = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = href
+  link.download = report.file || 'paperead-sync.paperead'
+  link.click()
+  window.setTimeout(() => URL.revokeObjectURL(href), 1500)
+  return 'downloaded'
+}
+
+async function readBlob(zip: JSZip, path: unknown): Promise<Blob | null> {
+  if (typeof path !== 'string' || !path) return null
+  const file = zip.file(path)
+  if (!file) return null
+  return file.async('blob')
+}
+
+/**
+ * 手机端：导入电脑导出的 .paperead。包里的每篇论文直接写进离线库，
+ * 手机上已有的同名论文会被覆盖。
+ */
+export async function importSyncPackage(
+  file: File,
+  onProgress?: (info: SyncImportProgress) => void,
+): Promise<SyncImportReport> {
+  if (file.size > 2 * 1024 * 1024 * 1024) {
+    throw new Error('同步包超过 2 GB，请在电脑上分批导出后再导入')
+  }
+  const zip = await JSZip.loadAsync(file)
+  const manifestFile = zip.file('manifest.json')
+  if (!manifestFile) throw new Error('不是 Paperead 同步包：缺少 manifest.json')
+  let manifest: PackageManifest
+  try {
+    manifest = JSON.parse(await manifestFile.async('string')) as PackageManifest
+  } catch {
+    throw new Error('同步包里的 manifest.json 已损坏')
+  }
+  if (manifest.format !== 'paperead-sync') {
+    throw new Error('不是 Paperead 同步包')
+  }
+  const papers = Array.isArray(manifest.papers)
+    ? (manifest.papers as PackagePaper[])
+    : []
+  if (papers.length === 0) throw new Error('同步包里没有论文')
+  if (papers.length > 500) {
+    throw new Error('同步包里的论文超过 500 篇，请分批导出后再导入')
+  }
+
+  const existing = new Set((await listOffline()).map((item) => item.id))
+  const report: SyncImportReport = {
+    total: papers.length,
+    imported: 0,
+    updated: 0,
+    failed: [],
+    device: String(manifest.device ?? ''),
+    appVersion: String(manifest.appVersion ?? ''),
+  }
+
+  for (let index = 0; index < papers.length; index += 1) {
+    const paper = papers[index]
+    const id = typeof paper.id === 'string' ? paper.id : ''
+    const title = String(paper.title || id || '未命名')
+    onProgress?.({ done: index, total: papers.length, title })
+    try {
+      if (!id) throw new Error('缺少论文 id')
+      const files = paper.files ?? {}
+      const blocksPath = typeof files.blocks === 'string' ? files.blocks : ''
+      const blocksFile = blocksPath ? zip.file(blocksPath) : null
+      if (!blocksFile) throw new Error('缺少解析结果')
+      const payload = JSON.parse(
+        await blocksFile.async('string'),
+      ) as OfflineRecord['payload']
+      const pdf = await readBlob(zip, files.pdf)
+      const thumb = await readBlob(zip, files.thumb)
+
+      const assets: OfflineAsset[] = []
+      if (files.assets && typeof files.assets === 'object') {
+        for (const [url, zipPath] of Object.entries(files.assets)) {
+          const blob = await readBlob(zip, zipPath)
+          if (blob) assets.push({ path: url, blob })
+        }
+      }
+      if (files.pages && typeof files.pages === 'object') {
+        for (const [page, zipPath] of Object.entries(files.pages)) {
+          const number = Number(page)
+          if (!Number.isFinite(number) || number <= 0) continue
+          const blob = await readBlob(zip, zipPath)
+          if (blob) {
+            assets.push({ path: pageImagePath(id, number), blob })
+          }
+        }
+      }
+
+      const bytes =
+        new Blob([JSON.stringify(payload)]).size +
+        (pdf?.size ?? 0) +
+        (thumb?.size ?? 0) +
+        assets.reduce((sum, asset) => sum + asset.blob.size, 0)
+      const record: OfflineRecord = {
+        id,
+        title,
+        authors: String(paper.authors || payload.authors || ''),
+        payload,
+        pdf,
+        thumb,
+        assets,
+        bytes,
+        updatedAt: Date.now(),
+        source: 'paper',
+      }
+      await importOfflineRecord(record)
+      if (existing.has(id)) report.updated += 1
+      else report.imported += 1
+      existing.add(id)
+    } catch (error) {
+      report.failed.push({
+        title,
+        reason: error instanceof Error ? error.message : '导入失败',
+      })
+    }
+    onProgress?.({ done: index + 1, total: papers.length, title })
+  }
   return report
 }
 

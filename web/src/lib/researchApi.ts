@@ -8,10 +8,37 @@ export interface ProjectSummary {
   name: string
   description: string
   archived: boolean
+  /** 用户选择的本地工作文件夹；为空表示用项目自己的文件夹。 */
+  rootPath: string
   createdAt: number
   updatedAt: number
   sessionCount: number
   running: boolean
+}
+
+export interface FsEntry {
+  name: string
+  /** 本机浏览时是绝对路径，项目浏览时是相对路径。 */
+  path: string
+  absolute?: string
+  isDir: boolean
+  size: number
+  modifiedAt: number
+  kind: 'folder' | 'file'
+  mime?: string
+}
+
+export interface FsListing {
+  path: string
+  parent: string | null
+  items: FsEntry[]
+}
+
+export interface ProjectListing {
+  root: string
+  path: string
+  parent: string
+  items: FsEntry[]
 }
 
 export interface ProjectFile {
@@ -118,12 +145,24 @@ export interface ReviewTemplateGuide {
   markdown?: string
 }
 
+export type ReviewTemplateKind = 'paper' | 'review' | ''
+
+export interface ReviewTemplateOutlineItem {
+  title: string
+  required?: boolean
+  words?: string
+  points: string[]
+  checks: string[]
+}
+
 export interface ReviewTemplateOption {
   id: string
   name: string
   source: ReviewTemplateSource
   description: string
   sections: string[]
+  kind?: ReviewTemplateKind
+  outline?: ReviewTemplateOutlineItem[]
   guide?: ReviewTemplateGuide
 }
 
@@ -177,11 +216,43 @@ export const researchApi = {
     return data.items
   },
 
-  createProject(kind: ProjectKind, name?: string): Promise<ProjectSummary> {
+  createProject(
+    kind: ProjectKind,
+    name?: string,
+    rootPath?: string,
+  ): Promise<ProjectSummary> {
     return jsonFetch<ProjectSummary>(
       '/api/research/projects',
-      json('POST', { kind, name: name ?? '' }),
+      json('POST', { kind, name: name ?? '', rootPath: rootPath ?? '' }),
     )
+  },
+
+  setProjectRoot(projectId: string, path: string): Promise<ProjectSummary> {
+    return jsonFetch<ProjectSummary>(
+      `/api/research/projects/${projectId}/root`,
+      json('PATCH', { path }),
+    )
+  },
+
+  browseFs(path = ''): Promise<FsListing> {
+    return jsonFetch<FsListing>(
+      `/api/research/fs/list?path=${encodeURIComponent(path)}`,
+    )
+  },
+
+  async fsRoots(): Promise<FsEntry[]> {
+    const data = await jsonFetch<{ items: FsEntry[] }>('/api/research/fs/roots')
+    return data.items
+  },
+
+  projectExplorer(projectId: string, path = ''): Promise<ProjectListing> {
+    return jsonFetch<ProjectListing>(
+      `/api/research/projects/${projectId}/explorer?path=${encodeURIComponent(path)}`,
+    )
+  },
+
+  projectExplorerFileUrl(projectId: string, path: string): string {
+    return `/api/research/projects/${projectId}/explorer/file?path=${encodeURIComponent(path)}`
   },
 
   getProject(projectId: string): Promise<ProjectSummary> {

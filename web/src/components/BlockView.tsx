@@ -212,6 +212,7 @@ export function BlockView({
       <div className="block equation" id={b.id} data-block-id={b.id}>
         <EquationBody
           block={b}
+          paperId={paperId}
           attached={Boolean(attachedIds?.has(b.id))}
           onAttach={onAttachContext}
         />
@@ -702,10 +703,12 @@ const formulaTried = new Set<string>()
 /** 公式：优先 KaTeX 矢量渲染并保留编号，识别失败/不支持时回落到裁图。 */
 function EquationBody({
   block,
+  paperId,
   attached,
   onAttach,
 }: {
   block: Block
+  paperId?: string
   attached: boolean
   onAttach?: (item: ReaderContextItem) => void
 }) {
@@ -757,7 +760,12 @@ function EquationBody({
         const resp = await fetch('/api/formula', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ image_base64: b64, config: configBody(cfg) }),
+          body: JSON.stringify({
+            image_base64: b64,
+            config: configBody(cfg),
+            paper_id: paperId ?? '',
+            block_id: block.id,
+          }),
         })
         if (!resp.ok) return
         const data = (await resp.json()) as { latex?: string }
@@ -784,7 +792,7 @@ function EquationBody({
       alive = false
       io.disconnect()
     }
-  }, [block.id, block.image_path, tex])
+  }, [block.id, block.image_path, paperId, tex])
 
   const label = block.eq_number ? `公式 (${block.eq_number})` : '公式'
   const attach = onAttach ? (

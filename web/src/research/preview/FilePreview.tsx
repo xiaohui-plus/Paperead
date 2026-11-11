@@ -34,6 +34,11 @@ type PreviewKind =
   | 'code'
   | 'download'
 
+interface PreviewTarget {
+  name: string
+  mime?: string
+}
+
 const IMAGE_RE = /\.(png|jpe?g|gif|webp|svg|bmp|avif|ico)$/i
 const MARKDOWN_RE = /\.(md|mdx|markdown)$/i
 const CSV_RE = /\.(csv|tsv)$/i
@@ -64,7 +69,7 @@ const KIND_LABEL: Record<PreviewKind, string> = {
 }
 
 /** 按 MIME + 扩展名挑对应的预览器。 */
-function detectKind(file: ProjectFile): PreviewKind {
+function detectKind(file: PreviewTarget): PreviewKind {
   const name = file.name
   const mime = (file.mime || '').toLowerCase()
   if (mime.startsWith('image/') || IMAGE_RE.test(name)) return 'image'
@@ -141,6 +146,88 @@ function CodePreview({ text }: { text: string }) {
   )
 }
 
+function PreviewBody({
+  url,
+  name,
+  kind,
+}: {
+  url: string
+  name: string
+  kind: PreviewKind
+}) {
+  const needsText = kind === 'markdown' || kind === 'code'
+  const { text, error, loading } = useFileText(url, needsText)
+
+  if (kind === 'image') {
+    return (
+      <div className="project-preview-image-wrap">
+        <img src={url} alt={name} className="project-preview-image" />
+      </div>
+    )
+  }
+  if (kind === 'pdf') {
+    return (
+      <Suspense fallback={<p className="project-preview-note">正在加载 PDF 组件…</p>}>
+        <PdfViewer url={url} title={name} />
+      </Suspense>
+    )
+  }
+  if (kind === 'pptx') {
+    return (
+      <Suspense fallback={<p className="project-preview-note">正在加载 PPT 组件…</p>}>
+        <PptxPreview url={url} name={name} />
+      </Suspense>
+    )
+  }
+  if (kind === 'docx') {
+    return (
+      <Suspense fallback={<p className="project-preview-note">正在加载 Word 组件…</p>}>
+        <DocxPreview url={url} name={name} />
+      </Suspense>
+    )
+  }
+  if (kind === 'csv' || kind === 'sheet') {
+    return <SpreadsheetPreview url={url} name={name} kind={kind} />
+  }
+  if (kind === 'audio') {
+    return (
+      <div className="project-preview-media-wrap">
+        <audio controls src={url} className="project-preview-media" />
+      </div>
+    )
+  }
+  if (kind === 'video') {
+    return (
+      <div className="project-preview-media-wrap">
+        <video controls src={url} className="project-preview-media" />
+      </div>
+    )
+  }
+  if (kind === 'markdown') {
+    if (error) return <p className="project-preview-note">{error}</p>
+    if (loading) return <p className="project-preview-note">正在读取文件…</p>
+    return (
+      <div className="project-preview-markdown">
+        <Markdown text={text} />
+      </div>
+    )
+  }
+  if (kind === 'code') {
+    if (error) return <p className="project-preview-note">{error}</p>
+    if (loading) return <p className="project-preview-note">正在读取文件…</p>
+    return <CodePreview text={text} />
+  }
+  return (
+    <div className="project-preview-note">
+      暂不支持内嵌预览，请
+      <a href={url} download={name}>
+        下载文件
+      </a>
+      。
+    </div>
+  )
+}
+
 interface Props {
   projectId: string
   file: ProjectFile
@@ -151,9 +238,6 @@ interface Props {
 export function FilePreview({ projectId, file, onClose }: Props) {
   const url = researchApi.fileContentUrl(projectId, file.id)
   const kind = detectKind(file)
-  const needsText =
-    kind === 'markdown' || kind === 'code'
-  const { text, error, loading } = useFileText(url, needsText)
 
   return (
     <div className="project-preview">
@@ -176,65 +260,50 @@ export function FilePreview({ projectId, file, onClose }: Props) {
       </header>
 
       <div className="project-preview-body" data-kind={kind}>
-        {kind === 'image' ? (
-          <div className="project-preview-image-wrap">
-            <img src={url} alt={file.name} className="project-preview-image" />
-          </div>
-        ) : kind === 'pdf' ? (
-          <Suspense
-            fallback={<p className="project-preview-note">正在加载 PDF 组件…</p>}
-          >
-            <PdfViewer url={url} title={file.name} />
-          </Suspense>
-        ) : kind === 'pptx' ? (
-          <Suspense
-            fallback={<p className="project-preview-note">正在加载 PPT 组件…</p>}
-          >
-            <PptxPreview url={url} name={file.name} />
-          </Suspense>
-        ) : kind === 'docx' ? (
-          <Suspense
-            fallback={<p className="project-preview-note">正在加载 Word 组件…</p>}
-          >
-            <DocxPreview url={url} name={file.name} />
-          </Suspense>
-        ) : kind === 'csv' || kind === 'sheet' ? (
-          <SpreadsheetPreview url={url} name={file.name} kind={kind} />
-        ) : kind === 'audio' ? (
-          <div className="project-preview-media-wrap">
-            <audio controls src={url} className="project-preview-media" />
-          </div>
-        ) : kind === 'video' ? (
-          <div className="project-preview-media-wrap">
-            <video controls src={url} className="project-preview-media" />
-          </div>
-        ) : kind === 'markdown' ? (
-          error ? (
-            <p className="project-preview-note">{error}</p>
-          ) : loading ? (
-            <p className="project-preview-note">正在读取文件…</p>
-          ) : (
-            <div className="project-preview-markdown">
-              <Markdown text={text} />
-            </div>
-          )
-        ) : kind === 'code' ? (
-          error ? (
-            <p className="project-preview-note">{error}</p>
-          ) : loading ? (
-            <p className="project-preview-note">正在读取文件…</p>
-          ) : (
-            <CodePreview text={text} />
-          )
-        ) : (
-          <div className="project-preview-note">
-            暂不支持内嵌预览，请
-            <a href={url} download={file.name}>
-              下载文件
-            </a>
-            。
-          </div>
-        )}
+        <PreviewBody url={url} name={file.name} kind={kind} />
+      </div>
+    </div>
+  )
+}
+
+export interface LocalPreviewFile {
+  name: string
+  path: string
+  size: number
+  mime?: string
+}
+
+interface LocalProps {
+  url: string
+  file: LocalPreviewFile
+  onClose: () => void
+}
+
+/** 工作文件夹里的真实文件：与项目文件预览共用同一套渲染器。 */
+export function LocalFilePreview({ url, file, onClose }: LocalProps) {
+  const kind = detectKind(file)
+  return (
+    <div className="project-preview">
+      <header className="project-preview-head">
+        <div>
+          <h2>{file.name}</h2>
+          <span>
+            {file.path}
+            {file.size ? ` · ${formatSize(file.size)}` : ''} · {KIND_LABEL[kind]}
+          </span>
+        </div>
+        <div className="project-preview-actions">
+          <a className="icon-btn" href={url} download={file.name} title="下载">
+            <IconDownload />
+          </a>
+          <button className="icon-btn" title="关闭预览" onClick={onClose}>
+            <IconClose />
+          </button>
+        </div>
+      </header>
+
+      <div className="project-preview-body" data-kind={kind}>
+        <PreviewBody url={url} name={file.name} kind={kind} />
       </div>
     </div>
   )

@@ -12,14 +12,17 @@ import {
   relativeTime,
   researchApi,
   type ArtifactSummary,
+  type FsEntry,
   type ProjectFile,
   type ProjectKind,
   type ProjectSummary,
   type SessionSummary,
 } from '../lib/researchApi'
 import { Composer } from './Composer'
+import { LocalFolderBrowser } from './LocalFolderBrowser'
+import { ProjectExplorer } from './ProjectExplorer'
 import { ProjectFileTree } from './ProjectFileTree'
-import { FilePreview } from './preview/FilePreview'
+import { FilePreview, LocalFilePreview } from './preview/FilePreview'
 import { SessionView } from './SessionView'
 import { tourBus } from '../tour/tourBus'
 
@@ -85,6 +88,11 @@ export function ProjectPage({
   const [railOpen, setRailOpen] = useState(false)
   const [preview, setPreview] = useState<ProjectFile | null>(null)
   const [previewArtifact, setPreviewArtifact] = useState<ArtifactSummary | null>(null)
+  const [localPreview, setLocalPreview] = useState<{
+    entry: FsEntry
+    url: string
+  } | null>(null)
+  const [folderPicker, setFolderPicker] = useState(false)
   const [activeFolderId, setActiveFolderId] = useState<string | null>(null)
   const [selectedFiles, setSelectedFiles] = useState<string[]>([])
   const [folderParent, setFolderParent] = useState<string | null | undefined>(undefined)
@@ -167,6 +175,12 @@ export function ProjectPage({
   useEffect(() => {
     if (initialText) setPendingText(initialText)
   }, [initialText])
+
+  // 刚创建的项目先让用户选择工作文件夹，取消则继续用项目默认文件夹。
+  useEffect(() => {
+    if (!initialRename || !project || project.rootPath) return
+    setFolderPicker(true)
+  }, [initialRename, project?.id, project?.rootPath])
 
   // agent 写产物不会触发前端刷新；切回「文件」时重新拉一次。
   const refreshArtifacts = useCallback(async () => {
@@ -269,9 +283,39 @@ export function ProjectPage({
 
   const openComposer = () => {
     setPreview(null)
+    setPreviewArtifact(null)
+    setLocalPreview(null)
     onSelectSession(null)
     setTab('sessions')
     setRailOpen(false)
+  }
+
+  const applyRoot = async (path: string) => {
+    const updated = await researchApi.setProjectRoot(projectId, path)
+    setProject(updated)
+    setPreview(null)
+    setPreviewArtifact(null)
+    setLocalPreview(null)
+    setActiveFolderId(null)
+    setTab('files')
+  }
+
+  const openLocalFile = (entry: FsEntry) => {
+    setPreview(null)
+    setPreviewArtifact(null)
+    setRailOpen(false)
+    setLocalPreview({
+      entry,
+      url: researchApi.projectExplorerFileUrl(projectId, entry.path),
+    })
+  }
+
+  const resetRoot = async () => {
+    try {
+      await applyRoot('')
+    } catch (resetError) {
+      setError(errorText(resetError))
+    }
   }
 
   const send = async (text: string) => {
@@ -627,6 +671,7 @@ export function ProjectPage({
                     data-active={session.id === sessionId}
                     onClick={() => {
                       setPreview(null)
+                      setLocalPreview(null)
                       setRailOpen(false)
                       onSelectSession(session.id)
                     }}
@@ -640,68 +685,94 @@ export function ProjectPage({
             </div>
           ) : (
             <div className="project-file-panel">
-              {folderParent !== undefined && (
-                <form
-                  className="project-folder-form"
-                  onSubmit={(event) => {
-                    event.preventDefault()
-                    void createFolder()
-                  }}
-                >
-                  <input
-                    autoFocus
-                    value={folderName}
-                    placeholder="文件夹名称"
-                    onChange={(event) => setFolderName(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Escape') setFolderParent(undefined)
+              {project?.rootPath ? (
+                <ProjectExplorer
+                  key={`${projectId}:${project.rootPath}`}
+                  projectId={projectId}
+                  rootPath={project.rootPath}
+                  activeFile={localPreview?.entry.path ?? null}
+                  onOpenFile={openLocalFile}
+                  onChooseFolder={() => setFolderPicker(true)}
+                  onResetRoot={() => void resetRoot()}
+                  onError={setError}
+                />
+              ) : (
+                <>
+                  <div className="project-explorer-toolbar">
+                    <button
+                      className="project-explorer-choose"
+                      title="选择电脑上的文件夹作为项目工作目录"
+                      onClick={() => setFolderPicker(true)}
+                    >
+                      <IconFolder />
+                      打开本地文件夹
+                    </button>
+                  </div>
+                  {folderParent !== undefined && (
+                    <form
+                      className="project-folder-form"
+                      onSubmit={(event) => {
+                        event.preventDefault()
+                        void createFolder()
+                      }}
+                    >
+                      <input
+                        autoFocus
+                        value={folderName}
+                        placeholder="文件夹名称"
+                        onChange={(event) => setFolderName(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Escape') setFolderParent(undefined)
+                        }}
+                      />
+                      <button type="submit">确定</button>
+                    </form>
+                  )}
+                  {uploading && <p className="project-rail-empty">正在上传…</p>}
+                  <ProjectFileTree
+                    items={treeItems}
+                    activeFolderId={activeFolderId}
+                    activeFileId={
+                      preview?.id ??
+                      (previewArtifact ? artifactNodeId(previewArtifact.id) : null)
+                    }
+                    selectedFiles={selectedFiles}
+                    onFolder={(folder) => {
+                      setSelectedFiles([])
+                      if (folder.id === ARTIFACT_FOLDER_ID) return
+                      setActiveFolderId(folder.id)
                     }}
+                    onFile={(file) => {
+                      setSelectedFiles([])
+                      setRailOpen(false)
+                      setLocalPreview(null)
+                      if (file.kind === 'artifact') {
+                        const artifact = artifacts.find(
+                          (item) => item.id === file.refId,
+                        )
+                        if (!artifact) return
+                        setPreview(null)
+                        setPreviewArtifact(artifact)
+                        return
+                      }
+                      setPreviewArtifact(null)
+                      setPreview(file)
+                    }}
+                    onRefresh={() => void refreshArtifacts()}
+                    onUpload={() => uploadRef.current?.click()}
+                    onUploadFolder={() => folderRef.current?.click()}
+                    onCreateFolder={startFolder}
+                    onRename={(item, name) => renameFile(item, name)}
+                    onDelete={(item) => void deleteFile(item)}
+                    onMove={(item, parentId) => moveFile(item, parentId)}
+                    onCopy={(item, parentId) => copyFile(item, parentId)}
+                    onCopyPath={copyPath}
+                    onAddToLibrary={(item) => void addToLibrary(item)}
+                    onMultiSelect={toggleSelected}
+                    onDeleteSelected={() => void deleteSelected()}
                   />
-                  <button type="submit">确定</button>
-                </form>
+                </>
               )}
-              {uploading && <p className="project-rail-empty">正在上传…</p>}
-              <ProjectFileTree
-                items={treeItems}
-                activeFolderId={activeFolderId}
-                activeFileId={
-                  preview?.id ??
-                  (previewArtifact ? artifactNodeId(previewArtifact.id) : null)
-                }
-                selectedFiles={selectedFiles}
-                onFolder={(folder) => {
-                  setSelectedFiles([])
-                  if (folder.id === ARTIFACT_FOLDER_ID) return
-                  setActiveFolderId(folder.id)
-                }}
-                onFile={(file) => {
-                  setSelectedFiles([])
-                  setRailOpen(false)
-                  if (file.kind === 'artifact') {
-                    const artifact = artifacts.find(
-                      (item) => item.id === file.refId,
-                    )
-                    if (!artifact) return
-                    setPreview(null)
-                    setPreviewArtifact(artifact)
-                    return
-                  }
-                  setPreviewArtifact(null)
-                  setPreview(file)
-                }}
-                onRefresh={() => void refreshArtifacts()}
-                onUpload={() => uploadRef.current?.click()}
-                onUploadFolder={() => folderRef.current?.click()}
-                onCreateFolder={startFolder}
-                onRename={(item, name) => renameFile(item, name)}
-                onDelete={(item) => void deleteFile(item)}
-                onMove={(item, parentId) => moveFile(item, parentId)}
-                onCopy={(item, parentId) => copyFile(item, parentId)}
-                onCopyPath={copyPath}
-                onAddToLibrary={(item) => void addToLibrary(item)}
-                onMultiSelect={toggleSelected}
-                onDeleteSelected={() => void deleteSelected()}
-              />
             </div>
           )}
         </aside>
@@ -720,6 +791,17 @@ export function ProjectPage({
               projectId={projectId}
               file={preview}
               onClose={() => setPreview(null)}
+            />
+          ) : localPreview ? (
+            <LocalFilePreview
+              url={localPreview.url}
+              file={{
+                name: localPreview.entry.name,
+                path: localPreview.entry.path,
+                size: localPreview.entry.size,
+                mime: localPreview.entry.mime,
+              }}
+              onClose={() => setLocalPreview(null)}
             />
           ) : selectedSession ? (
             <SessionView
@@ -758,6 +840,13 @@ export function ProjectPage({
           )}
         </section>
       </div>
+
+      <LocalFolderBrowser
+        open={folderPicker}
+        initialPath={project?.rootPath || ''}
+        onClose={() => setFolderPicker(false)}
+        onSelect={applyRoot}
+      />
     </div>
   )
 }

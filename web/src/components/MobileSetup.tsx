@@ -2,6 +2,7 @@ import { useState } from 'react'
 import {
   loadMobileServer,
   saveMobileServer,
+  setOfflineMode,
   testMobileServer,
 } from '../lib/mobile'
 import { MobileDeviceSyncPanel } from './DeviceSync'
@@ -44,7 +45,7 @@ function ServerForm({ base, token, onBase, onToken }: FormProps) {
   )
 }
 
-/** 安卓端首次启动：扫码配对，配对后可直接选择同步方式；也可手动填地址。 */
+/** 安卓端首次启动：同步包导入优先，Wi-Fi 直连作为可选方式。 */
 export function MobileSetupScreen() {
   return (
     <div className="mobile-setup">
@@ -55,29 +56,48 @@ export function MobileSetupScreen() {
         </div>
 
         <div className="mobile-setup-intro">
-          <h1>连接电脑上的文献库</h1>
-          <p>扫码一次，就能把电脑上的文献同步到手机离线阅读。</p>
+          <h1>把电脑上的文献放到手机</h1>
+          <p>
+            电脑导出一个同步包，手机选文件导入即可。不需要同一 Wi-Fi，也不用配置服务器。
+          </p>
         </div>
 
         <ol className="mobile-setup-steps">
           <li>
-            <b>电脑端显示二维码</b>
-            <span>打开 Paperead → 设置 → 设备同步</span>
+            <b>电脑导出同步包</b>
+            <span>打开 Paperead → 设置 → 设备同步 → 文件同步</span>
           </li>
           <li>
-            <b>手机连同一个 Wi-Fi</b>
-            <span>也可以是电脑所在局域网的同一网段</span>
+            <b>把 .paperead 发到手机</b>
+            <span>微信文件传输助手、数据线或网盘都可以</span>
           </li>
           <li>
-            <b>对准二维码扫描</b>
-            <span>下方点「扫描二维码」，识别后自动配对</span>
+            <b>在下方选择文件导入</b>
+            <span>导入后回到文献库即可离线阅读</span>
           </li>
         </ol>
 
-        <MobileDeviceSyncPanel bare onDone={() => window.location.reload()} />
+        <MobileDeviceSyncPanel
+          bare
+          onDone={() => {
+            setOfflineMode()
+            window.location.reload()
+          }}
+        />
+
+        <button
+          className="btn ghost mobile-setup-skip"
+          type="button"
+          onClick={() => {
+            setOfflineMode()
+            window.location.reload()
+          }}
+        >
+          先跳过，直接使用离线文献库
+        </button>
 
         <details className="mobile-setup-manual">
-          <summary>扫码不方便？手动填写服务器地址</summary>
+          <summary>想用 Wi-Fi 直连？手动填写服务器地址</summary>
           <ManualConnect />
         </details>
       </div>
