@@ -34,7 +34,7 @@ $sums         = Join-Path $root "release\SHA256SUMS.txt"
 
 # ---------- 前置检查 ----------
 $missing = @()
-foreach ($f in @($installer, $portable, $latestJson, $sums)) {
+foreach ($f in @($installer, $latestJson, $sums)) {
     if (-not (Test-Path $f)) { $missing += $f }
 }
 if (-not $pandoc) { $missing += "release\pandoc-*.zip" }
@@ -165,6 +165,10 @@ if (-not $SkipGitee) {
     function Publish-GiteeFile($Release, [string]$Path) {
         $name = Split-Path -Leaf $Path
         $old = Get-GiteeAttachments $Release.id | Where-Object { $_.name -eq $name } | Select-Object -First 1
+        if ($old -and [int64]$old.size -eq (Get-Item $Path).Length) {
+            Write-Host "  $name 已存在且大小一致，跳过"
+            return
+        }
         if ($old) {
             Write-Host "  替换同名附件 $name"
             Remove-GiteeFile -ReleaseId $Release.id -AttachId $old.id
@@ -185,7 +189,16 @@ if (-not $SkipGitee) {
         Write-Host "Gitee: 发行版 $tag 已存在，补齐附件（描述如需修改请手动编辑）"
     }
 
-    $files = @($installer, $portable, $android.FullName, $sums, $latestJson, $pandoc.FullName)
+    $files = @($installer, $android.FullName, $sums, $latestJson, $pandoc.FullName)
+# Gitee 单附件上限 100MB；便携包更大时保留在本地，不随发行版上传
+if (Test-Path $portable) {
+    $portableMB = [math]::Round((Get-Item $portable).Length / 1MB, 1)
+    if ($portableMB -le 100) {
+        $files += $portable
+    } else {
+        Write-Host "提示：便携包 $portableMB MB 超过 Gitee 单文件 100MB 上限，跳过上传"
+    }
+}
     if (Test-Path $installerZip) { $files += $installerZip }
     if ($SourceZip -and (Test-Path $SourceZip)) { $files += $SourceZip }
     else { Write-Host "  提示：未提供源码 zip（-SourceZip），跳过" }
@@ -209,7 +222,6 @@ Write-Host ""
 Write-Host "==== 下载自检 ===="
 $checks = @(
     "https://gitee.com/$GiteeRepo/releases/download/$tag/$(Split-Path -Leaf $installer)",
-    "https://gitee.com/$GiteeRepo/releases/download/$tag/$(Split-Path -Leaf $portable)",
     "https://gitee.com/$GiteeRepo/releases/download/$tag/$(Split-Path -Leaf $android.FullName)",
     "https://gitee.com/$GiteeRepo/releases/download/latest/latest.json"
 )
