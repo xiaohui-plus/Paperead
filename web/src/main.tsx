@@ -11,7 +11,12 @@ import { syncResearchModel } from './lib/researchModel'
 import { syncScholarConfig } from './lib/scholarConfig'
 import { autoCheckUpdate, isDesktopApp } from './lib/update'
 import { hasMobileServer, installMobileFetch, isMobileShell } from './lib/mobile'
-import { pullModelSettings, restoreModelSettings } from './lib/settingsSync'
+import {
+  pullModelSettings,
+  restoreAppSettings,
+  restoreModelSettings,
+  startAppSettingsBackup,
+} from './lib/settingsSync'
 import { applyReadingFonts } from './lib/readingPrefs'
 
 const TourRoot = lazy(() =>
@@ -38,8 +43,10 @@ applyReadingFonts()
 
 async function boot() {
   if (!mobile) {
-    // 旧版本端口随机导致 localStorage 换命名空间，先从后端恢复模型配置再渲染
+    // 端口变化会让 localStorage 换命名空间；先补回数据目录里的整份设置
+    await restoreAppSettings()
     await restoreModelSettings()
+    startAppSettingsBackup()
   }
   if (!mobile || hasMobileServer()) {
     // 解析阶段识别公式需要识图模型配置；启动时先同步一次，避免要先打开设置页

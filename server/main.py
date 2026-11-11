@@ -3112,6 +3112,46 @@ def put_model_settings(payload: dict) -> dict:
     return {"ok": True, "updated_at": data["updated_at"]}
 
 
+# 整份设置备份：localStorage 跟着端口走，数据目录与端口无关，换端口也能恢复。
+APP_SETTINGS_PATH = DATA_DIR / "app-settings.json"
+APP_SETTINGS_VALUE_LIMIT = 256 * 1024
+APP_SETTINGS_KEY_LIMIT = 200
+
+
+@app.get("/api/settings/app")
+def get_app_settings() -> dict:
+    try:
+        data = json.loads(APP_SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+@app.put("/api/settings/app")
+def put_app_settings(payload: dict) -> dict:
+    settings = payload.get("settings")
+    if not isinstance(settings, dict):
+        raise HTTPException(status_code=400, detail="settings 必须是对象")
+    clean: dict[str, str] = {}
+    for key, value in settings.items():
+        if len(clean) >= APP_SETTINGS_KEY_LIMIT:
+            break
+        if not isinstance(key, str) or not key.startswith("paperead."):
+            continue
+        if not isinstance(value, str) or len(value) > APP_SETTINGS_VALUE_LIMIT:
+            continue
+        clean[key] = value
+    data = {
+        "settings": clean,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    APP_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = APP_SETTINGS_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, APP_SETTINGS_PATH)
+    return {"ok": True, "keys": len(clean), "updated_at": data["updated_at"]}
+
+
 if WEB_DIST.exists():
     # pdf.js 的 worker 是 .mjs；Windows 上 mimetypes 默认不认识 .mjs，会按 text/plain
     # 返回，浏览器拒绝把它当模块加载，导致 PDF 预览与打印失败。
