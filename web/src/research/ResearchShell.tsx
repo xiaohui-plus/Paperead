@@ -26,6 +26,8 @@ export type StartHandler = (
   text: string,
   title: string,
   projectId: string | null,
+  /** 本次选择的工作文件夹；空字符串表示沿用项目自己的文件夹。 */
+  rootPath?: string,
 ) => Promise<void>
 
 function errorText(error: unknown): string {
@@ -67,11 +69,14 @@ export function ResearchShell({
     if (kind === 'research') tourBus.emit('research:opened')
   }, [kind])
 
-  const createProject = async (name?: string): Promise<ProjectSummary | null> => {
+  const createProject = async (
+    name?: string,
+    rootPath?: string,
+  ): Promise<ProjectSummary | null> => {
     setCreating(true)
     setError(null)
     try {
-      const project = await researchApi.createProject(kind, name)
+      const project = await researchApi.createProject(kind, name, rootPath)
       setProjects((prev) => [project, ...prev])
       return project
     } catch (createError) {
@@ -87,7 +92,7 @@ export function ResearchShell({
     if (project) onOpenProject(project.id, { rename: true })
   }
 
-  const start: StartHandler = async (text, title, projectId) => {
+  const start: StartHandler = async (text, title, projectId, rootPath = '') => {
     if (starting) return
     setStarting(true)
     try {
@@ -95,9 +100,15 @@ export function ResearchShell({
       let target = projectId
       if (!target) {
         // 新项目直接用首条消息命名，避免侧栏里出现一排“新研究/新综述”。
-        const created = await createProject(sessionTitle)
+        const created = await createProject(sessionTitle, rootPath)
         if (!created) return
         target = created.id
+      } else if (rootPath) {
+        // 已有项目换了目录：先落盘根目录，后续会话与 agent 都在这里工作。
+        const updated = await researchApi.setProjectRoot(target, rootPath)
+        setProjects((prev) =>
+          prev.map((item) => (item.id === updated.id ? updated : item)),
+        )
       }
       const session: SessionSummary = await researchApi.createSession(
         target,

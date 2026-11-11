@@ -1,8 +1,9 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { IconList, IconSend, IconSpark } from '../components/icons'
 import type { ProjectKind, ProjectSummary } from '../lib/researchApi'
 import { tourBus } from '../tour/tourBus'
 import type { StartHandler } from './ResearchShell'
+import { WorkspacePicker } from './WorkspacePicker'
 
 interface Props {
   kind: ProjectKind
@@ -92,6 +93,7 @@ const REVIEW_EXAMPLES = [
 /** 研究与写综述的功能首页：项目选择 + composer + 快捷动作。 */
 export function ResearchHome({ kind, projects, onStart }: Props) {
   const [target, setTarget] = useState<string>('auto')
+  const [workspace, setWorkspace] = useState('')
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
   const [filled, setFilled] = useState(false)
@@ -105,6 +107,14 @@ export function ResearchHome({ kind, projects, onStart }: Props) {
 
   const effectiveProject =
     target === 'new' ? null : target === 'auto' ? (projects[0]?.id ?? null) : target
+  const projectRoot = effectiveProject
+    ? (projects.find((project) => project.id === effectiveProject)?.rootPath ?? '')
+    : ''
+
+  // 切换项目后不再沿用上一个项目的「本次文件夹」。
+  useEffect(() => {
+    setWorkspace('')
+  }, [target])
 
   /** 快捷卡片只把示例填进输入框，等用户改完再自己发送。 */
   const fillDraft = (text: string) => {
@@ -125,7 +135,7 @@ export function ResearchHome({ kind, projects, onStart }: Props) {
     setBusy(true)
     try {
       tourBus.emit('research:action', { label: title })
-      await onStart(value, title, effectiveProject)
+      await onStart(value, title, effectiveProject, workspace)
       setDraft('')
       setFilled(false)
     } finally {
@@ -170,6 +180,19 @@ export function ResearchHome({ kind, projects, onStart }: Props) {
             {filled
               ? '示例已填入，可修改后发送'
               : '发送后自动建会话，可随时回到项目继续'}
+          </span>
+        </div>
+        <div className="research-composer-scope">
+          <WorkspacePicker
+            value={workspace}
+            projectRoot={projectRoot}
+            disabled={busy}
+            onChange={setWorkspace}
+          />
+          <span className="research-composer-hint">
+            {effectiveProject && !workspace
+              ? '沿用项目文件夹；点左侧可换目录'
+              : 'agent 会在这个目录里读写文件'}
           </span>
         </div>
         <textarea
