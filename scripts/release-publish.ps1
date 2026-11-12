@@ -31,7 +31,7 @@ $sums         = Join-Path $root "release\SHA256SUMS.txt"
 
 # ---------- 前置检查 ----------
 $missing = @()
-foreach ($f in @($installer, $latestJson, $sums)) {
+foreach ($f in @($installer, ($installer + ".sig"), $latestJson, $sums)) {
     if (-not (Test-Path $f)) { $missing += $f }
 }
 if ($missing.Count -gt 0) {
@@ -220,7 +220,8 @@ if (-not $SkipGitee) {
     }
 
     # 默认只发 Windows 安装包；本轮有 APK 时再带上 Android 物料
-    $files = @($installer, $sums, $latestJson)
+    # 更新签名 .sig 必须随安装包一起发：latest.json 内嵌签名不能替代发行版里的签名附件
+    $files = @($installer, ($installer + ".sig"), $sums, $latestJson)
     if ($hasAndroid) { $files += @($android.FullName, $androidJson) }
 
     Write-Host "Gitee: 上传 $tag 附件"
