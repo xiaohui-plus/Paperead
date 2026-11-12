@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tauri::{AppHandle, Manager};
 
@@ -22,10 +22,32 @@ fn var_os(name: &str) -> Option<std::ffi::OsString> {
     std::env::var_os(format!("PAPER_REFLOW_{suffix}"))
 }
 
-pub fn data_dir(app: &AppHandle) -> PathBuf {
-    if let Some(value) = var_os("PAPEREAD_DATA") {
-        return PathBuf::from(value);
+fn read_location(file: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(file).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let path = value.get("path")?.as_str()?.trim();
+    if path.is_empty() {
+        return None;
     }
+    Some(PathBuf::from(path))
+}
+
+fn configured_data_dir() -> Option<PathBuf> {
+    // 设置页迁移文献库后写入 %APPDATA%\Paperead\data-location.json；
+    // 主文件损坏时回退上一次备份，避免升级/异常退出后路径丢失。
+    let base = std::env::var_os("APPDATA")?;
+    let dir = PathBuf::from(base).join("Paperead");
+    read_location(&dir.join("data-location.json"))
+        .or_else(|| read_location(&dir.join("data-location.json.bak")))
+}
+
+fn library_has_data(dir: &Path) -> bool {
+    dir.join("library.json").is_file()
+        || dir.join("papers").is_dir()
+        || dir.join("research").is_dir()
+}
+
+fn default_data_dir_path(app: &AppHandle) -> PathBuf {
     if let Some(value) = std::env::var_os("LOCALAPPDATA") {
         return PathBuf::from(value).join(DATA_DIR_NAME);
     }
@@ -33,6 +55,30 @@ pub fn data_dir(app: &AppHandle) -> PathBuf {
         .app_local_data_dir()
         .map(|path| path.join(DATA_DIR_NAME))
         .unwrap_or_else(|_| PathBuf::from(DATA_DIR_NAME))
+}
+
+pub fn data_dir(app: &AppHandle) -> PathBuf {
+    if let Some(value) = var_os("PAPEREAD_DATA") {
+        return PathBuf::from(value);
+    }
+    if let Some(path) = configured_data_dir() {
+        // 自定义路径还在且有数据：继续用
+        if library_has_data(&path) {
+            return path;
+        }
+        // 自定义路径失效（移动硬盘未挂载、目录改名）：回退默认库，但保留配置
+        let fallback = default_data_dir_path(app);
+        if library_has_data(&fallback) {
+            eprintln!(
+                "[Paperead] configured data dir {} unavailable; using {}",
+                path.display(),
+                fallback.display()
+            );
+            return fallback;
+        }
+        return path;
+    }
+    default_data_dir_path(app)
 }
 
 /// 旧版数据目录改名为新目录；改名失败时返回旧目录继续使用。
@@ -78,7 +124,10 @@ fn prepare(dir: &std::path::Path) -> bool {
 
 pub fn ensure_data_dir(app: &AppHandle) -> PathBuf {
     let mut dir = data_dir(app);
-    let explicit = var_os("PAPEREAD_DATA").is_some();
+    // 自定义路径生效时不再触发旧目录改名/只读回退；回退到默认库时仍要走 legacy 迁移
+    let configured = configured_data_dir();
+    let using_configured = configured.as_ref().is_some_and(|path| path == &dir);
+    let explicit = var_os("PAPEREAD_DATA").is_some() || using_configured;
     if !explicit {
         dir = adopt_legacy(dir);
     }

@@ -19,7 +19,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, Request, Upload
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from server.research import agent_client, explorer, templates as review_templates
+from server.research import agent_client, explorer, ppt_templates, templates as review_templates
 from server.research.files import safe_name, save_bytes_in
 from server.research.store import ResearchStore
 
@@ -442,6 +442,51 @@ def build_router(
             "error": error,
         }
 
+
+    # ── PPT 汇报模板（应用级设置）────────────────────────
+
+    @router.get("/ppt-templates")
+    def get_ppt_templates() -> dict[str, Any]:
+        root = review_root()
+        return {
+            "selected": ppt_templates.read_choice(root),
+            "items": ppt_templates.list_items(root),
+        }
+
+    @router.post("/ppt-templates/select")
+    def select_ppt_template(body: ReviewTemplateSelectIn) -> dict[str, Any]:
+        root = review_root()
+        value = (body.id or "").strip()
+        if value not in {item["id"] for item in ppt_templates.list_items(root)}:
+            raise HTTPException(status_code=400, detail="没有这个 PPT 模板")
+        ppt_templates.write_choice(root, value)
+        return {
+            "selected": value,
+            "items": ppt_templates.list_items(root),
+        }
+
+    @router.post("/ppt-templates/upload")
+    async def upload_ppt_template(file: UploadFile = File(...)) -> dict[str, Any]:
+        root = review_root()
+        data = await file.read()
+        try:
+            item = ppt_templates.save_upload(root, file.filename or "", data)
+        except ppt_templates.PptTemplateError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {
+            "selected": item["id"],
+            "items": ppt_templates.list_items(root),
+        }
+
+    @router.delete("/ppt-templates/uploads/{name}")
+    def delete_ppt_template(name: str) -> dict[str, Any]:
+        root = review_root()
+        if not ppt_templates.delete_upload(root, name):
+            raise HTTPException(status_code=404, detail="没有这个 PPT 模板")
+        return {
+            "selected": ppt_templates.read_choice(root),
+            "items": ppt_templates.list_items(root),
+        }
 
     @router.get("/health")
     def health() -> dict[str, Any]:

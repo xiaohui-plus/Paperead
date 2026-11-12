@@ -191,6 +191,20 @@ export interface ReviewTemplateState {
   uploaded?: ReviewTemplateOption
 }
 
+export interface PptTemplateItem {
+  id: string
+  name: string
+  description: string
+  source: 'builtin' | 'upload'
+  size: number
+  selected: boolean
+}
+
+export interface PptTemplateState {
+  selected: string
+  items: PptTemplateItem[]
+}
+
 export type ResearchMode = 'standard' | 'deep'
 export type WorkspaceScope = 'workspace' | 'readonly'
 
@@ -498,6 +512,33 @@ export const researchApi = {
   deleteReviewTemplateUpload(name: string): Promise<ReviewTemplateState> {
     return jsonFetch<ReviewTemplateState>(
       `/api/research/review-templates/uploads/${encodeURIComponent(name)}`,
+      { method: 'DELETE' },
+    )
+  },
+
+  getPptTemplates(): Promise<PptTemplateState> {
+    return jsonFetch<PptTemplateState>('/api/research/ppt-templates')
+  },
+
+  selectPptTemplate(id: string): Promise<PptTemplateState> {
+    return jsonFetch<PptTemplateState>(
+      '/api/research/ppt-templates/select',
+      json('POST', { id }),
+    )
+  },
+
+  async uploadPptTemplate(file: File): Promise<PptTemplateState> {
+    const form = new FormData()
+    form.append('file', file)
+    return jsonFetch<PptTemplateState>('/api/research/ppt-templates/upload', {
+      method: 'POST',
+      body: form,
+    })
+  },
+
+  deletePptTemplate(name: string): Promise<PptTemplateState> {
+    return jsonFetch<PptTemplateState>(
+      `/api/research/ppt-templates/uploads/${encodeURIComponent(name)}`,
       { method: 'DELETE' },
     )
   },

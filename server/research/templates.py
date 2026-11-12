@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import re
 from collections import Counter
@@ -30,7 +31,11 @@ SETTINGS_NAME = "settings.json"
 UPLOADS_DIR = "uploads"
 PAPERS_DIR = "papers"
 MAX_TEMPLATE_BYTES = 2 * 1024 * 1024
+MAX_DOCX_BYTES = 20 * 1024 * 1024
+MAX_PDF_BYTES = 50 * 1024 * 1024
 ALLOWED_SUFFIXES = {".md", ".markdown", ".txt"}
+UPLOAD_INPUT_SUFFIXES = ALLOWED_SUFFIXES | {".docx", ".pdf"}
+RAW_DIR = "raw"
 
 _SKIP_SECTION = re.compile(
     r"^(references?|bibliography|acknowledg(e)?ments?|appendix|supplementary)\b",
@@ -62,6 +67,12 @@ def uploads_dir(root: Path) -> Path:
 
 def papers_dir(root: Path) -> Path:
     path = Path(root) / PAPERS_DIR
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def raw_dir(root: Path) -> Path:
+    path = Path(root) / RAW_DIR
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -133,28 +144,208 @@ def list_uploads(root: Path) -> list[dict[str, Any]]:
     return items
 
 
+_CHAPTER_WORDS = re.compile(
+    r"^(?:\d+(?:\.\d+)*\.?\s*)?"
+    r"(abstract|summary|introduction|background|related work|literature review|"
+    r"methods?|materials and methods|methodology|experimental|experiments?|"
+    r"results?(?: and discussion)?|discussion|evaluation|ablation|"
+    r"conclusions?|future work|limitations?"
+    r"|摘要|引言|绪论|背景|相关工作|研究方法|方法|实验|结果|讨论|结论|总结)",
+    re.IGNORECASE,
+)
+
+
+_NON_CHAPTER = re.compile(
+    r"^(data availability|code availability|author contributions?|competing interests?|"
+    r"conflict of interest|additional information|acknowledg|funding|supplementary|"
+    r"references?|bibliography|ethics|keywords)\b",
+    re.IGNORECASE,
+)
+
+
+def _filter_template_sections(sections: list[str]) -> list[str]:
+    """去掉 PDF 字体兜底里混进来的标题、作者行与摘要句子。"""
+    def clean(raw: Any) -> str | None:
+        title = _clean_title(str(raw or ""))
+        if not _usable(title) or len(title) > 45:
+            return None
+        if _NON_CHAPTER.match(title):
+            return None
+        if title.endswith((".", "。", ",", "，", ";", "；", ":")):
+            return None
+        if "@" in title or re.search(r"\d[,，]\d", title):
+            return None
+        if len(re.findall(r"[,，]", title)) >= 2:
+            return None
+        return title
+
+    preferred = [clean(raw) for raw in sections]
+    preferred = [title for title in preferred if title and _CHAPTER_WORDS.match(title)]
+    if len(_dedupe(preferred)) >= 2:
+        return _dedupe(preferred)[:20]
+
+    fallback = [clean(raw) for raw in sections]
+    return _dedupe([title for title in fallback if title])[:15]
+
+
+def _upload_pdf_sections(pdf_path: Path) -> list[str]:
+    """上传 PDF 的章节：优先书签，其次只认正文字号 1.12~1.9 倍的标题行。"""
+    try:
+        import pymupdf
+    except Exception:
+        return []
+    try:
+        doc = pymupdf.open(pdf_path)
+    except Exception:
+        return []
+    try:
+        toc = _sections_from_toc(doc)
+        if len(toc) >= 3:
+            filtered = _filter_template_sections(toc)
+            if len(filtered) >= 2:
+                return filtered
+
+        sizes: Counter[float] = Counter()
+        lines: list[tuple[str, float]] = []
+        for page in doc:
+            try:
+                payload = page.get_text("dict")
+            except Exception:
+                continue
+            for block in payload.get("blocks", []):
+                for line in block.get("lines", []):
+                    spans = line.get("spans") or []
+                    text = "".join(str(span.get("text") or "") for span in spans).strip()
+                    if not text:
+                        continue
+                    size = max(float(span.get("size") or 0) for span in spans)
+                    sizes[round(size, 1)] += len(text)
+                    lines.append((text, size))
+        if not lines:
+            return []
+
+        body = sizes.most_common(1)[0][0]
+        low, high = body * 1.12, body * 1.9
+        found: list[str] = []
+        for text, size in lines:
+            if not (low <= size <= high):
+                continue
+            title = _clean_title(text)
+            if not _usable(title) or len(title) > 45:
+                continue
+            if title.endswith((".", "。", ",", "，", ";", "；", ":")):
+                continue
+            if "@" in title or re.search(r"\d[,，]\d", title):
+                continue
+            if len(re.findall(r"[,，]", title)) >= 2:
+                continue
+            if _CHAPTER_WORDS.match(title):
+                found.append(title)
+                continue
+            if re.match(r"^[A-Z][a-z]|^[\u4e00-\u9fff]", title) and len(title.split()) <= 10:
+                found.append(title)
+        return _dedupe(found)[:20]
+    finally:
+        doc.close()
+
+
+def _docx_sections(data: bytes) -> list[str]:
+    """从 Word 的标题样式提取章节；没有标题样式时按编号行兜底。"""
+    try:
+        from docx import Document
+
+        document = Document(io.BytesIO(data))
+    except Exception as error:  # noqa: BLE001 - 坏文件要给出明确原因
+        raise TemplateError("这个文件不是有效的 Word 文档（.docx）") from error
+
+    def heading_level(style: str) -> int:
+        lowered = (style or "").lower()
+        if lowered.startswith("heading") or "标题" in lowered:
+            match = re.search(r"(\d+)", lowered)
+            return int(match.group(1)) if match else 1
+        return 0
+
+    sections: list[str] = []
+    for paragraph in document.paragraphs:
+        text = paragraph.text.strip()
+        if not text:
+            continue
+        style = paragraph.style.name if paragraph.style is not None else ""
+        level = heading_level(style)
+        if 1 <= level <= 2 and _usable(text):
+            sections.append(_clean_title(text))
+
+    if len(sections) < 3:
+        numbered = re.compile(r"^\d+(?:\.\d+)*[.、\s]+")
+        for paragraph in document.paragraphs:
+            text = paragraph.text.strip()
+            if 2 <= len(text) <= 60 and numbered.match(text) and _usable(text):
+                sections.append(_clean_title(text))
+
+    return _dedupe(sections)[:40]
+
+
 def save_upload(root: Path, filename: str, data: bytes) -> dict[str, Any]:
     suffix = Path(filename or "").suffix.lower()
-    if suffix not in ALLOWED_SUFFIXES:
-        raise TemplateError("只支持 Markdown / 文本模板（.md / .txt）")
+    if suffix not in UPLOAD_INPUT_SUFFIXES:
+        raise TemplateError("只支持 Markdown / Word / PDF 模板（.md / .docx / .pdf）")
     if not data:
         raise TemplateError("模板文件是空的")
-    if len(data) > MAX_TEMPLATE_BYTES:
-        raise TemplateError("模板文件不能超过 2 MB")
-    try:
-        text = data.decode("utf-8-sig")
-    except UnicodeDecodeError as error:
-        raise TemplateError("模板需要是 UTF-8 编码的文本") from error
-    if "##" not in text:
-        raise TemplateError("模板里至少需要一个二级标题（## 章节名）")
+    limit = (
+        MAX_PDF_BYTES
+        if suffix == ".pdf"
+        else MAX_DOCX_BYTES
+        if suffix == ".docx"
+        else MAX_TEMPLATE_BYTES
+    )
+    if len(data) > limit:
+        raise TemplateError(f"模板文件不能超过 {limit // (1024 * 1024)} MB")
 
     name = safe_name(filename, fallback="写作模板.md")
-    target = uploads_dir(root) / name
-    target.write_text(text, encoding="utf-8")
-    sections = sections_from_markdown(text)
+    stem = Path(name).stem or "写作模板"
+    md_name = f"{stem}.md"
+    md_path = uploads_dir(root) / md_name
+    guide: dict[str, Any] = {}
+
+    if suffix in ALLOWED_SUFFIXES:
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError as error:
+            raise TemplateError("模板需要是 UTF-8 编码的文本") from error
+        if "##" not in text:
+            raise TemplateError("模板里至少需要一个二级标题（## 章节名）")
+        sections = sections_from_markdown(text)
+        md_path.write_text(text, encoding="utf-8")
+    else:
+        raw = raw_dir(root) / name
+        raw.write_bytes(data)
+        if suffix == ".docx":
+            sections = _docx_sections(data)
+            if len(sections) < 3:
+                raise TemplateError(
+                    "Word 里没有识别出章节：请用「标题 1 / 标题 2」样式，或带编号的章节行"
+                )
+            md_path.write_text(_markdown(stem, sections), encoding="utf-8")
+        else:
+            profile = extract_pdf_profile(raw)
+            sections = _upload_pdf_sections(raw)
+            if len(sections) < 2:
+                sections = _filter_template_sections(profile.get("sections") or [])
+            if len(sections) < 2:
+                raise TemplateError(
+                    "没有从 PDF 里识别出足够章节：请换一版带书签或清晰章节标题的 PDF"
+                )
+            profile["sections"] = sections
+            md_path.write_text(_markdown(stem, sections), encoding="utf-8")
+            guide = profile
+            (uploads_dir(root) / f"{stem}.guide.json").write_text(
+                json.dumps(guide, ensure_ascii=False, indent=1), encoding="utf-8"
+            )
+
+    write_choice(root, f"upload:{md_name}")
     return {
-        "id": f"upload:{target.name}",
-        "name": target.stem,
+        "id": f"upload:{md_name}",
+        "name": stem,
         "source": "upload",
         "kind": "",
         "description": f"已上传的模板 · {len(sections)} 个章节",
@@ -165,10 +356,18 @@ def save_upload(root: Path, filename: str, data: bytes) -> dict[str, Any]:
 
 def delete_upload(root: Path, name: str) -> bool:
     filename = safe_name(name)
-    target = Path(root) / UPLOADS_DIR / filename
+    target = uploads_dir(root) / filename
     if not target.is_file():
         return False
+    stem = Path(filename).stem
     target.unlink()
+    for extra in (
+        uploads_dir(root) / f"{stem}.guide.json",
+        raw_dir(root) / f"{stem}.pdf",
+        raw_dir(root) / f"{stem}.docx",
+    ):
+        if extra.is_file():
+            extra.unlink()
     if read_choice(root) == f"upload:{filename}":
         write_choice(root, "default")
     return True
@@ -1161,6 +1360,14 @@ def describe(
         path = Path(root) / UPLOADS_DIR / safe_name(value[7:])
         if path.is_file():
             markdown = path.read_text(encoding="utf-8", errors="replace")
+            guide_path = path.parent / f"{Path(path.name).stem}.guide.json"
+            if guide_path.is_file():
+                try:
+                    payload = json.loads(guide_path.read_text(encoding="utf-8"))
+                    if isinstance(payload, dict):
+                        guide = payload
+                except (OSError, ValueError):
+                    guide = {}
     elif value.startswith("paper:"):
         paper_id = value[6:]
         cache = papers_dir(root) / f"{safe_name(paper_id, fallback='paper')}.md"

@@ -88,6 +88,7 @@ from server.scholar_api import build_router as build_scholar_router
 from server.scholaread import build_router as build_scholaread_router
 from server.sync_package import build_router as build_sync_router
 from server import zotero_local, zotero_web
+from server import storage as storage_migration
 from server.research import ResearchStore
 from server.research import build_router as build_research_router
 from server.research.abstracts import fill_one as fill_abstract
@@ -98,15 +99,20 @@ from server.toolchain_api import router as toolchain_router
 from server.runtime import (
     allowed_origins,
     bind_host,
+    cleanup_previous_data_dir,
     default_data_dir,
     ensure_data_dir,
     is_frozen,
+    load_data_location,
+    save_data_location,
     web_dist,
 )
 
 log = logging.getLogger("paperead.server")
 
 WEB_DIST = web_dist()
+# 上次迁移成功后，旧目录等这次启动（尚未打开 SQLite/PDF）再清理
+cleanup_previous_data_dir()
 DATA_DIR = ensure_data_dir(default_data_dir())
 PORT = int(env("PAPEREAD_PORT", "8010"))
 TOKEN = env("PAPEREAD_TOKEN", "")
@@ -3403,7 +3409,11 @@ async def zotero_probe() -> dict:
 
 @app.get("/api/zotero/status")
 async def zotero_status() -> dict:
-    """探测本机 Zotero：优先本地 API，失败时回退到直接读本机数据库（无需 Key）。"""
+    """探测本机 Zotero：优先直接读本机数据库（无需 Key）。
+
+    拉取界面不要求用户配置 Web API Key，也不应等本地 HTTP 端口超时；
+    本机数据库可读就直接返回，本地 API 只在数据库不可读时作为补充。
+    """
     data_dir = _zotero_data_dir()
     local = await asyncio.to_thread(zotero_local.status)
     local_payload = {
@@ -3415,20 +3425,18 @@ async def zotero_status() -> dict:
         "total": int(local.get("total") or 0),
         "error": "",
     }
+    if local.get("ok"):
+        return local_payload
     try:
         async with _zotero_client(timeout=3) as c:
             r = await c.get(f"{ZOTERO_BASE}/items", params={"limit": 1})
     except Exception as e:
-        if local.get("ok"):
-            return local_payload
         return {
             "ok": False,
             "error": f"连不上本机 Zotero（{e}）。{_ZOTERO_HINT}",
             "local_error": local.get("error", ""),
         }
     if r.status_code == 403:
-        if local.get("ok"):
-            return local_payload
         return {
             "ok": False,
             "status": 403,
@@ -3497,20 +3505,9 @@ async def zotero_items(
     limit: int = Query(50, ge=1, le=100),
     start: int = Query(0, ge=0),
 ) -> dict:
-    """分页列出 Zotero 条目，并标注 PDF 附件 / 是否已在文献库中。"""
-    try:
-        async with _zotero_client() as c:
-            pairs, total = await _zotero_candidates(
-                c,
-                collection=collection.strip(),
-                q=q,
-                limit=limit,
-                start=start,
-            )
-    except ZoteroError as api_error:
-        local_status = await asyncio.to_thread(zotero_local.status)
-        if not local_status.get("ok"):
-            raise HTTPException(status_code=502, detail=str(api_error)) from api_error
+    """分页列出 Zotero 条目：优先本机数据库（免 Key、立即返回），再回退本地 API。"""
+    local_status = await asyncio.to_thread(zotero_local.status)
+    if local_status.get("ok"):
         local_items, total = await asyncio.to_thread(
             zotero_local.list_items,
             q=q,
@@ -3526,6 +3523,18 @@ async def zotero_items(
             "limit": limit,
             "has_more": start + len(items) < total,
         }
+
+    try:
+        async with _zotero_client() as c:
+            pairs, total = await _zotero_candidates(
+                c,
+                collection=collection.strip(),
+                q=q,
+                limit=limit,
+                start=start,
+            )
+    except ZoteroError as api_error:
+        raise HTTPException(status_code=502, detail=str(api_error)) from api_error
 
     existing = store.list()
     by_id = {row["id"]: row for row in existing}
@@ -3622,6 +3631,34 @@ async def zotero_thumb(key: str = Query(..., max_length=40)) -> FileResponse:
     return FileResponse(cache, media_type="image/png")
 
 
+@app.get("/api/zotero/pdf")
+async def zotero_pdf(key: str = Query(..., max_length=40)) -> Response:
+    """按需读取 Zotero 条目的 PDF 原文，供拉取前预览；免 Key 优先读本机库。"""
+    path = await asyncio.to_thread(zotero_local.pdf_path, key)
+    if path is not None:
+        try:
+            return FileResponse(
+                path,
+                media_type="application/pdf",
+                headers={"Content-Disposition": "inline"},
+            )
+        except OSError as error:
+            raise HTTPException(status_code=404, detail="Zotero PDF 文件不可读") from error
+    try:
+        async with _zotero_client(timeout=30) as client:
+            pairs, _total = await _zotero_candidates(client, keys=[key], limit=1)
+            if not pairs or not pairs[0][1]:
+                raise HTTPException(status_code=404, detail="Zotero 条目没有 PDF")
+            blob = await _zotero_file_bytes(client, pairs[0][1])
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(
+            status_code=404, detail="Zotero 条目没有可读取的 PDF"
+        ) from error
+    return Response(content=blob, media_type="application/pdf")
+
+
 class ZoteroImportReq(BaseModel):
     # keys 为空时按 collection/q/limit 批量挑带 PDF 的条目（兼容旧的一键导入）
     keys: list[str] = Field(default_factory=list, max_length=100)
@@ -3684,6 +3721,18 @@ async def _zotero_import_local(req: ZoteroImportReq) -> dict:
 async def zotero_import(req: ZoteroImportReq) -> dict:
     """把选中的 Zotero 条目（带 PDF 附件）导入文献库，并后台解析。"""
     imported, skipped, errors, papers = 0, 0, [], []
+    # 本机 Zotero 可直接读取时优先走数据库，不依赖 Key / 本地 API
+    local_status = await asyncio.to_thread(zotero_local.status)
+    if local_status.get("ok"):
+        local_items, _total = await asyncio.to_thread(
+            zotero_local.list_items,
+            q=req.q,
+            limit=req.limit,
+            collection=req.collection.strip(),
+            keys=req.keys or None,
+        )
+        if local_items:
+            return await _zotero_import_local(req)
     try:
         async with _zotero_client(timeout=60) as c:
             pairs, _ = await _zotero_candidates(
@@ -3741,6 +3790,21 @@ async def zotero_sync(req: ZoteroSyncReq) -> dict:
     imported, skipped, scanned = 0, 0, 0
     errors: list[str] = []
     papers: list[dict] = []
+    # 本机 Zotero 有可导入条目时直接走数据库，不依赖 Key、也不等本地 API 超时
+    local_status = await asyncio.to_thread(zotero_local.status)
+    if local_status.get("ok"):
+        local_items, _total = await asyncio.to_thread(
+            zotero_local.list_items,
+            limit=min(req.limit, 5000),
+            collection=req.collection.strip(),
+        )
+        if local_items:
+            return await _zotero_import_local(
+                ZoteroImportReq(
+                    collection=req.collection,
+                    limit=min(req.limit, 5000),
+                )
+            )
     try:
         async with _zotero_client(timeout=120) as c:
             start = 0
@@ -3858,6 +3922,48 @@ def put_model_settings(payload: dict) -> dict:
 
 
 # 整份设置备份：localStorage 跟着端口走，数据目录与端口无关，换端口也能恢复。
+class StorageRelocateIn(BaseModel):
+    path: str = Field(..., min_length=1, max_length=1024)
+
+
+def _same_path(left: str | Path, right: str | Path) -> bool:
+    try:
+        return os.path.normcase(str(Path(left).resolve())) == os.path.normcase(
+            str(Path(right).resolve())
+        )
+    except OSError:
+        return os.path.normcase(str(left)) == os.path.normcase(str(right))
+
+
+@app.get("/api/storage")
+def get_storage() -> dict:
+    """当前文献库目录与自定义状态；自定义路径失效时返回回退信息。"""
+    configured = load_data_location()
+    configured_path = str(configured) if configured is not None else ""
+    return {
+        "path": str(DATA_DIR),
+        "configured": configured is not None,
+        "configured_path": configured_path,
+        "fallback": bool(
+            configured is not None and not _same_path(configured, DATA_DIR)
+        ),
+        "writable": os.access(DATA_DIR, os.W_OK),
+    }
+
+
+@app.post("/api/storage/relocate", status_code=200)
+def relocate_storage(req: StorageRelocateIn) -> dict:
+    """把当前文献库完整复制到新目录，写入路径配置，等待前端重启应用。"""
+    try:
+        result = storage_migration.relocate(DATA_DIR, Path(req.path))
+        save_data_location(Path(result["path"]), previous=DATA_DIR)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"迁移失败：{error}") from error
+    return {**result, "restart_required": True}
+
+
 APP_SETTINGS_PATH = DATA_DIR / "app-settings.json"
 APP_SETTINGS_VALUE_LIMIT = 256 * 1024
 APP_SETTINGS_KEY_LIMIT = 200

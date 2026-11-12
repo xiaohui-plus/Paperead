@@ -36,6 +36,7 @@ import {
 import { Katex } from './Katex'
 import { ReviewTemplatePanel } from './ReviewTemplatePanel'
 import { ToolchainPanel } from './ToolchainPanel'
+import { StoragePathPanel } from './StoragePathPanel'
 import { MobileServerPanel } from './MobileSetup'
 import { FileSyncDialog, type FileSyncTarget } from './FileSyncDialog'
 import { FileSyncSettingsPanel } from './FileSyncSettingsPanel'
@@ -656,7 +657,7 @@ export function SettingsDialog({
         : tab === 'scholar'
           ? '文献检索'
           : tab === 'review'
-            ? '论文模板'
+            ? '模板'
             : tab === 'sync'
               ? '文件同步'
               : '常规设置'
@@ -668,7 +669,7 @@ export function SettingsDialog({
         : tab === 'scholar'
           ? '这里配置 Semantic Scholar 与 CORE 的检索密钥；密钥只保存在本机，不会上传到服务器。'
           : tab === 'review'
-            ? '设定写论文时用的章节骨架：可以用系统默认、上传自己的模板，或从文献库选一篇综述当参考。模板不会上传文献或密钥。'
+            ? '论文模板决定章节骨架与写作约束；PPT 模板决定汇报幻灯片的版式与配色，做 PPT 时默认套用这里选中的模板。模板不会上传文献或密钥。'
             : tab === 'sync'
               ? 'Zotero、学术阅读与手机的文件同步都收在这里；打开同步窗口后可以先查看目标里的论文，再选择拉取或推送。'
               : '应用更新、离线库、服务器连接与写作工具等不常改的设置都收在这里。'
@@ -733,7 +734,7 @@ export function SettingsDialog({
                 onClick={() => setTab('review')}
               >
                 <IconSpark />
-                <span>论文模板</span>
+                <span>模板</span>
               </button>
             )}
             <button
@@ -1297,6 +1298,9 @@ export function SettingsDialog({
           </>
         ) : (
           <>
+            <div className="general-section">
+              <StoragePathPanel />
+            </div>
             <div className="general-section">
               <ToolchainPanel />
             </div>

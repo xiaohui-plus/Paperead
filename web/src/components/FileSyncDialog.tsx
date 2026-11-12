@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import {
   getZoteroWebStatus,
   importZotero,
@@ -8,6 +8,7 @@ import {
   syncZotero,
   testZoteroWeb,
   zoteroItems,
+  zoteroPdfUrl,
   zoteroStatus,
   type PaperRow,
   type ZoteroItem,
@@ -35,10 +36,18 @@ import {
   IconCheck,
   IconClose,
   IconDownload,
+  IconExpand,
   IconRefresh,
   IconSearch,
   IconSend,
 } from './icons'
+
+/** Zotero 拉取前预览 PDF：与研究页复用同一个 pdf.js 查看器。 */
+const PdfViewer = lazy(() =>
+  import('../research/preview/PdfViewer').then((module) => ({
+    default: module.PdfViewer,
+  })),
+)
 
 export type FileSyncTarget = 'zotero' | 'scholaread' | 'phone'
 type ZoteroDirection = 'pull' | 'push'
@@ -162,6 +171,7 @@ function PaperCheckRow({
   checked,
   disabled,
   onToggle,
+  onPreview,
   tone,
   coverUrl,
 }: {
@@ -171,6 +181,7 @@ function PaperCheckRow({
   checked: boolean
   disabled?: boolean
   onToggle: () => void
+  onPreview?: () => void
   tone?: SyncTone
   coverUrl?: string
 }) {
@@ -200,6 +211,20 @@ function PaperCheckRow({
         )}
         <span>{initial}</span>
         {tag && <em>{tag}</em>}
+        {onPreview && (
+          <button
+            type="button"
+            className="sync-card-preview"
+            title="预览 PDF"
+            onClick={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              onPreview()
+            }}
+          >
+            <IconExpand />
+          </button>
+        )}
       </div>
       <div className="sync-card-info">
         <b title={title}>{title || '未命名论文'}</b>
@@ -310,6 +335,9 @@ function ZoteroSyncPane({ onSynced }: { onSynced: () => void }) {
   const [query, setQuery] = useState('')
   const [checked, setChecked] = useState<Set<string>>(new Set())
   const [loadingItems, setLoadingItems] = useState(false)
+  const [hasMore, setHasMore] = useState(false)
+  const [total, setTotal] = useState(0)
+  const [preview, setPreview] = useState<ZoteroItem | null>(null)
 
   const [papers, setPapers] = useState<PaperRow[]>([])
   const [checkedPapers, setCheckedPapers] = useState<Set<string>>(new Set())
@@ -327,6 +355,15 @@ function ZoteroSyncPane({ onSynced }: { onSynced: () => void }) {
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
+    // 拉取只需本机数据库：先拿到本机状态让列表立即开始加载，
+    // Web API 配置只在推送时需要，失败也不影响拉取。
+    try {
+      setLocal(await zoteroStatus())
+    } catch {
+      setLocal(null)
+    } finally {
+      setLoading(false)
+    }
     try {
       const status = await getZoteroWebStatus()
       setWeb(status)
@@ -335,15 +372,8 @@ function ZoteroSyncPane({ onSynced }: { onSynced: () => void }) {
       setGroupId(status.group_id)
       setEditing(!status.configured)
       setReport(status.last_report ?? null)
-    } catch (loadError) {
-      setError(errorText(loadError, '读取 Zotero 同步配置失败'))
-    } finally {
-      setLoading(false)
-    }
-    try {
-      setLocal(await zoteroStatus())
     } catch {
-      setLocal(null)
+      setWeb(null)
     }
   }, [])
 
@@ -351,20 +381,28 @@ function ZoteroSyncPane({ onSynced }: { onSynced: () => void }) {
     void load()
   }, [load])
 
-  const loadItems = useCallback(async (q: string) => {
+  const loadItems = useCallback(async (q: string, start = 0) => {
+    const append = start > 0
     setLoadingItems(true)
     try {
-      const page = await zoteroItems({ q, limit: 200 })
-      setItems(page.items)
-      setChecked(
-        new Set(
-          page.items
-            .filter((item) => item.pdf && !item.imported)
-            .map((item) => item.key),
-        ),
-      )
+      // 后端单页上限 100；本机库更多时用「加载更多」按页追加。
+      const page = await zoteroItems({ q, limit: 100, start })
+      setItems((prev) => (append ? [...prev, ...page.items] : page.items))
+      setTotal(page.total)
+      setHasMore(page.has_more)
+      setChecked((prev) => {
+        const next = append ? new Set(prev) : new Set<string>()
+        for (const item of page.items) {
+          if (item.pdf && !item.imported) next.add(item.key)
+        }
+        return next
+      })
     } catch {
-      setItems([])
+      if (!append) {
+        setItems([])
+        setTotal(0)
+      }
+      setHasMore(false)
     } finally {
       setLoadingItems(false)
     }
@@ -515,14 +553,19 @@ function ZoteroSyncPane({ onSynced }: { onSynced: () => void }) {
         </div>
         <div className="file-sync-status">
           {loading && <span className="file-sync-badge">读取中</span>}
-          {web?.configured ? (
+          {direction === 'pull' ? (
+            local?.ok ? (
+              <span className="file-sync-badge is-ok">本机 Zotero 可用</span>
+            ) : (
+              <span className="file-sync-badge">未检测到本机库</span>
+            )
+          ) : web?.configured ? (
             <span className="file-sync-badge is-ok">
               <IconCheck /> 已连接
             </span>
           ) : (
             <span className="file-sync-badge">未配置</span>
           )}
-          {local?.ok && <span className="file-sync-badge is-ok">本机 Zotero 可用</span>}
         </div>
       </div>
 
@@ -547,12 +590,13 @@ function ZoteroSyncPane({ onSynced }: { onSynced: () => void }) {
         </button>
       </div>
 
-      <details className="file-sync-config" open={editing || !web?.configured}>
-        <summary>
-          {web?.configured
-            ? `Zotero 连接 · ${web.user_id || '已保存'}`
-            : '配置 Zotero Web API（要推送或双向同步时需要）'}
-        </summary>
+      {direction === 'push' && (
+        <details className="file-sync-config" open={editing || !web?.configured}>
+          <summary>
+            {web?.configured
+              ? `Zotero 连接 · ${web.user_id || '已保存'}`
+              : '配置 Zotero Web API（推送或双向同步时需要）'}
+          </summary>
         <div className="zotero-web-form">
           <label>
             <span>API Key</span>
@@ -605,13 +649,14 @@ function ZoteroSyncPane({ onSynced }: { onSynced: () => void }) {
           </div>
         </div>
       </details>
+      )}
 
       {direction === 'pull' ? (
         <>
           <SyncGuide
-            title="Zotero 拉取：3 步（无需 API Key）"
+            title="Zotero 拉取：3 步"
             steps={[
-              <>打开 Zotero 桌面版，确认论文已经同步到本机，并下载了 PDF；应用会直接读取本机 Zotero 数据库，不需要任何 Key。</>,
+              <>打开 Zotero 桌面版，确认论文已经同步到本机，并下载了 PDF；应用会直接读取本机 Zotero 数据库。</>,
               <>如果列表为空，再到 Zotero「设置 → 高级」勾选“允许此计算机上的其他应用程序与 Zotero 通讯”并重启 Zotero，作为兼容回退。</>,
               <>勾选论文后点「拉取选中」；想全部导入就点「全部拉取」。</>,
             ]}
@@ -649,7 +694,8 @@ function ZoteroSyncPane({ onSynced }: { onSynced: () => void }) {
             <p className="file-sync-empty">正在读取 Zotero 论文…</p>
           ) : items.length === 0 ? (
             <p className="file-sync-empty">
-              没有找到带 PDF 的 Zotero 论文。无需 API Key；请确认 Zotero 已把论文和 PDF 同步到本机。
+              本机 Zotero 里还没有可导入的论文或 PDF。先在 Zotero 桌面版登录并完成同步、
+              把 PDF 下载到本机，回到这里会自动加载。
             </p>
           ) : (
             <div className="file-sync-list">
@@ -665,6 +711,7 @@ function ZoteroSyncPane({ onSynced }: { onSynced: () => void }) {
                   tag={item.imported ? '已在库' : item.pdf ? '有 PDF' : '无 PDF'}
                   checked={checked.has(item.key)}
                   disabled={!item.pdf || item.imported || syncing}
+                  onPreview={item.pdf ? () => setPreview(item) : undefined}
                   onToggle={() =>
                     setChecked((prev) => {
                       const next = new Set(prev)
@@ -675,6 +722,18 @@ function ZoteroSyncPane({ onSynced }: { onSynced: () => void }) {
                   }
                 />
               ))}
+            </div>
+          )}
+
+          {hasMore && (
+            <div className="file-sync-more">
+              <button
+                className="mini-btn"
+                disabled={loadingItems || syncing}
+                onClick={() => void loadItems(query, items.length)}
+              >
+                {loadingItems ? '加载中…' : `加载更多（${items.length}/${total}）`}
+              </button>
             </div>
           )}
 
@@ -778,6 +837,51 @@ function ZoteroSyncPane({ onSynced }: { onSynced: () => void }) {
 
       {error && <div className="file-sync-alert">{error}</div>}
       {notice && <div className="file-sync-alert is-ok">{notice}</div>}
+
+      {preview && (
+        <div className="zotero-preview-backdrop" onClick={() => setPreview(null)}>
+          <div
+            className="zotero-preview"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Zotero PDF 预览"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="zotero-preview-head">
+              <div>
+                <h3>{preview.title}</h3>
+                <span>
+                  {preview.authors || '作者未知'}
+                  {preview.year ? ` · ${preview.year}` : ''}
+                </span>
+              </div>
+              <div className="zotero-preview-actions">
+                <a
+                  className="icon-btn"
+                  href={zoteroPdfUrl(preview.key)}
+                  target="_blank"
+                  rel="noreferrer"
+                  title="在新窗口打开"
+                >
+                  <IconExpand />
+                </a>
+                <button
+                  className="icon-btn"
+                  title="关闭预览"
+                  onClick={() => setPreview(null)}
+                >
+                  <IconClose />
+                </button>
+              </div>
+            </header>
+            <div className="zotero-preview-body">
+              <Suspense fallback={<p className="file-sync-empty">正在加载 PDF…</p>}>
+                <PdfViewer url={zoteroPdfUrl(preview.key)} title={preview.title} />
+              </Suspense>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

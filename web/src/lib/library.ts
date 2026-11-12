@@ -282,6 +282,11 @@ export async function importZotero(
   })
 }
 
+/** Zotero 条目的 PDF 原文地址：拉取前预览用，免 Key 直接读本机库。 */
+export function zoteroPdfUrl(key: string): string {
+  return mediaUrl(`/api/zotero/pdf?key=${encodeURIComponent(key)}`)
+}
+
 export interface ZoteroSyncResult {
   imported: number
   skipped: number
@@ -296,6 +301,36 @@ export async function syncZotero(collection = ''): Promise<ZoteroSyncResult> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ collection }),
+  })
+}
+
+export interface StorageInfo {
+  path: string
+  configured: boolean
+  configured_path: string
+  fallback: boolean
+  writable: boolean
+}
+
+export async function getStorageInfo(): Promise<StorageInfo> {
+  return jsonFetch('/api/storage')
+}
+
+export interface StorageRelocateResult {
+  ok: boolean
+  path: string
+  previous: string
+  files: number
+  bytes: number
+  restart_required: boolean
+}
+
+/** 把文献库复制到新目录；成功后需要重启应用让 sidecar 使用新路径。 */
+export async function relocateStorage(path: string): Promise<StorageRelocateResult> {
+  return jsonFetch('/api/storage/relocate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
   })
 }
 

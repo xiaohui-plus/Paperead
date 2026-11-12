@@ -36,6 +36,12 @@ a = Analysis(
     pathex=[str(ROOT)],
     binaries=pymupdf_bins,
     datas=[(str(ROOT / "web" / "dist"), "web/dist")]
+    + [
+        (
+            str(ROOT / "server" / "research" / "ppt_templates"),
+            "server/research/ppt_templates",
+        )
+    ]
     + pymupdf_datas
     + pptx_datas
     + docx_datas,

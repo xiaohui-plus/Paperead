@@ -37,7 +37,7 @@ from paperead.scholar.cite import build_bibtex
 from paperead.scholar.http import FriendlyError
 from paperead.scholar.models import paper_from_dict
 from paperead.scholar.search import SOURCE_KEYS, SearchInput
-from server.research import explorer, templates as template_store
+from server.research import explorer, ppt_templates, templates as template_store
 from server.research.citations import audit_review
 from server.research.deck import build_deck, parse_outline
 from server.research.docx_edit import DocxError, edit_docx, read_docx
@@ -544,6 +544,10 @@ def _export_pptx(
                 ),
             }
         template_bytes = template_path.read_bytes()
+    else:
+        template_bytes, template_label = ppt_templates.resolve(
+            _global_template_root(research)
+        )
 
     try:
         blob = build_deck(slides, title=title, template=template_bytes)

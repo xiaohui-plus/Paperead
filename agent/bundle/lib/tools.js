@@ -951,7 +951,7 @@ export function apply(ctx, config = {}) {
         pptTemplate: {
           type: 'string',
           description:
-            'For pptx: filename of a user-uploaded .pptx template in the current project (e.g. 组会模板.pptx). The deck keeps that template’s design; pages containing {{title}} / {{subtitle}} / {{bullets}} / {{source}} placeholders are reused by cloning, otherwise the template’s slide layouts are used.',
+            'For pptx: optional filename of a .pptx template in the current project. Only pass it when the user explicitly asks for a project template; when omitted, the deck uses the PPT template selected in Settings → Templates → PPT 模板.',
         },
       },
       output: {

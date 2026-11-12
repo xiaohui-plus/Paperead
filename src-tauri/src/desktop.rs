@@ -47,7 +47,7 @@ pub fn run_desktop() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![install_update])
+        .invoke_handler(tauri::generate_handler![install_update, restart_app])
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;
@@ -384,6 +384,12 @@ async fn install_update(app: AppHandle) -> Result<String, String> {
         Ok(None) => Err("当前已是最新版本".into()),
         Err(error) => Err(format!("检查更新失败：{error}")),
     }
+}
+
+/// 设置页更改文献库保存路径后：数据已复制完成，重启应用让 sidecar 指向新目录。
+#[tauri::command]
+fn restart_app(app: AppHandle) {
+    app.restart();
 }
 
 async fn check_updates(app: AppHandle, interactive: bool) {

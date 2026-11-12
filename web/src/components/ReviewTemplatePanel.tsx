@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  formatSize,
   researchApi,
+  type PptTemplateItem,
+  type PptTemplateState,
   type ReviewTemplateGuide,
   type ReviewTemplateOption,
   type ReviewTemplateOutlineItem,
@@ -319,6 +322,7 @@ function TemplateGuideView({
 }
 
 export function ReviewTemplatePanel() {
+  const [templateView, setTemplateView] = useState<'paper' | 'ppt'>('paper')
   const [state, setState] = useState<ReviewTemplateState | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -523,7 +527,33 @@ export function ReviewTemplatePanel() {
   const previewLang = languageRows(previewGuide?.style)
 
   return (
-    <div className="modal-body template-panel">
+    <>
+      <div className="model-tabs" role="tablist" aria-label="模板类型">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={templateView === 'paper'}
+          data-active={templateView === 'paper'}
+          className="model-tab"
+          onClick={() => setTemplateView('paper')}
+        >
+          <b>论文模板</b>
+          <span>章节骨架与写作约束</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={templateView === 'ppt'}
+          data-active={templateView === 'ppt'}
+          className="model-tab"
+          onClick={() => setTemplateView('ppt')}
+        >
+          <b>PPT 模板</b>
+          <span>汇报幻灯片设计与默认套用</span>
+        </button>
+      </div>
+      {templateView === 'paper' ? (
+        <div className="modal-body template-panel">
       {error && <div className="template-alert">{error}</div>}
       {notice && !error && (
         <div className="template-alert is-ok">
@@ -618,19 +648,20 @@ export function ReviewTemplatePanel() {
             disabled={saving}
             onClick={() => fileRef.current?.click()}
           >
-            <IconUpload /> 上传 Markdown 模板
+            <IconUpload /> 上传模板
           </button>
         </div>
         <input
           ref={fileRef}
           type="file"
-          accept=".md,.markdown,.txt,text/markdown,text/plain"
+          accept=".md,.markdown,.txt,.docx,.pdf,text/markdown,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
           hidden
           onChange={(e) => void upload(e.target.files?.[0])}
         />
         {uploads.length === 0 ? (
           <p className="model-empty">
-            还没有上传模板。支持 .md / .txt，用二级标题（## 章节名）描述骨架，
+            还没有上传模板。支持 .md / .docx / .pdf：Markdown 用二级标题描述骨架；
+            Word 用「标题 1 / 标题 2」；PDF 会用解析功能提取章节、图表安排与格式指南，
             上传后会立即设为当前模板。
           </p>
         ) : (
@@ -848,6 +879,215 @@ export function ReviewTemplatePanel() {
       <p className="template-footer">
         优先级：本次对话指定 &gt; 单个项目设置 &gt; 这里选的全局模板 &gt; 系统默认。
         文献库模板会影响章节骨架、图表安排与语言风格，不会改动已写好的正文。
+      </p>
+        </div>
+      ) : (
+        <PptTemplatePanel />
+      )}
+    </>
+  )
+}
+
+function PptTemplatePanel() {
+  const [state, setState] = useState<PptTemplateState | null>(null)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const fileRef = useRef<HTMLInputElement>(null)
+
+  const apply = useCallback((next: PptTemplateState, message = '') => {
+    setState(next)
+    setError('')
+    if (message) setNotice(message)
+  }, [])
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      apply(await researchApi.getPptTemplates())
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '读取 PPT 模板失败')
+    } finally {
+      setLoading(false)
+    }
+  }, [apply])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const choose = async (id: string) => {
+    if (saving) return
+    if (state?.selected === id) {
+      setNotice('已经在使用这个模板')
+      return
+    }
+    setSaving(true)
+    setNotice('')
+    try {
+      apply(await researchApi.selectPptTemplate(id), '已保存，之后做汇报 PPT 默认套用这个模板')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '保存失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const upload = async (file: File | undefined) => {
+    if (!file) return
+    setSaving(true)
+    setError('')
+    setNotice('')
+    try {
+      apply(
+        await researchApi.uploadPptTemplate(file),
+        `已上传「${file.name}」并设为当前 PPT 模板`,
+      )
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '上传失败')
+    } finally {
+      setSaving(false)
+      if (fileRef.current) fileRef.current.value = ''
+    }
+  }
+
+  const remove = async (item: PptTemplateItem) => {
+    if (!window.confirm(`删除 PPT 模板「${item.name}」？`)) return
+    setSaving(true)
+    setError('')
+    try {
+      apply(
+        await researchApi.deletePptTemplate(item.id.replace(/^upload:/, '')),
+        '已删除模板',
+      )
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '删除失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const items = state?.items ?? []
+  const builtin = items.filter((item) => item.source === 'builtin')
+  const uploads = items.filter((item) => item.source === 'upload')
+  const current = items.find((item) => item.selected) ?? builtin[0]
+
+  return (
+    <div className="modal-body template-panel">
+      {error && <div className="template-alert">{error}</div>}
+      {notice && !error && (
+        <div className="template-alert is-ok">
+          <IconCheck /> {notice}
+        </div>
+      )}
+
+      <section className="template-current">
+        <div className="template-current-main">
+          <span className="template-eyebrow">当前 PPT 模板</span>
+          <b>{current?.name || '学术汇报'}</b>
+          <span className="template-source">
+            {current?.description || '汇报时默认套用'}
+            {current?.size ? ` · ${formatSize(current.size)}` : ''}
+          </span>
+        </div>
+        <span className="template-badge" data-source={current?.source || 'builtin'}>
+          {current?.source === 'upload' ? '我上传的' : '内置模板'}
+        </span>
+      </section>
+
+      <section className="model-section">
+        <div className="section-head">
+          <h3>内置学术模板</h3>
+          <span>16:9 版式 · 点击卡片切换</span>
+        </div>
+        {loading ? (
+          <p className="model-empty">正在读取模板…</p>
+        ) : (
+          <div className="preset-grid">
+            {builtin.map((item) => (
+              <button
+                type="button"
+                className="template-card"
+                key={item.id}
+                data-active={item.selected}
+                disabled={saving}
+                onClick={() => void choose(item.id)}
+              >
+                <div className="template-card-top">
+                  <b>{item.name}</b>
+                  <span className="template-card-kind">内置</span>
+                </div>
+                <p>{item.description}</p>
+                <div className="template-card-sections">
+                  <span>16:9</span>
+                  <span>{formatSize(item.size) || '模板'}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="model-section">
+        <div className="section-head">
+          <h3>我上传的 PPT 模板</h3>
+          <button
+            className="btn small"
+            type="button"
+            disabled={saving}
+            onClick={() => fileRef.current?.click()}
+          >
+            <IconUpload /> 上传 .pptx 模板
+          </button>
+        </div>
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".pptx,.potx,application/vnd.openxmlformats-officedocument.presentationml.presentation"
+          hidden
+          onChange={(e) => void upload(e.target.files?.[0])}
+        />
+        {uploads.length === 0 ? (
+          <p className="model-empty">
+            还没有上传模板。支持 .pptx / .potx，上传后会立即设为当前模板；
+            模板里的 &#123;&#123;title&#125;&#125;、&#123;&#123;subtitle&#125;&#125;、&#123;&#123;bullets&#125;&#125; 占位符会被汇报内容替换。
+          </p>
+        ) : (
+          <div className="template-upload-list">
+            {uploads.map((item) => (
+              <div
+                className="template-upload-row"
+                key={item.id}
+                data-active={item.selected}
+              >
+                <button
+                  type="button"
+                  className="template-upload-pick"
+                  onClick={() => void choose(item.id)}
+                  disabled={saving}
+                >
+                  <b>{item.name}</b>
+                  <span>{formatSize(item.size) || 'PowerPoint 模板'}</span>
+                </button>
+                <button
+                  type="button"
+                  className="icon-btn danger"
+                  title="删除模板"
+                  disabled={saving}
+                  onClick={() => void remove(item)}
+                >
+                  <IconTrash />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <p className="template-footer">
+        生成汇报 PPT 时：本次对话指定模板优先；没有指定时，默认使用这里选中的模板。
+        模板只影响版式与配色，不会改动汇报内容。
       </p>
     </div>
   )
