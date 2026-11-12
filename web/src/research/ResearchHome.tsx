@@ -163,18 +163,20 @@ export function ResearchHome({ kind, projects, onStart }: Props) {
               <option value="new">新项目</option>
             </select>
           </label>
-          {filled && (
-            <span className="research-composer-hint">示例已填入，可修改后发送</span>
-          )}
-        </div>
-        <div className="research-composer-scope">
           <WorkspacePicker
             value={workspace}
             projectRoot={projectRoot}
+            projectName={
+              effectiveProject
+                ? projects.find((project) => project.id === effectiveProject)?.name
+                : ''
+            }
             disabled={busy}
             onChange={setWorkspace}
           />
-
+          {filled && (
+            <span className="research-composer-hint">示例已填入，可修改后发送</span>
+          )}
         </div>
         <Composer
           kind={kind}

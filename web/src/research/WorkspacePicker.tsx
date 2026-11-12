@@ -14,6 +14,8 @@ interface Props {
   value: string
   /** 当前项目的 rootPath，仅用于展示。 */
   projectRoot?: string
+  /** 项目还没绑定目录时，用项目名作为文件夹的默认显示名。 */
+  projectName?: string
   disabled?: boolean
   onChange: (path: string) => void
 }
@@ -61,6 +63,7 @@ function errorText(error: unknown): string {
 export function WorkspacePicker({
   value,
   projectRoot = '',
+  projectName = '',
   disabled = false,
   onChange,
 }: Props) {
@@ -145,12 +148,12 @@ export function WorkspacePicker({
         disabled={disabled}
         aria-haspopup="menu"
         aria-expanded={open}
-        title={effective || '使用项目自己的文件夹'}
+        title={effective || projectName || '使用项目自己的文件夹'}
         onClick={() => setOpen((prev) => !prev)}
       >
         <IconFolder />
         <span className="workspace-picker-name">
-          {effective ? folderName(effective) : '项目默认文件夹'}
+          {effective ? folderName(effective) : projectName || '项目默认文件夹'}
         </span>
         {value && <em>本次</em>}
         <IconChevron />

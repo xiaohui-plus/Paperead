@@ -7986,6 +7986,16 @@ body.col-resizing * {
   position: relative;
 }
 
+/* 按钮与色板之间有视觉间距；用透明桥接区保持 hover，鼠标移过去时色板不消失 */
+.hl-tool::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: -6px;
+  right: -6px;
+  height: 10px;
+}
+
 .hl-tool-btn {
   position: relative;
   display: inline-flex;
@@ -8030,7 +8040,9 @@ body.col-resizing * {
   opacity: 0;
   pointer-events: none;
   transform: translateX(-50%) translateY(-2px);
-  transition: opacity 0.12s ease, transform 0.12s ease;
+  transition:
+    opacity 0.12s ease 0.06s,
+    transform 0.12s ease 0.06s;
 }
 
 .hl-tool:hover .hl-tool-palette,
