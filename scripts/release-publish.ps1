@@ -1,4 +1,4 @@
-# 发版收尾脚本：GitHub draft 转正 + Gitee 双发行版（版本版 + latest 固定版）+ 下载自检。
+﻿# 发版收尾脚本：GitHub draft 转正 + Gitee 双发行版（版本版 + latest 固定版）+ 下载自检。
 # 用法：
 #   $env:GITEE_TOKEN = "私人令牌（需要 releases 权限）"
 #   npm run release:publish -- -Version 0.1.7
@@ -59,7 +59,6 @@ Set-Content -LiteralPath $notesFile -Value $androidNotes -Encoding UTF8
     --version $Version `
     --apk $android.FullName `
     --url "https://gitee.com/$GiteeRepo/releases/download/$tag/$apkName" `
-
     --notes-file $notesFile `
     --out $androidJson
 Remove-Item -LiteralPath $notesFile -ErrorAction SilentlyContinue
