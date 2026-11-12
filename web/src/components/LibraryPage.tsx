@@ -18,11 +18,9 @@ import { PaperCard } from './PaperCard'
 import { Sidebar } from './Sidebar'
 import type { NavKey } from './Sidebar'
 import { SettingsDialog } from './SettingsDialog'
-import { SendToPhoneDialog } from './SendToPhoneDialog'
 import { FileSyncDialog } from './FileSyncDialog'
 import {
   IconBack,
-  IconDownload,
   IconFolder,
   IconGrid,
   IconRefresh,
@@ -89,7 +87,7 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
   const [offlineMode, setOfflineMode] = useState(false)
   const [downloads, setDownloads] = useState<Record<string, { done: number; total: number }>>({})
   const [importing, setImporting] = useState(false)
-  const [sendOpen, setSendOpen] = useState(false)
+
   const [syncImporting, setSyncImporting] = useState(false)
   const syncInputRef = useRef<HTMLInputElement>(null)
 
@@ -763,16 +761,7 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
                 Zotero 同步
               </button>
             )}
-            {!mobile && (
-              <button
-                className="btn ghost"
-                onClick={() => setSendOpen(true)}
-                title="导出同步包，手机导入后离线阅读"
-              >
-                <IconDownload />
-                发送到手机
-              </button>
-            )}
+
             {mobile && (
               <button
                 className="btn ghost"
@@ -993,10 +982,6 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
         </div>
       )}
 
-      <SendToPhoneDialog
-        open={sendOpen}
-        onClose={() => setSendOpen(false)}
-      />
 
       <SettingsDialog
         open={settingsOpen}

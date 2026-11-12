@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo } from 'react'
 import type { KeyPoint } from '../lib/assistant'
 import type { Annotation, HighlightCategory, ReadingHighlight } from '../lib/library'
 import { HIGHLIGHT_LABELS } from './Annotations'
@@ -25,15 +25,22 @@ export function KeyPointsPanel({
   onJump,
   focusHighlight,
 }: Props) {
-  const [flashId, setFlashId] = useState('')
-
   useEffect(() => {
     if (!focusHighlight) return
-    setFlashId(focusHighlight.id)
     const el = document.getElementById(`kp-${focusHighlight.id}`)
-    el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    const timer = window.setTimeout(() => setFlashId(''), 2200)
-    return () => window.clearTimeout(timer)
+    if (!el) return
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    // 连续双击同一条也要重新闪：先摘掉动画类，强制回流后再挂上
+    el.classList.remove('is-flash')
+    void el.offsetWidth
+    el.classList.add('is-flash')
+    const timer = window.setTimeout(() => {
+      el.classList.remove('is-flash')
+    }, 1500)
+    return () => {
+      window.clearTimeout(timer)
+      el.classList.remove('is-flash')
+    }
   }, [focusHighlight])
 
   const mine = useMemo(
@@ -86,7 +93,7 @@ export function KeyPointsPanel({
                 key={item.id}
                 id={`kp-${item.id}`}
                 data-highlight-id={item.id}
-                className={`kp-card auto-${category}${flashId === item.id ? ' is-focus' : ''}`}
+                className={`kp-card auto-${category}`}
                 onClick={() => onJump(item.block_id)}
                 title="跳到原文"
               >

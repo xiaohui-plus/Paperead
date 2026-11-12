@@ -12,23 +12,44 @@ interface Props extends PanelProps {
   onJump: (id: string, page?: number) => void
 }
 
+const NARROW_QUERY = '(max-width: 860px)'
+
+function readNarrow(): boolean {
+  return typeof window !== 'undefined' && window.matchMedia(NARROW_QUERY).matches
+}
+
 /**
  * 手机端阅读页底部工具条：常驻在屏幕底部，
  * 点其中一项从下方展开对应面板，点遮罩或关闭按钮收起。
+ *
+ * 只在窄屏渲染：桌面端有左侧栏，双击标注/阅读重点时不能再从正文下方
+ * 叠一个抽屉出来（那会和左侧栏重复）。
  */
 export function MobileDock(props: Props) {
   const [open, setOpen] = useState<TabKey | null>(null)
+  const [narrow, setNarrow] = useState(readNarrow)
   const active = PANEL_TABS.find((t) => t.key === open)
 
-  // 双击正文里的标注：手机端没有左侧栏，直接展开「批注」面板
   useEffect(() => {
-    if (props.focusAnnotation) setOpen('comments')
-  }, [props.focusAnnotation])
+    const mq = window.matchMedia(NARROW_QUERY)
+    const onChange = () => setNarrow(mq.matches)
+    onChange()
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [])
 
-  // 双击自动阅读重点：手机端展开「阅读重点」面板
+  // 双击正文里的标注：只有手机端没有左侧栏时才展开底部「批注」面板；
+  // 桌面端只切左侧栏，不能把面板再叠到正文下方。
   useEffect(() => {
+    if (!narrow) return
+    if (props.focusAnnotation) setOpen('comments')
+  }, [props.focusAnnotation, narrow])
+
+  // 双击自动阅读重点：同上，桌面端只切左侧「阅读重点」
+  useEffect(() => {
+    if (!narrow) return
     if (props.focusHighlight) setOpen('key')
-  }, [props.focusHighlight])
+  }, [props.focusHighlight, narrow])
 
   useEffect(() => {
     if (!open) return
@@ -45,6 +66,9 @@ export function MobileDock(props: Props) {
     props.onJump(id, page)
     close()
   }
+
+  // 桌面端左侧栏就是唯一入口，底部工具条与抽屉一律不渲染
+  if (!narrow) return null
 
   return (
     <>

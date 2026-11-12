@@ -880,12 +880,14 @@ export function ReaderView({ paperId, onBack }: Props) {
 
   /** 双击正文里的荧光笔/批注：左侧切到「批注」，并高亮对应卡片。 */
   const openAnnotation = useCallback((annotation: Annotation) => {
+    setPanelCollapsed(false)
     setPanelTab('comments')
     setFocusAnnotation({ id: annotation.id, at: Date.now() })
   }, [])
 
   /** 双击自动阅读重点：左侧切到「阅读重点」，并定位对应条目。 */
   const openHighlight = useCallback((highlight: ReadingHighlight) => {
+    setPanelCollapsed(false)
     setPanelTab('key')
     setFocusHighlight({ id: highlight.id, at: Date.now() })
   }, [])
