@@ -175,6 +175,8 @@ interface RichProps {
   onAnnotationClick?: (annotation: Annotation, rect: DOMRect) => void
   /** 双击正文里的高亮/批注：切到左侧批注栏并定位到这一条 */
   onAnnotationOpen?: (annotation: Annotation) => void
+  /** 双击自动阅读重点：切到左侧「阅读重点」并定位到该条 */
+  onHighlightOpen?: (highlight: ReadingHighlight) => void
 }
 
 /** 正文段落：把引用编号、用户高亮、自动重点、术语标进同一段文本。 */
@@ -188,19 +190,28 @@ export function RichText({
   onCite,
   onAnnotationClick,
   onAnnotationOpen,
+  onHighlightOpen,
 }: RichProps) {
   const spans = buildSpans(text, source, annotations, highlights, terms)
   const nodes: ReactNode[] = []
   let cursor = 0
   // 悬停稍等一下再开预览，划词或快速划过整段时不会频繁弹层
   const hoverTimer = useRef<number | undefined>(undefined)
+  // 单击编辑框延迟打开：双击时由 onOpen 取消，避免切到批注栏后正文下方又弹一个编辑框
+  const clickTimer = useRef<number | undefined>(undefined)
+  const pendingClick = useRef<{ annotation: Annotation; rect: DOMRect } | null>(null)
   const cancelHover = () => {
     if (hoverTimer.current) {
       window.clearTimeout(hoverTimer.current)
       hoverTimer.current = undefined
     }
   }
-  useEffect(() => cancelHover, [])
+  useEffect(() => {
+    return () => {
+      cancelHover()
+      if (clickTimer.current) window.clearTimeout(clickTimer.current)
+    }
+  }, [])
 
   for (const span of spans) {
     if (span.start > cursor) {
@@ -245,12 +256,28 @@ export function RichText({
         : annotation.note || (isComment ? '点击编辑这条批注' : '点击编辑这条高亮')
       const onPick = (e: ReactMouseEvent<HTMLElement>) => {
         e.stopPropagation()
-        // 双击的第二下不再弹编辑框，交给 onDoubleClick 切到批注栏
+        // 双击的第二下不再开编辑框，交给 onDoubleClick 切到批注栏
         if (e.detail > 1) return
-        onAnnotationClick?.(annotation, (e.target as HTMLElement).getBoundingClientRect())
+        pendingClick.current = {
+          annotation,
+          rect: (e.target as HTMLElement).getBoundingClientRect(),
+        }
+        if (clickTimer.current) window.clearTimeout(clickTimer.current)
+        clickTimer.current = window.setTimeout(() => {
+          clickTimer.current = undefined
+          const pending = pendingClick.current
+          pendingClick.current = null
+          if (pending) onAnnotationClick?.(pending.annotation, pending.rect)
+        }, 200)
       }
       const onOpen = (e: ReactMouseEvent<HTMLElement>) => {
         e.stopPropagation()
+        // 双击：取消待打开的编辑框，只让左侧批注栏定位到这一条
+        if (clickTimer.current) {
+          window.clearTimeout(clickTimer.current)
+          clickTimer.current = undefined
+        }
+        pendingClick.current = null
         onAnnotationOpen?.(annotation)
       }
       nodes.push(
@@ -281,12 +308,18 @@ export function RichText({
         ),
       )
     } else if (span.kind === 'auto' && span.highlight) {
-      const category = span.highlight.category
+      const highlight = span.highlight
+      const category = highlight.category
       nodes.push(
         <mark
           key={`a${span.start}`}
           className={`auto-hl auto-${category}`}
-          title={`自动标记：${HIGHLIGHT_LABELS[category]}`}
+          data-hid={highlight.id}
+          title={`自动标记：${HIGHLIGHT_LABELS[category]}（双击查看阅读重点）`}
+          onDoubleClick={(e) => {
+            e.stopPropagation()
+            onHighlightOpen?.(highlight)
+          }}
         >
           {text.slice(span.start, span.end)}
         </mark>,

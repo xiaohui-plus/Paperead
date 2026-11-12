@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { KeyPoint } from '../lib/assistant'
 import type { Annotation, HighlightCategory, ReadingHighlight } from '../lib/library'
 import { HIGHLIGHT_LABELS } from './Annotations'
@@ -8,6 +8,8 @@ interface Props {
   points: KeyPoint[]
   annotations?: Annotation[]
   onJump: (id: string) => void
+  /** 双击正文里的自动阅读重点后，滚动并高亮这一条 */
+  focusHighlight?: { id: string; at: number } | null
 }
 
 const ORDER: HighlightCategory[] = ['objective', 'method', 'conclusion']
@@ -16,7 +18,24 @@ const ORDER: HighlightCategory[] = ['objective', 'method', 'conclusion']
  * 阅读重点：正文翻译完成后自动抽出的研究目标 / 方法 / 结论，按类别分组；
  * 用户自己的荧光笔高亮也收在这里的「我的荧光笔」分组（批注栏里同样可见）。
  */
-export function KeyPointsPanel({ highlights, points, annotations = [], onJump }: Props) {
+export function KeyPointsPanel({
+  highlights,
+  points,
+  annotations = [],
+  onJump,
+  focusHighlight,
+}: Props) {
+  const [flashId, setFlashId] = useState('')
+
+  useEffect(() => {
+    if (!focusHighlight) return
+    setFlashId(focusHighlight.id)
+    const el = document.getElementById(`kp-${focusHighlight.id}`)
+    el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    const timer = window.setTimeout(() => setFlashId(''), 2200)
+    return () => window.clearTimeout(timer)
+  }, [focusHighlight])
+
   const mine = useMemo(
     () => annotations.filter((item) => item.kind === 'highlight'),
     [annotations],
@@ -65,7 +84,9 @@ export function KeyPointsPanel({ highlights, points, annotations = [], onJump }:
             {items.map((item) => (
               <button
                 key={item.id}
-                className={`kp-card auto-${category}`}
+                id={`kp-${item.id}`}
+                data-highlight-id={item.id}
+                className={`kp-card auto-${category}${flashId === item.id ? ' is-focus' : ''}`}
                 onClick={() => onJump(item.block_id)}
                 title="跳到原文"
               >

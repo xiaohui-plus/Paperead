@@ -146,6 +146,11 @@ export function ReaderView({ paperId, onBack }: Props) {
     id: string
     at: number
   } | null>(null)
+  // 双击自动阅读重点后要聚焦的条目
+  const [focusHighlight, setFocusHighlight] = useState<{
+    id: string
+    at: number
+  } | null>(null)
   // 阅读页点图表/公式旁的小圆圈 → 加入左侧问答附录
   const [contextItems, setContextItems] = useState<ReaderContextItem[]>([])
   const contextIds = useMemo(
@@ -879,6 +884,12 @@ export function ReaderView({ paperId, onBack }: Props) {
     setFocusAnnotation({ id: annotation.id, at: Date.now() })
   }, [])
 
+  /** 双击自动阅读重点：左侧切到「阅读重点」，并定位对应条目。 */
+  const openHighlight = useCallback((highlight: ReadingHighlight) => {
+    setPanelTab('key')
+    setFocusHighlight({ id: highlight.id, at: Date.now() })
+  }, [])
+
   // 切到原版 PDF 时把当前页码带过去；切回来时恢复重排阅读的滚动位置
   const togglePdf = () => {
     if (!canShowPdf) return
@@ -1014,7 +1025,8 @@ export function ReaderView({ paperId, onBack }: Props) {
               highlights={highlights}
               tab={panelTab}
               onTab={setPanelTab}
-              focusAnnotation={focusAnnotation}
+focusAnnotation={focusAnnotation}
+              focusHighlight={focusHighlight}
               contextItems={contextItems}
               onRemoveContext={removeContext}
               onClearContext={clearContext}
@@ -1080,6 +1092,7 @@ export function ReaderView({ paperId, onBack }: Props) {
             contextIds={contextIds}
             onAttachContext={attachContext}
             onOpenAnnotation={openAnnotation}
+            onOpenHighlight={openHighlight}
           />
         )}
       </div>
@@ -1102,6 +1115,7 @@ export function ReaderView({ paperId, onBack }: Props) {
           onDeleteAnnotation={annotationActions?.remove ?? (async () => {})}
           highlights={highlights}
           focusAnnotation={focusAnnotation}
+          focusHighlight={focusHighlight}
           contextItems={contextItems}
           onRemoveContext={removeContext}
           onClearContext={clearContext}

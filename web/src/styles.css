@@ -8906,6 +8906,12 @@ select.input {
   background: var(--bg-soft);
 }
 
+/* 双击正文自动阅读重点后，对应卡片短暂描边 */
+.kp-card.is-focus {
+  border-color: var(--ink-2);
+  box-shadow: 0 0 0 2px rgba(61, 63, 69, 0.12);
+}
+
 .kp-card.auto-objective {
   border-left-color: #93c5fd;
 }

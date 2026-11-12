@@ -1795,6 +1795,31 @@ def _figure_rects(page: pymupdf.Page) -> list[pymupdf.Rect]:
         ):
             rects = _merge_rects([*rects, dr])
 
+    # 矢量散点图/箱线图由大量细碎图元组成（点、刻度线远小于 20pt），
+    # 逐个过滤会把整张图漏掉；cluster_drawings 能把它们聚成真实图区。
+    try:
+        clusters = page.cluster_drawings()
+    except Exception:
+        clusters = []
+    usable = [
+        pymupdf.Rect(r)
+        for r in clusters
+        if pymupdf.Rect(r).width * pymupdf.Rect(r).height > 4000
+        and pymupdf.Rect(r).height > 40
+    ]
+    if usable and not rects:
+        vector = pymupdf.Rect()
+        for r in usable:
+            vector |= r
+        page_area = page.rect.width * page.rect.height
+        if (
+            vector.width * vector.height > 9000
+            and vector.height > 60
+            and vector.width * vector.height < page_area * 0.75
+            and not _rect_has_text(page, vector)
+        ):
+            rects.append(vector)
+
     return [_figure_crop_rect(page, r) for r in _merge_figure_regions(rects)]
 
 

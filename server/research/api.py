@@ -898,7 +898,10 @@ def build_router(
         project = store.get_project(project_id)
         if project is None:
             raise HTTPException(status_code=404, detail="project not found")
-        path = Path(project["workspace"]) / "artifacts" / (row.get("path") or "")
+        path = store.artifacts_root(project_id) / (row.get("path") or "")
+        if not path.is_file():
+            # 旧版产物写在内部项目目录，读取时兼容
+            path = store.legacy_artifacts_root(project_id) / (row.get("path") or "")
         if not path.is_file():
             raise HTTPException(status_code=404, detail="artifact file not found")
         mime = mimetypes.guess_type(path.name)[0] or "text/markdown"

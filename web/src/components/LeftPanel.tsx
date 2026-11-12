@@ -56,6 +56,8 @@ export interface PanelProps {
   onClearContext?: () => void
   /** 双击正文标注后要聚焦的批注条；at 变化时重新滚动并闪烁 */
   focusAnnotation?: { id: string; at: number } | null
+  /** 双击自动阅读重点后要聚焦的条目 */
+  focusHighlight?: { id: string; at: number } | null
 }
 
 export const PANEL_TABS: { key: TabKey; label: string; icon: ReactNode }[] = [
@@ -93,6 +95,7 @@ export function PanelBody({
   onRemoveContext,
   onClearContext,
   focusAnnotation,
+  focusHighlight,
 }: PanelProps & { tab: TabKey }) {
   if (tab === 'chat') {
     return (
@@ -151,6 +154,7 @@ export function PanelBody({
           points={points}
           annotations={annotations}
           onJump={onJump}
+          focusHighlight={focusHighlight}
         />
       )}
       {tab === 'figures' && <FiguresPanel blocks={paper.blocks} onJump={onJump} />}

@@ -72,7 +72,8 @@ export function CreateProjectDialog({ open, busy = false, onClose, onCreate }: P
     }
   }
 
-  const ready = Boolean(name.trim() && folder)
+  // 名称可以留空：为空时用所选文件夹的名字作为项目名
+  const ready = Boolean(folder)
   const pending = busy || submitting
 
   const submit = async () => {
@@ -80,7 +81,7 @@ export function CreateProjectDialog({ open, busy = false, onClose, onCreate }: P
     setSubmitting(true)
     setError(null)
     try {
-      const result = await onCreate(name.trim(), folder)
+      const result = await onCreate(name.trim() || folderName(folder), folder)
       if (!result.ok) setError(result.error || '创建项目失败，请重试')
     } catch (createError) {
       setError(errorText(createError))
@@ -120,7 +121,7 @@ export function CreateProjectDialog({ open, busy = false, onClose, onCreate }: P
                 autoFocus
                 value={name}
                 maxLength={60}
-                placeholder="输入项目名称"
+                placeholder="输入项目名称（留空则使用文件夹名）"
                 disabled={pending}
                 onChange={(event) => setName(event.target.value)}
                 onKeyDown={(event) => {

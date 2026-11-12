@@ -44,6 +44,8 @@ interface Props {
   onAttachContext?: (item: ReaderContextItem) => void
   /** 双击正文中的高亮/批注：切到左侧批注栏并定位到该条 */
   onOpenAnnotation?: (annotation: Annotation) => void
+  /** 双击自动阅读重点：切到左侧「阅读重点」并定位 */
+  onOpenHighlight?: (highlight: ReadingHighlight) => void
 }
 
 interface SelectionState {
@@ -63,6 +65,7 @@ export function BlockView({
   annotations = [],
   annotationActions,
   onOpenAnnotation,
+  onOpenHighlight,
   highlights = [],
   attachedIds,
   onAttachContext,
@@ -344,6 +347,7 @@ export function BlockView({
             setEditing(null)
             onOpenAnnotation?.(annotation)
           }}
+          onHighlightOpen={onOpenHighlight}
         />
         {showZh &&
           (b.translated ? (
@@ -360,6 +364,7 @@ export function BlockView({
                 setEditing(null)
                 onOpenAnnotation?.(annotation)
               }}
+              onHighlightOpen={onOpenHighlight}
             />
           ) : (
             <p className="para-zh">

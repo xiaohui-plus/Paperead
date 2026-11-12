@@ -1,15 +1,16 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { IconList, IconSpark } from '../components/icons'
 import type { ProjectKind, ProjectSummary } from '../lib/researchApi'
 import { tourBus } from '../tour/tourBus'
 import { Composer } from './Composer'
-import type { StartHandler } from './ResearchShell'
-import { WorkspacePicker } from './WorkspacePicker'
+import type { CreateProjectHandler, StartHandler } from './ResearchShell'
+import { ProjectPicker } from './ProjectPicker'
 
 interface Props {
   kind: ProjectKind
   projects: ProjectSummary[]
   onStart: StartHandler
+  onCreateProject: CreateProjectHandler
 }
 
 const RESEARCH_ACTIONS = [
@@ -92,23 +93,19 @@ const REVIEW_EXAMPLES = [
 ] as const
 
 /** 研究与写综述的功能首页：项目选择 + composer + 快捷动作。 */
-export function ResearchHome({ kind, projects, onStart }: Props) {
+export function ResearchHome({
+  kind,
+  projects,
+  onStart,
+  onCreateProject,
+}: Props) {
   const [target, setTarget] = useState<string>('auto')
-  const [workspace, setWorkspace] = useState('')
   const [busy, setBusy] = useState(false)
   const [filled, setFilled] = useState(false)
   const [seed, setSeed] = useState<{ key: number; text: string } | null>(null)
 
   const effectiveProject =
     target === 'new' ? null : target === 'auto' ? (projects[0]?.id ?? null) : target
-  const projectRoot = effectiveProject
-    ? (projects.find((project) => project.id === effectiveProject)?.rootPath ?? '')
-    : ''
-
-  // 切换项目后不再沿用上一个项目的「本次文件夹」。
-  useEffect(() => {
-    setWorkspace('')
-  }, [target])
 
   /** 快捷卡片只把示例填进输入框，等用户改完再自己发送。 */
   const fillDraft = (text: string) => {
@@ -122,7 +119,7 @@ export function ResearchHome({ kind, projects, onStart }: Props) {
     setBusy(true)
     try {
       tourBus.emit('research:action', { label: title })
-      await onStart(value, title, effectiveProject, workspace)
+      await onStart(value, title, effectiveProject, '')
       setSeed(null)
       setFilled(false)
     } finally {
@@ -146,33 +143,12 @@ export function ResearchHome({ kind, projects, onStart }: Props) {
 
       <section className="research-composer">
         <div className="research-composer-top">
-          <label>
-            在项目
-            <select
-              value={target}
-              onChange={(event) => setTarget(event.target.value)}
-            >
-              <option value="auto">
-                {projects[0] ? `最近：${projects[0].name}` : '新项目（自动创建）'}
-              </option>
-              {projects.map((project) => (
-                <option key={project.id} value={project.id}>
-                  {project.name}
-                </option>
-              ))}
-              <option value="new">新项目</option>
-            </select>
-          </label>
-          <WorkspacePicker
-            value={workspace}
-            projectRoot={projectRoot}
-            projectName={
-              effectiveProject
-                ? projects.find((project) => project.id === effectiveProject)?.name
-                : ''
-            }
+          <ProjectPicker
+            projects={projects}
+            value={target}
             disabled={busy}
-            onChange={setWorkspace}
+            onChange={setTarget}
+            onCreate={onCreateProject}
           />
           {filled && (
             <span className="research-composer-hint">示例已填入，可修改后发送</span>

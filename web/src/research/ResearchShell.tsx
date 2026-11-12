@@ -20,7 +20,11 @@ interface Props {
     projectId: string,
     options?: { rename?: boolean; sessionId?: string; initialText?: string },
   ) => void
-  children: (projects: ProjectSummary[], start: StartHandler) => ReactNode
+  children: (
+    projects: ProjectSummary[],
+    start: StartHandler,
+    createProject: CreateProjectHandler,
+  ) => ReactNode
 }
 
 export type StartHandler = (
@@ -30,6 +34,16 @@ export type StartHandler = (
   /** 本次选择的工作文件夹；空字符串表示沿用项目自己的文件夹。 */
   rootPath?: string,
 ) => Promise<void>
+
+/** 首页「选择项目 → 创建项目」用的快速创建入口，不跳转页面。 */
+export type CreateProjectHandler = (
+  name: string,
+  rootPath: string,
+) => Promise<{
+  ok: boolean
+  project?: ProjectSummary
+  error?: string
+}>
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : '项目加载失败'
@@ -154,7 +168,14 @@ export function ResearchShell({
         }
       />
       <main className="library-main research-main">
-        {children(projects, start)}
+        {children(projects, start, async (name, rootPath) => {
+          const result = await createProject(name, rootPath)
+          return {
+            ok: Boolean(result.project),
+            project: result.project ?? undefined,
+            error: result.error,
+          }
+        })}
       </main>
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <CreateProjectDialog

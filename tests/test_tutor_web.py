@@ -203,7 +203,7 @@ def test_chinese_query_does_not_fall_back_to_bing(monkeypatch):
 
 
 def test_empty_result_is_cached_briefly(monkeypatch):
-    monkeypatch.setattr(web, "_EMPTY_CACHE_TTL", 0.0)
+    monkeypatch.setattr(web, "_EMPTY_CACHE_TTL", -1.0)
     calls = {"n": 0}
 
     async def empty(query, limit):

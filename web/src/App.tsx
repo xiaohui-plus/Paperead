@@ -192,8 +192,13 @@ export default function App() {
         onNav={onNav}
         onOpenProject={openProject}
       >
-        {(projects, start) => (
-          <ResearchHome kind={kind} projects={projects} onStart={start} />
+        {(projects, start, createProject) => (
+          <ResearchHome
+            kind={kind}
+            projects={projects}
+            onStart={start}
+            onCreateProject={createProject}
+          />
         )}
       </ResearchShell>
     )

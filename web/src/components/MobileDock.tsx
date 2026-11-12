@@ -25,6 +25,11 @@ export function MobileDock(props: Props) {
     if (props.focusAnnotation) setOpen('comments')
   }, [props.focusAnnotation])
 
+  // 双击自动阅读重点：手机端展开「阅读重点」面板
+  useEffect(() => {
+    if (props.focusHighlight) setOpen('key')
+  }, [props.focusHighlight])
+
   useEffect(() => {
     if (!open) return
     const onKey = (event: KeyboardEvent) => {

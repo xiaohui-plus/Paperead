@@ -272,6 +272,8 @@ def _export_source(
     产物 / 文件，方便“把当前综述导出”这类不带参数的说法。
     """
     workspace = Path(research.workspace(project_id))
+    artifact_dir = research.artifacts_root(project_id)
+    legacy_dir = research.legacy_artifacts_root(project_id)
     root = Path(research.workspace_root(project_id))
     items = research.list_items(project_id)
     artifacts = research.list_artifacts(project_id)
@@ -281,7 +283,11 @@ def _export_source(
         return str(item.get("title") or ""), text
 
     def _artifact_text(row: dict[str, Any]) -> tuple[str, str]:
-        path = workspace / "artifacts" / str(row.get("path") or "")
+        rel = str(row.get("path") or "")
+        path = artifact_dir / rel
+        if not path.is_file():
+            # 旧版产物仍可能留在内部项目目录
+            path = legacy_dir / rel
         return str(row.get("title") or ""), _read_text(path)
 
     if source:
@@ -300,8 +306,10 @@ def _export_source(
                 title, text = _item_text(item)
                 if text:
                     return title, text
-        direct = _read_text(root / name) or _read_text(
-            workspace / "artifacts" / name
+        direct = (
+            _read_text(root / name)
+            or _read_text(artifact_dir / name)
+            or _read_text(legacy_dir / name)
         )
         if direct:
             return Path(name).stem, direct
@@ -409,13 +417,18 @@ def _find_source_path(
     if not source:
         return None
     workspace = Path(research.workspace(project_id))
+    artifact_dir = research.artifacts_root(project_id)
+    legacy_dir = research.legacy_artifacts_root(project_id)
     root = Path(research.workspace_root(project_id))
     name = safe_name(source)
     for row in research.list_artifacts(project_id):
         if source in {row.get("title"), row.get("path")} or Path(
             str(row.get("path") or "")
         ).name == name:
-            path = workspace / "artifacts" / str(row.get("path") or "")
+            rel = str(row.get("path") or "")
+            path = artifact_dir / rel
+            if not path.is_file():
+                path = legacy_dir / rel
             if path.is_file():
                 return path
     for item in research.list_items(project_id):
@@ -425,7 +438,7 @@ def _find_source_path(
             path = research.item_path(project_id, item)
             if path.is_file():
                 return path
-    for candidate in (root / name, workspace / "artifacts" / name):
+    for candidate in (root / name, artifact_dir / name, legacy_dir / name):
         if candidate.is_file():
             return candidate
     return None
@@ -449,7 +462,11 @@ def _find_ppt_template(
             continue
         if source in {item.get("title"), item.get("path")} or path.name == name:
             return path, str(item.get("title") or path.name)
-    for candidate in (root / name, workspace / "artifacts" / name):
+    for candidate in (
+        root / name,
+        research.artifacts_root(project_id) / name,
+        research.legacy_artifacts_root(project_id) / name,
+    ):
         if candidate.is_file() and candidate.suffix.lower() in _PPT_SUFFIXES:
             return candidate, candidate.name
     return None, ""
@@ -822,8 +839,7 @@ def _audit_export(
     if metrics.get("uncitedClaims"):
         warnings.append(f"{metrics['uncitedClaims']} 处结论句没有引用。")
 
-    workspace = Path(project["workspace"])
-    target_dir = workspace / "artifacts"
+    target_dir = research.artifacts_root(project_id)
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / CITATION_REPORT_NAME
     markdown = _citation_markdown(report, label or "综述草稿")
@@ -1385,10 +1401,9 @@ def build_router(
     def _write_artifact(
         project: dict[str, Any], session_id: str, body: ArtifactIn
     ) -> dict[str, Any]:
-        workspace = Path(project["workspace"])
-        target_dir = workspace / "artifacts"
-        target_dir.mkdir(parents=True, exist_ok=True)
         project_id = str(project["id"])
+        target_dir = research.artifacts_root(project_id)
+        target_dir.mkdir(parents=True, exist_ok=True)
         title = (body.title or "").strip()
         fallback = (title or "未命名产物") + ".md"
 
@@ -1475,7 +1490,10 @@ def build_router(
         project = research.get_project(str(row["project_id"]))
         if project is None:
             raise HTTPException(status_code=404, detail="project not found")
-        path = Path(project["workspace"]) / "artifacts" / str(row.get("path") or "")
+        project_id = str(row["project_id"])
+        path = research.artifacts_root(project_id) / str(row.get("path") or "")
+        if not path.is_file():
+            path = research.legacy_artifacts_root(project_id) / str(row.get("path") or "")
         text = _read_text(path)
         return {
             "artifact": _artifact_payload(row),

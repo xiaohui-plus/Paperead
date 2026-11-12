@@ -23,6 +23,8 @@ interface Props {
   onAttachContext?: (item: ReaderContextItem) => void
   /** 双击正文里的高亮/批注：切到左侧批注栏并定位 */
   onOpenAnnotation?: (annotation: Annotation) => void
+  /** 双击自动阅读重点：切到左侧「阅读重点」并定位 */
+  onOpenHighlight?: (highlight: ReadingHighlight) => void
 }
 
 export function Reader({
@@ -39,6 +41,7 @@ export function Reader({
   contextIds,
   onAttachContext,
   onOpenAnnotation,
+  onOpenHighlight,
 }: Props) {
   const prepared = useMemo(() => prepareBlocks(paper.blocks), [paper.blocks])
   const flow = prepared.filter((r) => isFlowBlock(r.block))
@@ -109,6 +112,7 @@ export function Reader({
             attachedIds={contextIds}
             onAttachContext={onAttachContext}
             onOpenAnnotation={onOpenAnnotation}
+            onOpenHighlight={onOpenHighlight}
           />
         ))}
 

@@ -259,6 +259,25 @@ class ResearchStore:
                 return path.resolve()
         return files_root(Path(project["workspace"]))
 
+    def artifacts_root(self, project_id: str) -> Path:
+        """研究产物目录：选了工作区就写进 <工作区>/artifacts，否则留在内部项目目录。"""
+        project = self.get_project(project_id)
+        if project is None:
+            raise LookupError("project not found")
+        raw = str(project.get("root_path") or "").strip()
+        if raw:
+            path = Path(raw)
+            if path.is_dir():
+                return path.resolve() / "artifacts"
+        return Path(project["workspace"]) / "artifacts"
+
+    def legacy_artifacts_root(self, project_id: str) -> Path:
+        """旧版产物目录（内部项目目录），只用于读取兼容。"""
+        project = self.get_project(project_id)
+        if project is None:
+            raise LookupError("project not found")
+        return Path(project["workspace"]) / "artifacts"
+
     # ── 项目文件树 ──────────────────────────────────────
 
     def list_items(self, project_id: str) -> list[dict[str, Any]]:

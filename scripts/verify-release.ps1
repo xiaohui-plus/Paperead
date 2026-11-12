@@ -1,28 +1,30 @@
-$ErrorActionPreference = "Continue"
+﻿$ErrorActionPreference = "Continue"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
 $config = Get-Content "src-tauri\tauri.conf.json" -Raw | ConvertFrom-Json
 $version = $config.version
 $installer = Join-Path $root "release\Paperead_${version}_x64-setup.exe"
-$apk = Join-Path $root "release\Paperead_${version}_android-arm64.apk"
+$apk = Get-ChildItem (Join-Path $root "release\Paperead_${version}_android-*.apk") -ErrorAction SilentlyContinue | Select-Object -First 1
 $androidJson = Join-Path $root "release\android.json"
 $sums = Join-Path $root "release\SHA256SUMS.txt"
 
 $errors = @()
 if (-not (Test-Path $installer)) { $errors += "缺少安装包：$installer" }
 if (-not (Test-Path "$installer.sig")) { $errors += "缺少更新签名：$installer.sig" }
-if (-not (Test-Path $apk)) { $errors += "缺少 APK：$apk" }
-if (-not (Test-Path $androidJson)) {
-    $errors += "缺少 Android 更新清单：$androidJson"
-} else {
-    $manifest = Get-Content $androidJson -Raw | ConvertFrom-Json
-    if ($manifest.version -ne $version) { $errors += "android.json 版本 $($manifest.version) != $version" }
-    if (Test-Path $apk) {
-        $hash = (Get-FileHash $apk -Algorithm SHA256).Hash.ToLowerInvariant()
+# 默认只发 Windows；只有本轮产出 APK 时才要求并校验 Android 更新清单
+if ($apk) {
+    if (-not (Test-Path $androidJson)) {
+        $errors += "缺少 Android 更新清单：$androidJson"
+    } else {
+        $manifest = Get-Content $androidJson -Raw | ConvertFrom-Json
+        if ($manifest.version -ne $version) { $errors += "android.json 版本 $($manifest.version) != $version" }
+        $hash = (Get-FileHash $apk.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($manifest.sha256 -ne $hash) { $errors += "android.json 中 APK SHA256 不匹配" }
-        if ($manifest.size -ne (Get-Item $apk).Length) { $errors += "android.json 中 APK 大小不匹配" }
+        if ($manifest.size -ne (Get-Item $apk.FullName).Length) { $errors += "android.json 中 APK 大小不匹配" }
     }
+} else {
+    Write-Host "未发现 $version 的 APK，按仅 Windows 发布校验" -ForegroundColor Yellow
 }
 if (-not (Test-Path "src-tauri\resources\paperead-server\paperead-server.exe")) {
     $errors += "缺少已 stage 的 sidecar"

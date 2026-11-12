@@ -3503,3 +3503,48 @@
     padding: 18px 12px;
   }
 }
+/* 研究消息框顶部的「选择项目」：项目切换 + 新建共用一个入口 */
+.project-picker {
+  position: relative;
+}
+
+.project-picker-menu {
+  max-height: 420px;
+  overflow: auto;
+}
+
+.project-picker-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 6px 9px;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+.project-picker-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.project-picker-create {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px;
+  border-radius: 8px;
+  color: var(--ink-2);
+  font-size: 12.5px;
+}
+
+.project-picker-create:hover {
+  background: var(--bg-soft);
+}
