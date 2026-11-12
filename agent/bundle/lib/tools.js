@@ -1,10 +1,49 @@
+import { relative, resolve, sep } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 export const name = 'research-tools'
-export const inject = ['tools']
+export const inject = ['tools', 'shell', 'sandboxPolicy', 'approval']
 
 const DEFAULT_BASE = 'http://127.0.0.1:8010'
 const MAX_TEXT = 9000
+
+// dsh 的提权阶梯：一次审批只允许向更宽的档位走一层。
+const WIDER_MODES = {
+  'read-only': ['workspace-write', 'danger-full-access'],
+  'workspace-write': ['danger-full-access'],
+}
+
+function withinRoot(root, target) {
+  const base = resolve(root)
+  const next = resolve(target)
+  if (next === base) return true
+  return next.startsWith(base.endsWith(sep) ? base : base + sep)
+}
+
+function sandboxUnavailable(error) {
+  return Boolean(error && typeof error === 'object' && error.code === 'SANDBOX_UNAVAILABLE')
+}
+
+// dsh 的 denial 签名只有英文；中文 Windows 上 PowerShell 会报「拒绝访问」，
+// 这里补一层本地判定，避免沙箱已经拦住却当成普通命令失败、不向用户申请。
+const DENIAL_HINTS = [
+  'access is denied',
+  'access to the path',
+  'permission denied',
+  '拒绝访问',
+  '访问被拒绝',
+  '未经授权',
+  '权限不足',
+]
+
+function sandboxDenied(result) {
+  if (result?.sandbox?.denied) return true
+  const text = `${result?.stdout?.text || ''}\n${result?.stderr?.text || ''}`.toLowerCase()
+  // 必须先看输出再看退出码：PowerShell 的非终止性错误（如 Set-Content 被拒）
+  // 不会改变退出码，命令仍是 exit 0，只看 exitCode 会漏掉真实的沙箱拒绝。
+  if (DENIAL_HINTS.some((hint) => text.includes(hint))) return true
+  return false
+}
 
 function asText(value) {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
@@ -65,6 +104,26 @@ export function apply(ctx, config = {}) {
       throw new Error(`Paperead API ${response.status}: ${body.slice(0, 300)}`)
     }
     return JSON.parse(body)
+  }
+
+  const shell = ctx.get('shell')
+  const sandboxPolicy = ctx.get('sandboxPolicy')
+  const approval = ctx.get('approval')
+
+  /** 向用户申请一次授权；没有应答通道时按 dsh 的约定 fail-closed。 */
+  async function askApproval(exec, reason) {
+    if (!approval) return 'unavailable'
+    try {
+      return await approval.request({
+        agent: exec.agent,
+        toolName: 'run_command',
+        callId: exec.callId,
+        reason,
+        signal: exec.signal,
+      })
+    } catch {
+      return 'unavailable'
+    }
   }
 
   ctx.tools.register(
@@ -220,7 +279,7 @@ export function apply(ctx, config = {}) {
     defineTool({
       name: 'run_command',
       description:
-        'Run one shell command inside the project working folder (PowerShell on Windows). Use it for compiling LaTeX, running python/R analysis, git status and file conversion. Do not install system software, modify permissions or run destructive commands. The terminal may be disabled by the user; a 403 error means it is off.',
+        'Run one shell command inside the project working folder (PowerShell on Windows) under the current sandbox permission preset. Use it for compiling LaTeX, running python/R analysis, git status and file conversion. In workspace-write mode only the project folder is writable; a file denial is reported as "[sandbox: ...]" — that is a policy decision, not a broken command. When a denied command genuinely needs wider access, retry the exact same command once with sandbox_permissions plus a one-sentence justification; the approval prompt raised by that retry is how the user consents. In danger-full-access mode the command runs unconfined. Do not install system software, modify permissions or run destructive commands.',
       parameters: {
         command: {
           type: 'string',
@@ -234,6 +293,17 @@ export function apply(ctx, config = {}) {
         timeoutMs: {
           type: 'number',
           description: 'Timeout in milliseconds, default 120000, max 600000.',
+        },
+        sandbox_permissions: {
+          type: 'string',
+          enum: ['workspace-write', 'danger-full-access'],
+          description:
+            'Wider sandbox mode this command needs. Only valid as a one-shot retry of a command the sandbox just denied; requires justification and user approval.',
+        },
+        justification: {
+          type: 'string',
+          description:
+            'Required with sandbox_permissions: one sentence for the user explaining why this exact command needs wider access.',
         },
       },
       output: {
@@ -250,18 +320,94 @@ export function apply(ctx, config = {}) {
         }),
       },
       async execute(args, exec) {
-        return call(
-          `/internal/research/sessions/${encodeURIComponent(sessionIdOf(exec))}/run`,
-          {},
-          {
-            method: 'POST',
-            body: {
-              command: args.command,
-              cwd: args.cwd,
-              timeoutMs: args.timeoutMs,
-            },
-          },
-        )
+        const session = exec.agent?.session
+        const root = session?.header?.cwd
+        if (!session || !root) throw new Error('缺少会话上下文：这个工具只能在研究项目的会话里调用。')
+
+        const text = String(args.command || '').trim()
+        if (!text) throw new Error('命令不能为空。')
+
+        let policy = sandboxPolicy.resolve({ session })
+        if (args.sandbox_permissions) {
+          const target = String(args.sandbox_permissions)
+          const justification = String(args.justification || '').trim()
+          if (!justification) throw new Error('使用 sandbox_permissions 时必须给出 justification。')
+          const wider = WIDER_MODES[policy.mode] || []
+          if (!wider.includes(target)) {
+            throw new Error(`不能从当前 ${policy.mode} 沙箱直接提权到 ${target}。`)
+          }
+          const outcome = await askApproval(
+            exec,
+            `将沙箱从 ${policy.mode} 提升到 ${target}：${justification}`,
+          )
+          if (outcome !== 'allowed-once') throw new Error('用户没有批准这次提权，命令未执行。')
+          policy = { ...policy, mode: target }
+        }
+
+        const workdir = args.cwd ? resolve(root, args.cwd) : root
+        if (policy.mode !== 'danger-full-access' && !withinRoot(root, workdir)) {
+          throw new Error('工作目录必须位于项目工作文件夹内。')
+        }
+
+        const started = Date.now()
+        const runOnce = (nextPolicy) =>
+          shell.run(
+            shell.resolve({
+              command: text,
+              workdir,
+              ...(args.timeoutMs ? { timeoutMs: args.timeoutMs } : {}),
+              sandboxPolicy: nextPolicy,
+              ...(exec.signal ? { signal: exec.signal } : {}),
+            }),
+          )
+
+        let result
+        try {
+          result = await runOnce(policy)
+        } catch (error) {
+          if (!sandboxUnavailable(error) || policy.mode === 'danger-full-access') throw error
+          const outcome = await askApproval(
+            exec,
+            '本机沙箱无法启动，是否以完全权限执行这条命令？',
+          )
+          if (outcome !== 'allowed-once') {
+            throw new Error('沙箱不可用，用户没有批准以完全权限执行。')
+          }
+          policy = { ...policy, mode: 'danger-full-access' }
+          result = await runOnce(policy)
+        }
+
+        if (result.aborted) throw new Error('命令已取消。')
+
+        if (sandboxDenied(result) && policy.mode !== 'danger-full-access') {
+          const mode = result.sandbox?.mode ?? policy.mode
+          const outcome = await askApproval(
+            exec,
+            `命令被 ${mode} 沙箱拒绝，是否以完全权限重新执行？`,
+          )
+          if (outcome === 'allowed-once') {
+            policy = { ...policy, mode: 'danger-full-access' }
+            result = await runOnce(policy)
+          }
+        }
+
+        return {
+          command: text,
+          cwd: workdir === root ? '.' : relative(root, workdir),
+          exitCode: result.exitCode,
+          stdout: result.stdout?.text ?? '',
+          stderr: result.stderr?.text ?? '',
+          truncated: Boolean(result.stdout?.truncated || result.stderr?.truncated),
+          timedOut: Boolean(result.timedOut),
+          durationMs: Date.now() - started,
+          sandbox: result.sandbox
+            ? {
+                mode: result.sandbox.mode,
+                denied: Boolean(result.sandbox.denied),
+                enforcement: result.sandbox.enforcement,
+              }
+            : null,
+        }
       },
       presentCall(args) {
         return {

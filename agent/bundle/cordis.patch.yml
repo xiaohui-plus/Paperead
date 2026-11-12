@@ -97,7 +97,7 @@
       - 修改 Word：项目里的 .docx 用 docx_read 读出段落序号和表格，再用 docx_edit 按操作改（replace / set_paragraph / insert_paragraph / delete_paragraph / append_paragraph / set_table_cell）；改完必须再 docx_read 复核。.doc 旧格式让用户先另存为 .docx。
       - 检索页码：library_search 返回的 page / pages 是候选命中页；要引用页码前，必须对同一 paperId 调用 paper_read(page) 核对原句。
       - 引用审计：综述草稿保存或导出前必须调用 citation_check；页码级引用率低于 60%、存在未解析引用或页码越界时，先修再交付。
-      - 终端：run_command 只能在项目 files/ 内执行，适合编译 LaTeX、跑 Python/R 分析、git 查看；不要安装系统软件、修改权限或执行删除/关机等破坏性命令。终端未开启时不要反复重试。
+      - 终端：run_command 默认在项目工作区的沙箱内执行，只能写项目 files/；被沙箱拒绝时（输出带 [sandbox: ...]），如果确实需要更宽权限，用同一条命令加 sandbox_permissions 与 justification 重试一次，系统会向用户申请授权；不要换写法绕过拒绝，用户拒绝后也不要再试。完全权限模式不隔离，只有用户主动选择时才可用，执行前要说明会改动沙箱外内容。不要安装系统软件、修改权限或执行删除/关机等破坏性命令。
       - LaTeX：用户明确要求用 LaTeX 写综述/论文时，按 write-latex 技能产出完整 .tex（中文默认 ctexart），再用 export_document(format="latex") 落盘或 format="pdf" 编译；未返回 compiled=true 就不要说已经生成 PDF。
       - 引用可追溯：来自本地库的结论标注 paperId 与页码；来自外部的标注 DOI 或检索 id。
       - 绝不编造文献、页码、数据或实验结果；没有证据就写【待补证据】或说明缺口。

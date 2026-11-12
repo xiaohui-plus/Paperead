@@ -6,8 +6,15 @@ import {
   type AgentEvent,
   type ChatState,
   type ChatTurn,
+  type PermissionPreset,
   type ToolCall,
 } from './researchTypes'
+
+const PERMISSION_PRESETS: PermissionPreset[] = [
+  'read-only',
+  'workspace-write',
+  'danger-full-access',
+]
 
 function blankTurn(turn: number, at: number): ChatTurn {
   return {
@@ -230,6 +237,40 @@ export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
       return patchTurn(base, index, (turn) => ({ ...turn, plan: items }))
     }
 
+    case 'approval.request': {
+      const requestId = asText(event.requestId)
+      if (!requestId || base.approvals.some((item) => item.requestId === requestId)) {
+        return base
+      }
+      return {
+        ...base,
+        approvals: [
+          ...base.approvals,
+          {
+            requestId,
+            toolName: asText(event.toolName),
+            callId: typeof event.callId === 'string' ? event.callId : undefined,
+            reason: asText(event.reason) || undefined,
+            at,
+          },
+        ],
+      }
+    }
+
+    case 'approval.resolved': {
+      const requestId = asText(event.requestId)
+      return {
+        ...base,
+        approvals: base.approvals.filter((item) => item.requestId !== requestId),
+      }
+    }
+
+    case 'permission.update': {
+      const preset = asText(event.preset) as PermissionPreset
+      if (!PERMISSION_PRESETS.includes(preset)) return base
+      return { ...base, permission: preset }
+    }
+
     case 'title.update':
       return { ...base, title: asText(event.title) || base.title }
 
@@ -261,6 +302,123 @@ export function applyEvents(state: ChatState, events: AgentEvent[]): ChatState {
   let next = state
   for (const event of events) next = applyEvent(next, event)
   return next
+}
+
+/**
+ * 历史快照的批量归约：把连续的增量事件先合并再归约。
+ *
+ * 长会话里 tool.draft / text.delta 动辄上万条，逐条 upsert 会让参数字符串
+ * 反复拼接、每批都复制工具数组，切换会话时要等十几秒。合并后每条工具/
+ * 每段文本只归约一次，既快又不改变最终显示结果。
+ */
+export function applyHistoryEvents(
+  state: ChatState,
+  events: AgentEvent[],
+): ChatState {
+  let next = state
+  let index = 0
+  while (index < events.length) {
+    const event = events[index]
+    const turn = event.turn ?? 1
+    if (event.type === 'text.delta' || event.type === 'reasoning.delta') {
+      const parts = [asText(event.text)]
+      let last = event
+      let cursor = index + 1
+      while (
+        cursor < events.length &&
+        events[cursor].type === event.type &&
+        (events[cursor].turn ?? 1) === turn
+      ) {
+        last = events[cursor]
+        parts.push(asText(last.text))
+        cursor += 1
+      }
+      next = applyEvent(next, {
+        ...event,
+        text: parts.join(''),
+        seq: last.seq,
+        at: last.at || event.at,
+      })
+      index = cursor
+      continue
+    }
+    if (event.type === 'tool.draft' && event.callId) {
+      const parts = [asText(event.argumentsDelta)]
+      let last = event
+      let cursor = index + 1
+      while (
+        cursor < events.length &&
+        events[cursor].type === 'tool.draft' &&
+        (events[cursor].turn ?? 1) === turn &&
+        events[cursor].callId === event.callId
+      ) {
+        last = events[cursor]
+        parts.push(asText(last.argumentsDelta))
+        cursor += 1
+      }
+      next = applyEvent(next, {
+        ...event,
+        argumentsDelta: parts.join(''),
+        seq: last.seq,
+        at: last.at || event.at,
+      })
+      index = cursor
+      continue
+    }
+    next = applyEvent(next, event)
+    index += 1
+  }
+  return next
+}
+
+/**
+ * 历史回放结束时的状态收敛。
+ *
+ * 历史事件里可能有未配对的 turn.start / tool.start（agent 断流、进程重启），
+ * 直接按实时事件渲染会让旧轮次永远停在“正在思考/运行中”。这里把历史中
+ * 已经不可能再更新的轮次与工具标记为结束；只有会话确实还在跑时，才保留
+ * 最后一个未结束的轮次继续显示运行态。
+ */
+export function finalizeHistory(state: ChatState, active: boolean): ChatState {
+  if (state.turns.length === 0) {
+    return { ...state, running: false }
+  }
+  const lastIndex = state.turns.length - 1
+  const last = state.turns[lastIndex]
+  const stillRunning = active && last.endedAt === null
+  const turns = state.turns.map((turn, index) => {
+    const current = stillRunning && index === lastIndex
+    let keepTool = -1
+    if (current) {
+      for (let i = turn.tools.length - 1; i >= 0; i -= 1) {
+        const status = turn.tools[i].status
+        if (status === 'running' || status === 'draft') {
+          keepTool = i
+          break
+        }
+      }
+    }
+    const settledAt = turn.tools.reduce(
+      (latest, tool) => Math.max(latest, tool.endedAt ?? 0),
+      turn.startedAt,
+    )
+    const tools = turn.tools.map((tool, i) => {
+      if (tool.status !== 'running' && tool.status !== 'draft') return tool
+      if (current && i === keepTool) return tool
+      return { ...tool, status: 'done' as const, endedAt: tool.endedAt ?? settledAt }
+    })
+    if (current) {
+      return tools === turn.tools ? turn : { ...turn, tools }
+    }
+    const endedAt = turn.endedAt ?? settledAt
+    return {
+      ...turn,
+      tools,
+      endedAt,
+      reason: turn.reason ?? 'interrupted',
+    }
+  })
+  return { ...state, turns, running: stillRunning }
 }
 
 /** 发送前的乐观消息：等 message.user 事件到达时原位替换。 */

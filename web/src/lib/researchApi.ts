@@ -2,6 +2,8 @@
 
 import type { AgentEvent } from './researchTypes'
 
+export type { PermissionPreset } from './researchTypes'
+
 export type ProjectKind = 'research' | 'review'
 
 export interface ProjectSummary {
@@ -486,6 +488,17 @@ export const researchApi = {
     await jsonFetch<{ ok: boolean }>(
       `/api/research/sessions/${sessionId}/cancel`,
       { method: 'POST' },
+    )
+  },
+
+  async respondApproval(
+    sessionId: string,
+    requestId: string,
+    outcome: 'allowed-once' | 'rejected',
+  ): Promise<void> {
+    await jsonFetch<{ ok: boolean }>(
+      `/api/research/sessions/${sessionId}/approvals/${encodeURIComponent(requestId)}`,
+      json('POST', { outcome }),
     )
   },
 

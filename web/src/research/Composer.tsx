@@ -12,6 +12,7 @@ import {
 } from '../components/icons'
 import {
   researchApi,
+  type PermissionPreset,
   type ProjectFile,
   type ProjectKind,
   type ResearchCommand,
@@ -46,6 +47,10 @@ interface Props {
   variant?: 'session' | 'home'
   /** 快捷卡片填充：key 变化时把 text 放进输入框。 */
   seed?: { key: number; text: string }
+  /** 当前会话的权限预设（事件流同步）；为空表示该会话还没有记录。 */
+  permission?: PermissionPreset | null
+  /** 空会话时把本地权限偏好下发到该会话。 */
+  empty?: boolean
 }
 
 interface Mention {
@@ -58,28 +63,38 @@ interface Mention {
 
 const MODE_KEY = 'paperead.research.composer'
 
-function loadPrefs(): { mode: ResearchMode; scope: WorkspaceScope } {
+function loadPrefs(): { mode: ResearchMode; permission: PermissionPreset } {
   try {
     const raw = localStorage.getItem(MODE_KEY)
     if (raw) {
-      const value = JSON.parse(raw) as { mode?: string; scope?: string }
+      const value = JSON.parse(raw) as { mode?: string; permission?: string }
+      const permission: PermissionPreset =
+        value.permission === 'read-only' || value.permission === 'danger-full-access'
+          ? value.permission
+          : 'workspace-write'
       return {
         mode: value.mode === 'deep' ? 'deep' : 'standard',
-        scope: value.scope === 'readonly' ? 'readonly' : 'workspace',
+        permission,
       }
     }
   } catch {
     // 忽略损坏的本地配置
   }
-  return { mode: 'standard', scope: 'workspace' }
+  return { mode: 'standard', permission: 'workspace-write' }
 }
 
-function savePrefs(mode: ResearchMode, scope: WorkspaceScope) {
+function savePrefs(mode: ResearchMode, permission: PermissionPreset) {
   try {
-    localStorage.setItem(MODE_KEY, JSON.stringify({ mode, scope }))
+    localStorage.setItem(MODE_KEY, JSON.stringify({ mode, permission }))
   } catch {
     // 隐私模式下写入失败不影响当前会话
   }
+}
+
+const PERMISSION_LABELS: Record<PermissionPreset, string> = {
+  'read-only': '只读分析',
+  'workspace-write': '沙箱执行',
+  'danger-full-access': '完全权限',
 }
 
 function sizeText(size: number): string {
@@ -103,10 +118,18 @@ export function Composer({
   onCommandResult,
   variant = 'session',
   seed,
+  permission,
+  empty = false,
 }: Props) {
   const prefs = useRef(loadPrefs())
   const [mode, setMode] = useState<ResearchMode>(prefs.current.mode)
-  const [scope, setScope] = useState<WorkspaceScope>(prefs.current.scope)
+  const [localPermission, setLocalPermission] = useState<PermissionPreset>(
+    prefs.current.permission,
+  )
+  const [menu, setMenu] = useState<'slash' | 'mention' | 'mode' | 'permission' | null>(null)
+  const [confirming, setConfirming] = useState<PermissionPreset | null>(null)
+  const appliedFor = useRef<string | null>(null)
+  const currentPermission = permission ?? localPermission
   const [draft, setDraft] = useState('')
   const textarea = useRef<HTMLTextAreaElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
@@ -117,7 +140,7 @@ export function Composer({
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState('')
   const [dragging, setDragging] = useState(false)
-  const [menu, setMenu] = useState<'slash' | 'mention' | 'mode' | null>(null)
+
   const [commands, setCommands] = useState<ResearchCommand[]>([])
   const [commandError, setCommandError] = useState('')
   const [candidates, setCandidates] = useState<Mention[]>([])
@@ -176,15 +199,40 @@ export function Composer({
 
   const changeMode = (next: ResearchMode) => {
     setMode(next)
-    savePrefs(next, scope)
+    savePrefs(next, localPermission)
     setMenu(null)
   }
 
-  const toggleScope = () => {
-    const next: WorkspaceScope = scope === 'workspace' ? 'readonly' : 'workspace'
-    setScope(next)
+  const changePermission = async (next: PermissionPreset) => {
+    setMenu(null)
+    setConfirming(null)
+    setLocalPermission(next)
+    prefs.current.permission = next
     savePrefs(mode, next)
+    if (!sessionId) return
+    try {
+      const result = await researchApi.runCommand(sessionId, `/permission ${next}`)
+      if (result.event) onCommandResult?.(result.event)
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : '切换权限失败')
+    }
   }
+
+  useEffect(() => {
+    if (!sessionId || !empty || appliedFor.current === sessionId) return
+    appliedFor.current = sessionId
+    if (permission) return
+    const pref = prefs.current.permission
+    if (pref === 'workspace-write') return
+    void researchApi
+      .runCommand(sessionId, `/permission ${pref}`)
+      .then((result) => {
+        if (result.event) onCommandResult?.(result.event)
+      })
+      .catch(() => {
+        // 空会话下发偏好失败不打扰用户，发送后仍可手动切换
+      })
+  }, [sessionId, empty, permission, onCommandResult])
 
   const addFiles = async (files: File[]) => {
     if (!projectId || files.length === 0) return
@@ -342,6 +390,8 @@ export function Composer({
     setUploadError('')
     setCommandError('')
     tourBus.emit('composer:message-sent', { text })
+    const scope: WorkspaceScope =
+      currentPermission === 'read-only' ? 'readonly' : 'workspace'
     onSend(body, { mode, scope })
   }
 
@@ -352,7 +402,7 @@ export function Composer({
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.nativeEvent.isComposing) return
     const list = menu ? options() : []
-    if (menu && menu !== 'mode') {
+    if (menu && menu !== 'mode' && menu !== 'permission') {
       if (event.key === 'ArrowDown') {
         event.preventDefault()
         setActive((prev) => (list.length ? (prev + 1) % list.length : 0))
@@ -578,15 +628,67 @@ export function Composer({
                 </button>
               </>
             )}
-            <button
-              type="button"
-              className={`rc-scope${scope === 'readonly' ? ' is-readonly' : ''}`}
-              title={scope === 'readonly' ? '当前只读，点击允许写工作区' : '当前允许写工作区'}
-              onClick={toggleScope}
-            >
-              <IconShield />
-              {scope === 'readonly' ? '只读分析' : '工作区内修改'}
-            </button>
+            <div className="rc-mode-wrap">
+              <button
+                type="button"
+                className={`rc-mode${currentPermission === 'danger-full-access' ? ' is-danger' : ''}`}
+                title="切换终端与工作区权限"
+                onClick={() => {
+                  setConfirming(null)
+                  setMenu(menu === 'permission' ? null : 'permission')
+                }}
+              >
+                <IconShield />
+                <span>{PERMISSION_LABELS[currentPermission]}</span>
+                <IconChevronDown />
+              </button>
+              {menu === 'permission' && (
+                <div className="rc-menu rc-mode-menu is-up">
+                  <button
+                    type="button"
+                    className={`rc-option${currentPermission === 'read-only' ? ' is-active' : ''}`}
+                    onClick={() => void changePermission('read-only')}
+                  >
+                    <span className="rc-option-label">只读分析</span>
+                    <span className="rc-option-detail">可运行命令，但不能写项目文件</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`rc-option${currentPermission === 'workspace-write' ? ' is-active' : ''}`}
+                    onClick={() => void changePermission('workspace-write')}
+                  >
+                    <span className="rc-option-label">沙箱执行</span>
+                    <span className="rc-option-detail">仅项目文件夹可写，越界时向你申请</span>
+                  </button>
+                  {confirming === 'danger-full-access' ? (
+                    <div className="rc-risk">
+                      <p>完全权限会关闭沙箱，命令可读写项目文件夹之外的位置。</p>
+                      <div className="rc-risk-actions">
+                        <button type="button" onClick={() => setConfirming(null)}>
+                          取消
+                        </button>
+                        <button
+                          type="button"
+                          className="is-primary"
+                          onClick={() => void changePermission('danger-full-access')}
+                        >
+                          确认启用
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      className={`rc-option${currentPermission === 'danger-full-access' ? ' is-active' : ''}`}
+                      onClick={() => setConfirming('danger-full-access')}
+                    >
+                      <span className="rc-option-label">完全权限</span>
+                      <span className="rc-option-detail">关闭沙箱，可读写任意位置</span>
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
             <button
               type="button"
               className="rc-icon"

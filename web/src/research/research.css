@@ -3135,27 +3135,131 @@
   opacity: 0.5;
 }
 
-.rc-scope {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 27px;
-  padding: 0 8px;
-  border: 1px solid transparent;
+.rc-mode.is-danger {
+  color: var(--red, #dc2626);
+}
+
+.rc-risk {
+  margin: 4px 2px 2px;
+  padding: 9px 10px;
+  border: 1px solid var(--line-2, #e3e5e8);
+  border-radius: 10px;
+  background: var(--bg-2, #f7f8fa);
+}
+
+.rc-risk p {
+  margin: 0 0 8px;
+  color: var(--text-2, #4b5563);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.rc-risk-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.rc-risk-actions button {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--line-2, #e3e5e8);
   border-radius: 8px;
-  background: transparent;
-  color: var(--text-2, #6b7280);
+  background: var(--bg, #fff);
+  color: var(--text-2, #4b5563);
   font-size: 11.5px;
   cursor: pointer;
 }
 
-.rc-scope:hover {
-  background: var(--bg-2, #f3f4f6);
+.rc-risk-actions button.is-primary {
+  color: var(--red, #dc2626);
+  border-color: var(--line-3, #cfd3d9);
 }
 
-.rc-scope.is-readonly {
-  border-color: var(--line-2, #e3e5e8);
+/* ── 权限申请卡片（替换输入框） ─────────────────────────── */
+
+.approval {
+  width: 100%;
+}
+
+.approval-card {
+  border: 1px solid var(--line-2, #e3e5e8);
+  border-radius: 16px;
+  background: var(--bg, #fff);
+  padding: 12px 14px 10px;
+  box-shadow: 0 1px 2px rgba(17, 24, 39, 0.04);
+}
+
+.approval-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   color: var(--text-2, #4b5563);
+  font-size: 12px;
+}
+
+.approval-icon {
+  display: inline-flex;
+  color: var(--amber, #b45309);
+}
+
+.approval-reason {
+  margin: 8px 0 0;
+  color: var(--text, #1f2328);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.approval-command {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg-2, #f7f8fa);
+  color: var(--text-2, #4b5563);
+  font-size: 11.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.approval-error {
+  margin: 6px 0 0;
+  color: var(--red, #dc2626);
+  font-size: 11.5px;
+}
+
+.approval-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.approval-btn {
+  height: 30px;
+  padding: 0 14px;
+  border: 1px solid var(--line-2, #e3e5e8);
+  border-radius: 9px;
+  background: var(--bg, #fff);
+  color: var(--text-2, #4b5563);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.approval-btn:hover {
+  border-color: var(--line-3, #cfd3d9);
+  color: var(--text, #1f2328);
+}
+
+.approval-btn.is-primary {
+  border-color: var(--line-3, #cfd3d9);
+  color: var(--text, #1f2328);
+  font-weight: 500;
+}
+
+.approval-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 .rc-hint {

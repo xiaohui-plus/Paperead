@@ -106,6 +106,10 @@ class CommandIn(BaseModel):
     line: str
 
 
+class ApprovalIn(BaseModel):
+    outcome: str
+
+
 def _sse(event: dict[str, Any]) -> str:
     body = json.dumps(event, ensure_ascii=False)
     return f"id: {event['seq']}\ndata: {body}\n\n"
@@ -1019,6 +1023,19 @@ def build_router(
         )
         return {"ok": True, "event": event}
 
+    @router.post("/sessions/{session_id}/approvals/{request_id}")
+    async def respond_session_approval(
+        session_id: str, request_id: str, body: ApprovalIn
+    ) -> dict[str, Any]:
+        _session_or_404(session_id)
+        if body.outcome not in {"allowed-once", "rejected"}:
+            raise HTTPException(status_code=400, detail="无效的审批结果")
+        try:
+            await agent_client.respond_approval(session_id, request_id, body.outcome)
+        except agent_client.AgentUnavailable as error:
+            raise HTTPException(status_code=503, detail="AGENT_UNAVAILABLE") from error
+        return {"ok": True, "requestId": request_id, "outcome": body.outcome}
+
     @router.post("/sessions/{session_id}/messages", status_code=202)
     async def post_message(session_id: str, body: MessageIn) -> dict[str, Any]:
         session = _session_or_404(session_id)
@@ -1118,9 +1135,28 @@ def build_router(
 
         async def relay() -> Any:
             cursor = after
-            for event in store.list_events(session_id, cursor):
-                cursor = event["seq"]
-                yield _sse(event)
+            # 历史一次性连续读完：按批取库但不插 sleep，避免大会话被拆成
+            # 十几秒的“重新播放”，前端也无法判断历史到底到哪结束。
+            while True:
+                batch = store.list_events(session_id, cursor)
+                if not batch:
+                    break
+                for event in batch:
+                    cursor = event["seq"]
+                    yield _sse(event)
+                await asyncio.sleep(0)
+
+            # 历史回放与实时事件的边界（不落库）：前端据此把历史一次性
+            # 渲染成最终状态，不要把旧思考过程当成新一轮输出重放。
+            yield _sse(
+                {
+                    "seq": 0,
+                    "at": int(time.time() * 1000),
+                    "type": "replay.end",
+                    "lastSeq": cursor,
+                    "running": pump.running(session_id),
+                }
+            )
 
             if not agent_client.available():
                 yield await replay_notice(OFFLINE_NOTICE["text"])

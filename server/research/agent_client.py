@@ -104,6 +104,17 @@ async def run_command(session_id: str, line: str) -> dict[str, Any]:
     )
 
 
+async def respond_approval(
+    session_id: str, request_id: str, outcome: str
+) -> dict[str, Any]:
+    """把用户对一次权限申请的答复送回 agent，阻塞中的工具调用会继续。"""
+    return await post_json(
+        f"/v1/sessions/{session_id}/approvals/{request_id}",
+        {"outcome": outcome},
+        timeout=20,
+    )
+
+
 async def stream_events(session_id: str, after: int) -> AsyncIterator[dict[str, Any]]:
     """订阅 agent SSE，逐条产出事件字典；连接异常统一抛 AgentUnavailable。"""
     base, token = agent_target()

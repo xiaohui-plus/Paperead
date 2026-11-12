@@ -5,6 +5,7 @@
  * one echo tool. Later phases add the project brief, real tools and the Python
  * proxy; the wire shape here is already the one the React client consumes.
  */
+import { randomUUID } from 'node:crypto'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
 export const name = 'research-host'
@@ -12,6 +13,8 @@ export const inject = ['webServer', 'agents', 'commands']
 
 const MAX_BODY_BYTES = 1_000_000
 const MAX_HISTORY = 2_000
+// 审批是同步阻塞的一轮工具调用：用户没在时限内回答就按 dsh 的 fail-closed 处理。
+const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000
 
 function json(res, status, value) {
   const body = JSON.stringify(value)
@@ -106,6 +109,42 @@ export function apply(ctx, config = {}) {
     return framed
   }
 
+  const approvals = new Map()
+
+  // dsh 的 approval 服务在没有应答者时一律 fail-closed（unavailable）。
+  // 这里把提问接到产品 UI：agent 侧保持工具调用挂起，用户回答后继续同一轮。
+  ctx.on('approval/request', (req, next) => {
+    const session = req?.agent?.session
+    if (!session) return next()
+    if (req.signal?.aborted) return Promise.resolve('cancelled')
+
+    const requestId = randomUUID()
+    const sid = session.id
+    emit(sid, {
+      type: 'approval.request',
+      requestId,
+      toolName: req.toolName,
+      callId: req.callId,
+      reason: req.reason,
+    })
+
+    return new Promise((resolve) => {
+      const settle = (outcome) => {
+        const entry = approvals.get(requestId)
+        if (!entry) return
+        approvals.delete(requestId)
+        clearTimeout(entry.timer)
+        req.signal?.removeEventListener('abort', entry.onAbort)
+        emit(sid, { type: 'approval.resolved', requestId, outcome })
+        resolve(outcome)
+      }
+      const onAbort = () => settle('cancelled')
+      const timer = setTimeout(() => settle('unavailable'), APPROVAL_TIMEOUT_MS)
+      approvals.set(requestId, { sessionId: sid, settle, timer, onAbort })
+      req.signal?.addEventListener('abort', onAbort, { once: true })
+    })
+  })
+
   // DSH publishes the same durable event stream the session log records. The
   // mapping below is intentionally lossless enough for the spike UI and becomes
   // the canonical projection in A4.
@@ -175,6 +214,9 @@ export function apply(ctx, config = {}) {
       }
       case 'todo/write':
         emit(sid, { type: 'plan.update', items: event.data.todos })
+        break
+      case 'permission/preset':
+        emit(sid, { type: 'permission.update', preset: event.data.preset })
         break
       case 'session/title':
         emit(sid, {
@@ -335,6 +377,28 @@ export function apply(ctx, config = {}) {
         if (!agent) return json(res, 404, { error: 'session not found' })
         agent.cancel({ kind: 'user' })
         return json(res, 202, { sessionId, cancelled: true })
+      }
+
+      const approvalMatch = pathname.match(/^\/v1\/sessions\/([^/]+)\/approvals\/([^/]+)$/)
+      if (approvalMatch && req.method === 'POST') {
+        const sessionId = decodeURIComponent(approvalMatch[1])
+        const requestId = decodeURIComponent(approvalMatch[2])
+        const entry = approvals.get(requestId)
+        if (!entry || entry.sessionId !== sessionId) {
+          return json(res, 404, { error: 'approval not found' })
+        }
+        try {
+          const body = await readJson(req)
+          const outcome =
+            body.outcome === 'allowed-once' || body.outcome === 'rejected'
+              ? body.outcome
+              : ''
+          if (!outcome) return json(res, 400, { error: 'invalid outcome' })
+          entry.settle(outcome)
+          return json(res, 200, { ok: true, requestId, outcome })
+        } catch (error) {
+          return json(res, 400, { error: String(error?.message || error) })
+        }
       }
 
       const eventsMatch = pathname.match(/^\/v1\/sessions\/([^/]+)\/events$/)

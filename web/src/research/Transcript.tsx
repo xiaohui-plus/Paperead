@@ -6,6 +6,8 @@ import { TurnBlock } from './TurnBlock'
 interface Props {
   chat: ChatState
   now: number
+  /** 历史快照还在加载：不要把空会话文案误显示成“开始这段会话”。 */
+  loading?: boolean
 }
 
 type Row =
@@ -40,7 +42,7 @@ function buildRows(chat: ChatState): Row[] {
 }
 
 /** 转写：用户消息 → 助手轮次；只有停在底部时才自动跟随。 */
-export function Transcript({ chat, now }: Props) {
+export function Transcript({ chat, now, loading = false }: Props) {
   const scroller = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
   const rows = useMemo(() => buildRows(chat), [chat])
@@ -58,6 +60,15 @@ export function Transcript({ chat, now }: Props) {
     if (!element) return
     stick.current =
       element.scrollHeight - element.scrollTop - element.clientHeight < 140
+  }
+
+  if (loading && rows.length === 0 && chat.notices.length === 0) {
+    return (
+      <div className="project-transcript" data-loading="true">
+        <IconChat />
+        <p>正在加载会话历史…</p>
+      </div>
+    )
   }
 
   if (rows.length === 0 && chat.notices.length === 0) {

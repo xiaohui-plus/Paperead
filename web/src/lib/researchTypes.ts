@@ -35,6 +35,26 @@ export interface AgentEvent {
   mode?: string
   scope?: string
   line?: string
+  /** replay.end：历史回放结束时的最后一条 seq。 */
+  lastSeq?: number
+  /** replay.end：该会话此刻是否仍有正在运行的轮次。 */
+  running?: boolean
+  /** 权限申请：agent 侧一次待回答的授权请求。 */
+  requestId?: string
+  toolName?: string
+  preset?: string
+  outcome?: string
+}
+
+/** 与 dsh 的权限预设一一对应：沙箱模式 + 审批策略。 */
+export type PermissionPreset = 'read-only' | 'workspace-write' | 'danger-full-access'
+
+export interface PendingApproval {
+  requestId: string
+  toolName: string
+  callId?: string
+  reason?: string
+  at: number
 }
 
 export type ToolStatus = 'draft' | 'running' | 'done' | 'error'
@@ -91,6 +111,10 @@ export interface ChatState {
   title: string | null
   running: boolean
   offline: boolean
+  /** 当前会话的权限预设；旧会话没有该事件时为 null。 */
+  permission: PermissionPreset | null
+  /** 正在等待用户回答的授权请求。 */
+  approvals: PendingApproval[]
 }
 
 export const EMPTY_CHAT: ChatState = {
@@ -101,6 +125,8 @@ export const EMPTY_CHAT: ChatState = {
   title: null,
   running: false,
   offline: false,
+  permission: null,
+  approvals: [],
 }
 
 /**

@@ -288,6 +288,50 @@ def test_api_session_events_without_agent(
     assert "你好" in events.text
 
 
+def test_api_session_events_replay_boundary(
+    client: TestClient, store: ResearchStore, monkeypatch
+):
+    """切换会话时历史必须一次发完，并有明确的 replay.end 边界。"""
+    monkeypatch.delenv("PAPEREAD_AGENT_PORT", raising=False)
+    project = client.post("/api/research/projects", json={"kind": "research"}).json()
+    session = client.post(
+        f"/api/research/projects/{project['id']}/sessions", json={}
+    ).json()
+
+    # 超过 list_events 的单批 2000 条，验证历史不会被拆成多轮推送。
+    for index in range(2005):
+        store.append_event(
+            session["id"],
+            {"type": "text.delta", "turn": 1, "text": str(index), "at": index + 1},
+        )
+
+    with client.stream(
+        "GET", f"/api/research/sessions/{session['id']}/events"
+    ) as response:
+        assert response.status_code == 200
+        body = "".join(response.iter_text())
+
+    events = [
+        json.loads(line[len("data: ") :])
+        for line in body.splitlines()
+        if line.startswith("data: ")
+    ]
+    deltas = [event for event in events if event["type"] == "text.delta"]
+    assert len(deltas) == 2005
+    assert [event["text"] for event in deltas] == [str(index) for index in range(2005)]
+
+    replay = next(event for event in events if event["type"] == "replay.end")
+    assert replay["lastSeq"] == deltas[-1]["seq"]
+    assert replay["running"] is False
+    # 边界必须落在全部历史之后、离线提示之前。
+    assert events.index(replay) == len(deltas)
+    assert events[-1]["code"] == "agent.offline"
+    # 边界事件只存在于连接内，不落库。
+    assert all(
+        row["type"] != "replay.end" for row in store.list_events(session["id"])
+    )
+
+
 def test_background_pump_records_without_sse(
     client: TestClient, store: ResearchStore, monkeypatch
 ):
@@ -530,3 +574,37 @@ def test_api_purge_project_deletes_everything(
     assert client.delete(
         f"/api/research/projects/{project_id}/purge"
     ).status_code == 404
+
+def test_api_session_approval_forwards_outcome(
+    client: TestClient, store: ResearchStore, monkeypatch
+):
+    project_id = store.create_project("research", "权限申请")["id"]
+    session_id = store.create_session(project_id)["id"]
+    calls: list[tuple[str, str, str]] = []
+
+    async def fake_respond(session, request, outcome):
+        calls.append((session, request, outcome))
+        return {"ok": True}
+
+    monkeypatch.setattr(agent_client, "respond_approval", fake_respond)
+
+    response = client.post(
+        f"/api/research/sessions/{session_id}/approvals/req-1",
+        json={"outcome": "allowed-once"},
+    )
+    assert response.status_code == 200
+    assert response.json()["outcome"] == "allowed-once"
+    assert calls == [(session_id, "req-1", "allowed-once")]
+
+    rejected = client.post(
+        f"/api/research/sessions/{session_id}/approvals/req-2",
+        json={"outcome": "rejected"},
+    )
+    assert rejected.status_code == 200
+    assert calls[-1] == (session_id, "req-2", "rejected")
+
+    invalid = client.post(
+        f"/api/research/sessions/{session_id}/approvals/req-3",
+        json={"outcome": "deny"},
+    )
+    assert invalid.status_code == 400
