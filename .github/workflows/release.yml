@@ -113,6 +113,8 @@ jobs:
 
             ## Android（arm64）
 
+            > 本轮随附 APK 时才有以下内容；只发 Windows 时请删除本节。
+
             - APK：`Paperead_*_android-arm64.apk`（Android 8.0 / API 24 及以上，arm64 设备）
             - 自动更新清单：`android.json`（仅 Android 使用）
             - 手机端是「内置前端 + 连电脑后端」：先在电脑上运行 Paperead 桌面版，
