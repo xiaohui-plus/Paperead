@@ -522,7 +522,7 @@
 }
 
 .project-title {
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
   padding: 5px 8px;
   border: 0;
@@ -535,6 +535,27 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: text;
+}
+
+/* 当前会话标题：跟在项目名后面、靠顶栏右侧单行显示，不另起一行。 */
+.project-head-session {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 46%;
+  margin-left: auto;
+}
+
+.project-head-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: var(--faint);
 }
 
 .project-title:hover {
@@ -808,8 +829,8 @@
 .project-tree-toolbar button {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  padding: 3px 6px;
+  justify-content: center;
+  padding: 4px 6px;
   border: 0;
   border-radius: 5px;
   background: transparent;
@@ -822,10 +843,6 @@
 .project-tree-toolbar button:hover {
   background: var(--bg-hover);
   color: var(--ink-2);
-}
-
-.project-tree-toolbar button.is-danger {
-  color: #dc2626;
 }
 
 .project-tree-toolbar em {
@@ -1199,25 +1216,6 @@
   padding: 22px clamp(20px, 4vw, 44px) 18px;
 }
 
-.project-session-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--line);
-}
-
-.project-session-head h2 {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
-}
-
-.project-session-head span {
-  font-size: 11.5px;
-  color: var(--faint);
-}
 
 .project-transcript {
   flex: 1;
@@ -1691,14 +1689,6 @@
 
 /* ── 会话转写（A4/A5） ─────────────────────────────── */
 
-.session-head-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: none;
-  font-size: 11.5px;
-  color: var(--faint);
-}
 
 .session-retry {
   padding: 3px 10px;
@@ -1716,6 +1706,10 @@
 }
 
 .session-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   margin: 10px 0 0;
   padding: 8px 12px;
   border: 1px solid var(--line);
@@ -1756,11 +1750,14 @@
 
 .chat-message {
   display: flex;
-  justify-content: flex-end;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
 }
 
 .chat-bubble {
   max-width: min(86%, 640px);
+  min-height: 0;
   padding: 9px 13px;
   border-radius: 14px 14px 4px 14px;
   background: var(--ink);
@@ -1769,6 +1766,25 @@
   line-height: 1.75;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.chat-bubble.is-collapsed {
+  max-height: 180px;
+  overflow: hidden;
+}
+
+.chat-bubble-toggle {
+  padding: 1px 4px;
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+  font-size: 11.5px;
+  line-height: 1.6;
+  cursor: pointer;
+}
+
+.chat-bubble-toggle:hover {
+  color: var(--ink-2);
 }
 
 .chat-notice {
@@ -2500,17 +2516,6 @@
     padding: 14px;
   }
 
-  .project-session-head {
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-
-  .project-session-head h2 {
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
 }
 
 @media (max-width: 640px) {
@@ -2556,9 +2561,6 @@
     padding: 12px;
   }
 
-  .session-head-meta {
-    font-size: 11px;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -3374,21 +3376,6 @@
   box-shadow: none;
 }
 
-.chat-message-tags {
-  display: flex;
-  gap: 6px;
-  margin-bottom: 4px;
-  justify-content: flex-end;
-}
-
-.chat-message-tags span {
-  padding: 1px 7px;
-  border: 1px solid var(--line-2, #e3e5e8);
-  border-radius: 999px;
-  background: var(--bg, #fff);
-  color: var(--faint, #9aa1ab);
-  font-size: 10.5px;
-}
 
 @media (max-width: 640px) {
   .rc-foot {

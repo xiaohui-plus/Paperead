@@ -1085,11 +1085,16 @@ def build_router(
 
         cwd = _workspace(session)
         try:
-            await agent_client.ensure_session(session_id, cwd)
-            # 订阅先于发送建立：即使页面立刻关掉，后台任务也会把回复落库。
-            # shield 避免浏览器中断 POST 时把 restart 一起取消，导致这一轮没有后台泵。
-            await asyncio.shield(pump.restart(session_id, cwd))
-            await agent_client.send_message(session_id, agent_text, cwd)
+            async def deliver() -> None:
+                await agent_client.ensure_session(session_id, cwd)
+                # 订阅先于发送建立：即使页面立刻关掉，后台任务也会把回复落库。
+                # shield 避免浏览器中断 POST 时把 restart 一起取消，导致这一轮没有后台泵。
+                await asyncio.shield(pump.restart(session_id, cwd))
+                await agent_client.send_message(session_id, agent_text, cwd)
+
+            # 整段投递也 shield：用户发送后立刻切换会话/页面时，Starlette 会
+            # 取消这个请求任务；不能让它把“消息是否真正送达 agent”一起取消。
+            await asyncio.shield(deliver())
         except agent_client.AgentUnavailable as error:
             store.append_event(
                 session_id,

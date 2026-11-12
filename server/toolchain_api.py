@@ -23,6 +23,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from server.research import pandoc_setup
 from server.research.latex import find_winget, toolchain_status
+from server.winproc import popen_hidden
 
 router = APIRouter(prefix="/api/toolchain", tags=["toolchain"])
 
@@ -117,7 +118,7 @@ def _run_install(job_id: str) -> None:
     ]
     _append(job, "$ " + " ".join(command))
     try:
-        proc = subprocess.Popen(
+        proc = popen_hidden(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -125,7 +126,6 @@ def _run_install(job_id: str) -> None:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         assert proc.stdout is not None
         for line in proc.stdout:

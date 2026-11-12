@@ -131,6 +131,9 @@ export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
 
     case 'command.result': {
       const name = asText(event.name)
+      // 权限切换由输入框底部控件直接呈现，不再额外插一条
+      // “/permission · preset …” 的运行日志。
+      if (name === 'permission') return base
       const text = asText(event.text)
       return {
         ...base,

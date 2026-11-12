@@ -24,6 +24,11 @@ import { ProjectExplorer } from './ProjectExplorer'
 import { ProjectFileTree } from './ProjectFileTree'
 import { FilePreview, LocalFilePreview } from './preview/FilePreview'
 import { SessionView } from './SessionView'
+import {
+  dropProjectCache,
+  readProjectCache,
+  writeProjectCache,
+} from './researchCache'
 import { tourBus } from '../tour/tourBus'
 
 interface Props {
@@ -76,12 +81,23 @@ export function ProjectPage({
   onBack,
   onSelectSession,
 }: Props) {
-  const [project, setProject] = useState<ProjectSummary | null>(null)
-  const [files, setFiles] = useState<ProjectFile[]>([])
-  const [artifacts, setArtifacts] = useState<ArtifactSummary[]>([])
-  const [sessions, setSessions] = useState<SessionSummary[]>([])
-  const [loading, setLoading] = useState(true)
+  /** 上次离开时的项目快照：命中的话项目页与会话正文都能直接显示。 */
+  const snapshot = useRef(readProjectCache(projectId)).current
+  const [project, setProject] = useState<ProjectSummary | null>(
+    snapshot?.project ?? null,
+  )
+  const [files, setFiles] = useState<ProjectFile[]>(snapshot?.files ?? [])
+  const [artifacts, setArtifacts] = useState<ArtifactSummary[]>(
+    snapshot?.artifacts ?? [],
+  )
+  const [sessions, setSessions] = useState<SessionSummary[]>(
+    snapshot?.sessions ?? [],
+  )
+  const [loading, setLoading] = useState(!snapshot)
   const [error, setError] = useState<string | null>(null)
+  const [sessionTitle, setSessionTitle] = useState<string | null>(
+    snapshot?.sessions.find((item) => item.id === sessionId)?.title ?? null,
+  )
 
   const [tab, setTab] = useState<Tab>('sessions')
   // 手机端：文件/会话栏是抽屉，默认收起，把高度留给会话正文
@@ -121,7 +137,7 @@ export function ProjectPage({
 
   useEffect(() => {
     let alive = true
-    setLoading(true)
+    if (!snapshot) setLoading(true)
     setError(null)
     Promise.all([
       researchApi.getProject(projectId),
@@ -148,6 +164,21 @@ export function ProjectPage({
       alive = false
     }
   }, [projectId, initialRename])
+
+  // 切到别的会话时先用列表标题占位，正文加载后会由 SessionView 上报更准确
+  // 的标题；列表后续的 running 更新不覆盖它。
+  useEffect(() => {
+    setSessionTitle(
+      sessions.find((item) => item.id === sessionId)?.title ?? null,
+    )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId])
+
+  // 保留最近一次的项目快照，切回文献库/阅读页再回来时不必重新等接口。
+  useEffect(() => {
+    if (loading || !project) return
+    writeProjectCache(projectId, { project, files, sessions, artifacts })
+  }, [projectId, loading, project, files, sessions, artifacts])
 
   useEffect(() => {
     if (!renaming) return
@@ -259,6 +290,7 @@ export function ProjectPage({
     setMenuOpen(false)
     try {
       await researchApi.archiveProject(project.id)
+      dropProjectCache(project.id)
       onBack(project.kind)
     } catch (archiveError) {
       setError(errorText(archiveError))
@@ -275,6 +307,7 @@ export function ProjectPage({
     if (!ok) return
     try {
       await researchApi.purgeProject(project.id)
+      dropProjectCache(project.id)
       onBack(project.kind)
     } catch (purgeError) {
       setError(errorText(purgeError))
@@ -570,6 +603,18 @@ export function ProjectPage({
           <IconFolder />
         </button>
 
+        {selectedSession && (
+          <div className="project-head-session">
+            {selectedSession.running && <i className="project-running" />}
+            <span
+              className="project-head-title"
+              title={sessionTitle ?? undefined}
+            >
+              {sessionTitle}
+            </span>
+          </div>
+        )}
+
         <div className="project-head-actions">
           <button
             className="icon-btn"
@@ -813,6 +858,7 @@ export function ProjectPage({
                 onInitialTextConsumed?.()
               }}
               onMeta={updateSessionMeta}
+              onTitle={setSessionTitle}
               kind={project?.kind ?? 'research'}
               onFilesUploaded={(uploaded) =>
                 setFiles((prev) => [...prev, ...uploaded])

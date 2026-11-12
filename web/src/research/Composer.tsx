@@ -127,12 +127,18 @@ export function Composer({
     prefs.current.permission,
   )
   const [menu, setMenu] = useState<'slash' | 'mention' | 'mode' | 'permission' | null>(null)
+  const [suggestPlacement, setSuggestPlacement] = useState({
+    up: true,
+    maxHeight: 300,
+  })
   const [confirming, setConfirming] = useState<PermissionPreset | null>(null)
   const appliedFor = useRef<string | null>(null)
   const currentPermission = permission ?? localPermission
   const [draft, setDraft] = useState('')
   const textarea = useRef<HTMLTextAreaElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
+  const box = useRef<HTMLDivElement>(null)
+  const mentionTimer = useRef<number | undefined>(undefined)
   const [models, setModels] = useState<ModelProfile[]>(() => listResearchModels())
   const [model, setModel] = useState<ModelProfile | null>(() => selectedResearchModel())
   const [attachments, setAttachments] = useState<ProjectFile[]>([])
@@ -295,16 +301,82 @@ export function Composer({
     setActive(0)
   }
 
+  /** 候选层优先放在空间更大的一侧，避免在页面中部时被视口顶部裁掉。 */
+  const placeSuggest = () => {
+    const el = box.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    const above = Math.max(0, rect.top - 16)
+    const below = Math.max(0, window.innerHeight - rect.bottom - 16)
+    const up = above >= below
+    setSuggestPlacement({
+      up,
+      maxHeight: Math.max(140, Math.min(300, up ? above : below)),
+    })
+  }
+
   const openMenu = (next: 'slash' | 'mention', query: string) => {
+    placeSuggest()
     setMenu(next)
     setCommandError('')
     if (next === 'mention') void loadMentions(query)
     setActive(0)
   }
 
+  const clearMentionTimer = () => {
+    if (mentionTimer.current !== undefined) {
+      window.clearTimeout(mentionTimer.current)
+      mentionTimer.current = undefined
+    }
+  }
+
+  /** 悬停 @ 略作停留就展开引用候选，不用先点一下。 */
+  const openMentionOnHover = () => {
+    if (menu === 'mention') return
+    clearMentionTimer()
+    mentionTimer.current = window.setTimeout(() => {
+      mentionTimer.current = undefined
+      placeSuggest()
+      void loadMentions('')
+      setMenu((prev) => prev ?? 'mention')
+    }, 140)
+  }
+
+  /** 离开按钮或菜单后延时收起，留出鼠标移进菜单的时间。 */
+  const closeMentionSoon = () => {
+    clearMentionTimer()
+    mentionTimer.current = window.setTimeout(() => {
+      mentionTimer.current = undefined
+      setMenu((prev) => (prev === 'mention' ? null : prev))
+    }, 350)
+  }
+
+  // 点击输入框、发送、附件、模型或页面其它地方都收起 @ 候选；
+  // 只放过触发按钮和菜单本身，避免和按钮自身的 toggle 互相抢事件。
+  useEffect(() => {
+    if (!menu) return
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Element | null
+      if (!target) return
+      if (target.closest('.rc-menu') || target.closest('[data-menu-trigger]')) return
+      setMenu(null)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => document.removeEventListener('pointerdown', onPointerDown)
+  }, [menu])
+
+  useEffect(() => () => clearMentionTimer(), [])
+
   const insertMention = (item: Mention) => {
     const token = `@${item.name}`
-    setDraft((prev) => prev.replace(/@[^\s@]*$/, `${token} `))
+    setDraft((prev) => {
+      if (/@[^\s@]*$/.test(prev)) {
+        return prev.replace(/@[^\s@]*$/, `${token} `)
+      }
+      // 用 @ 按钮或悬停打开候选时，草稿里没有 @ 前缀，直接追加引用。
+      const gap = prev && !/\s$/.test(prev) ? ' ' : ''
+      return `${prev}${gap}${token} `
+    })
     setMentions((prev) =>
       prev.some((one) => one.key === item.key) ? prev : [...prev, item],
     )
@@ -449,17 +521,12 @@ export function Composer({
     if (menu === 'mention' || menu === 'slash') setMenu(null)
   }
 
-  const hintText =
-    hint ??
-    (running
-      ? '正在研究，可随时停止'
-      : touch
-        ? '点发送开始，回车换行'
-        : 'Enter 发送 · Shift+Enter 换行 · / 指令 · @ 引用')
+  const hintText = hint ?? ''
 
   return (
     <div className={`rc${variant === 'home' ? ' rc-home' : ''}`} data-tour="composer">
       <div
+        ref={box}
         className={`rc-box${dragging ? ' is-dragging' : ''}`}
         onDragOver={(event) => {
           if (!projectId) return
@@ -544,7 +611,17 @@ export function Composer({
         />
 
         {menu && menu !== 'mode' && (
-          <div className="rc-menu rc-suggest" role="listbox">
+          <div
+            className="rc-menu rc-suggest"
+            style={{
+              top: suggestPlacement.up ? 'auto' : 'calc(100% + 6px)',
+              bottom: suggestPlacement.up ? 'calc(100% + 6px)' : 'auto',
+              maxHeight: suggestPlacement.maxHeight,
+            }}
+            role="listbox"
+            onMouseEnter={menu === 'mention' ? clearMentionTimer : undefined}
+            onMouseLeave={menu === 'mention' ? closeMentionSoon : undefined}
+          >
             {options().length === 0 ? (
               <p className="rc-empty">
                 {menu === 'slash'
@@ -578,10 +655,10 @@ export function Composer({
                 type="button"
                 className="rc-mode"
                 title="切换研究模式"
+                data-menu-trigger
                 onClick={() => setMenu(menu === 'mode' ? null : 'mode')}
               >
                 <IconShield />
-                <span>{mode === 'deep' ? '深度研究' : '标准模式'}</span>
                 <IconChevronDown />
               </button>
               {menu === 'mode' && (
@@ -633,6 +710,7 @@ export function Composer({
                 type="button"
                 className={`rc-mode${currentPermission === 'danger-full-access' ? ' is-danger' : ''}`}
                 title="切换终端与工作区权限"
+                data-menu-trigger
                 onClick={() => {
                   setConfirming(null)
                   setMenu(menu === 'permission' ? null : 'permission')
@@ -693,7 +771,15 @@ export function Composer({
               type="button"
               className="rc-icon"
               title="引用文件或论文（@）"
+              data-menu-trigger
+              onMouseEnter={openMentionOnHover}
+              onMouseLeave={closeMentionSoon}
               onClick={() => {
+                clearMentionTimer()
+                if (menu === 'mention') {
+                  setMenu(null)
+                  return
+                }
                 openMenu('mention', '')
                 textarea.current?.focus()
               }}
@@ -704,6 +790,7 @@ export function Composer({
               type="button"
               className="rc-icon"
               title="调用指令（/）"
+              data-menu-trigger
               onClick={() => {
                 openMenu('slash', '')
                 textarea.current?.focus()

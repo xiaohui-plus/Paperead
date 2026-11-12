@@ -20,6 +20,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from server.winproc import hidden_kwargs
+
 MAX_OUTPUT = 20_000
 DEFAULT_TIMEOUT = 120
 MAX_TIMEOUT = 600
@@ -79,6 +81,7 @@ def _kill_tree(process: subprocess.Popen[bytes]) -> None:
                 ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                 capture_output=True,
                 check=False,
+                **hidden_kwargs(),
             )
         else:
             process.kill()
@@ -136,6 +139,7 @@ def run_command(
         env=_clean_env(),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        **hidden_kwargs(),
     )
     timed_out = False
     try:

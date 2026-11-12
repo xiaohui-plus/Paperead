@@ -1,7 +1,45 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { IconChat } from '../components/icons'
 import type { ChatState } from '../lib/researchTypes'
 import { TurnBlock } from './TurnBlock'
+
+/** 超过约 10 行就折起，避免用户粘贴长提示时把会话流撑得很长。 */
+const COLLAPSED_HEIGHT = 180
+
+function MessageBubble({ text }: { text: string }) {
+  const bubble = useRef<HTMLDivElement>(null)
+  const [expanded, setExpanded] = useState(false)
+  const [collapsible, setCollapsible] = useState(false)
+
+  useLayoutEffect(() => {
+    const element = bubble.current
+    if (!element) return
+    // scrollHeight 始终是完整内容高度，收起状态下也能测出是否超过阈值。
+    setCollapsible(element.scrollHeight > COLLAPSED_HEIGHT + 1)
+  }, [text, expanded])
+
+  return (
+    <>
+      <div
+        ref={bubble}
+        className={`chat-bubble${
+          collapsible && !expanded ? ' is-collapsed' : ''
+        }`}
+      >
+        {text}
+      </div>
+      {collapsible && (
+        <button
+          type="button"
+          className="chat-bubble-toggle"
+          onClick={() => setExpanded((prev) => !prev)}
+        >
+          {expanded ? '收起' : '展示更多'}
+        </button>
+      )}
+    </>
+  )
+}
 
 interface Props {
   chat: ChatState
@@ -87,13 +125,7 @@ export function Transcript({ chat, now, loading = false }: Props) {
         {rows.map((row) =>
           row.kind === 'message' ? (
             <div className="chat-message" key={row.id}>
-              {(row.mode === 'deep' || row.scope === 'readonly') && (
-                <div className="chat-message-tags">
-                  {row.mode === 'deep' && <span>深度研究</span>}
-                  {row.scope === 'readonly' && <span>只读分析</span>}
-                </div>
-              )}
-              <div className="chat-bubble">{row.text}</div>
+              <MessageBubble text={row.text} />
             </div>
           ) : (
             <TurnBlock key={row.id} turn={row.turn} now={now} />

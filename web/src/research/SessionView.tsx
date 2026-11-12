@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import {
-  relativeTime,
   researchApi,
   type ProjectFile,
   type ProjectKind,
@@ -22,6 +21,11 @@ import { ApprovalPanel } from './ApprovalPanel'
 import { Composer } from './Composer'
 import { splitLeadHeading } from './leadHeading'
 import { Transcript } from './Transcript'
+import {
+  readSessionCache,
+  writeSessionCache,
+  type SessionSnapshot,
+} from './researchCache'
 
 interface Props {
   session: SessionSummary
@@ -29,6 +33,8 @@ interface Props {
   onInitialTextConsumed: () => void
   /** 把标题/运行状态同步回左侧会话列表。 */
   onMeta: (patch: { title?: string; running?: boolean }) => void
+  /** 当前会话标题，交给项目顶栏右侧单行渲染。 */
+  onTitle?: (title: string) => void
   /** 输入框上传的附件，交给项目页刷新文件树。 */
   onFilesUploaded?: (files: ProjectFile[]) => void
   kind: ProjectKind
@@ -37,25 +43,33 @@ interface Props {
 const FLUSH_MS = 40
 /** 旧版后端没有 replay.end 时的兜底：按历史快照渲染当前已收到的部分。 */
 const REPLAY_FALLBACK_MS = 15_000
+/** 有本地快照时只需补齐增量，短兜底即可，绝不能等满 15 秒。 */
+const SNAPSHOT_REPLAY_MS = 900
 
 export function SessionView({
   session,
   initialText,
   onInitialTextConsumed,
   onMeta,
+  onTitle,
   onFilesUploaded,
   kind,
 }: Props) {
-  const [chat, setChat] = useState<ChatState>(EMPTY_CHAT)
+  /** 上次离开时的快照：命中就先渲染，再从该 seq 增量补齐。 */
+  const snapshot = useRef<SessionSnapshot | null>(
+    readSessionCache(session.id),
+  ).current
+  const [chat, setChat] = useState<ChatState>(() => snapshot?.chat ?? EMPTY_CHAT)
   const [streamState, setStreamState] = useState<StreamState>('connecting')
   const [streamError, setStreamError] = useState<string | null>(null)
   const [sendError, setSendError] = useState<string | null>(null)
   const [streamKey, setStreamKey] = useState(0)
   const [now, setNow] = useState(() => Date.now())
-  const [historyLoading, setHistoryLoading] = useState(true)
+  const [historyLoading, setHistoryLoading] = useState(!snapshot)
 
-  const cursor = useRef(0)
+  const cursor = useRef(snapshot?.cursor ?? 0)
   const pending = useRef<AgentEvent[]>([])
+  const chatRef = useRef(chat)
   const flushTimer = useRef<number | undefined>(undefined)
   const initialSent = useRef(false)
   /** 历史回放阶段：先缓冲，收到 replay.end 后一次性渲染最终状态。 */
@@ -71,16 +85,23 @@ export function SessionView({
   }, [])
 
   const finishReplay = useCallback(
-    (running: boolean) => {
-      if (!replaying.current) return
+    (running: boolean, lastSeq?: number) => {
+      if (!replaying.current) {
+        onMeta({ running })
+        return
+      }
       replaying.current = false
       clearReplayTimer()
       const events = replayEvents.current
       replayEvents.current = []
       let title: string | null = null
+      let seq = cursor.current
+      if (typeof lastSeq === 'number' && lastSeq > seq) seq = lastSeq
       for (const event of events) {
         if (event.type === 'title.update' && event.title) title = event.title
+        if (event.seq > seq) seq = event.seq
       }
+      cursor.current = seq
       setChat((prev) => finalizeHistory(applyHistoryEvents(prev, events), running))
       setHistoryLoading(false)
       if (title) onMeta({ title })
@@ -94,6 +115,11 @@ export function SessionView({
     const events = pending.current
     pending.current = []
     if (events.length === 0) return
+    let seq = cursor.current
+    for (const event of events) {
+      if (event.seq > seq) seq = event.seq
+    }
+    cursor.current = seq
     setChat((prev) => applyEvents(prev, events))
     for (const event of events) {
       if (event.type === 'title.update' && event.title) {
@@ -109,18 +135,15 @@ export function SessionView({
   const handleEvent = useCallback(
     (event: AgentEvent) => {
       if (event.type === 'replay.end') {
-        finishReplay(event.running === true)
+        finishReplay(event.running === true, event.lastSeq)
         return
-      }
-      if (typeof event.seq === 'number' && event.seq > cursor.current) {
-        cursor.current = event.seq
       }
       if (replaying.current) {
         replayEvents.current.push(event)
         if (replayTimer.current === undefined) {
           replayTimer.current = window.setTimeout(
             () => finishReplay(false),
-            REPLAY_FALLBACK_MS,
+            snapshot ? SNAPSHOT_REPLAY_MS : REPLAY_FALLBACK_MS,
           )
         }
         return
@@ -130,13 +153,13 @@ export function SessionView({
         flushTimer.current = window.setTimeout(flush, FLUSH_MS)
       }
     },
-    [finishReplay, flush],
+    [finishReplay, flush, snapshot],
   )
 
   useEffect(() => {
     setStreamState('connecting')
-    if (cursor.current === 0) {
-      // 首次进入会话：等 replay.end，把历史一次性画成最终状态。
+    if (!snapshot && cursor.current === 0) {
+      // 没有快照才需要等历史回放结束；有快照时先显示快照再补增量。
       replaying.current = true
       setHistoryLoading(true)
     }
@@ -149,7 +172,13 @@ export function SessionView({
       onError: (message) => setStreamError(message),
     })
     return close
-  }, [session.id, streamKey, handleEvent])
+  }, [session.id, streamKey, handleEvent, snapshot])
+
+  useEffect(() => {
+    chatRef.current = chat
+    if (replaying.current) return
+    writeSessionCache(session.id, chat, cursor.current)
+  }, [chat, session.id])
 
   useEffect(
     () => () => {
@@ -157,8 +186,25 @@ export function SessionView({
       if (replayTimer.current !== undefined) {
         window.clearTimeout(replayTimer.current)
       }
+      // 历史还没回放完就离开时不要覆盖旧快照，否则下次会缺一段历史。
+      // 但命中快照时本身已有完整的历史基线，可以安全写回当前状态。
+      if (replaying.current && !snapshot) return
+      const queued = pending.current
+      pending.current = []
+      if (queued.length > 0) {
+        let seq = cursor.current
+        for (const event of queued) {
+          if (event.seq > seq) seq = event.seq
+        }
+        const next = applyEvents(chatRef.current, queued)
+        cursor.current = seq
+        chatRef.current = next
+        writeSessionCache(session.id, next, seq)
+        return
+      }
+      writeSessionCache(session.id, chatRef.current, cursor.current)
     },
-    [],
+    [session.id],
   )
 
   useEffect(() => {
@@ -242,26 +288,22 @@ export function SessionView({
     return chat.title || session.title
   }, [chat.turns, chat.title, session.title])
 
+  useEffect(() => {
+    onTitle?.(pageTitle)
+  }, [pageTitle, onTitle])
+
   return (
     <div className="project-session-view">
-      <header className="project-session-head">
-        <h2>{pageTitle}</h2>
-        <div className="session-head-meta">
-          <span>{relativeTime(session.updatedAt)}</span>
-          {chat.running && <i className="project-running" />}
-          {(streamState === 'offline' || streamState === 'error') && (
-            <button
-              className="session-retry"
-              onClick={() => setStreamKey((key) => key + 1)}
-            >
-              重连
-            </button>
-          )}
-        </div>
-      </header>
-
       {streamError && streamState === 'error' && (
-        <p className="session-banner">{streamError}</p>
+        <p className="session-banner">
+          <span>{streamError}</span>
+          <button
+            className="session-retry"
+            onClick={() => setStreamKey((key) => key + 1)}
+          >
+            重连
+          </button>
+        </p>
       )}
       {streamState === 'offline' && (
         <p className="session-banner" data-level="warn">

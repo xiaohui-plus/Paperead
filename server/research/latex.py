@@ -20,6 +20,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from server.winproc import hidden_kwargs
+
 MAX_TEXT = 2_000_000
 COMPILE_TIMEOUT = 180
 CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
@@ -183,6 +185,7 @@ def _markdown_to_fragment(markdown: str, natbib: bool) -> tuple[str, str]:
             input=markdown.encode("utf-8"),
             capture_output=True,
             timeout=120,
+            **hidden_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return "", f"pandoc 执行失败：{exc}"
@@ -438,7 +441,13 @@ def _compile_with(engine: str, tex_path: Path) -> tuple[Path | None, str]:
     logs: list[str] = []
 
     def run(command: list[str]) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.run(command, cwd=workdir, capture_output=True, timeout=timeout)
+        return subprocess.run(
+            command,
+            cwd=workdir,
+            capture_output=True,
+            timeout=timeout,
+            **hidden_kwargs(),
+        )
 
     try:
         first = run(
@@ -509,27 +518,10 @@ def bib_stem(directory: Path) -> str | None:
     return None
 
 
-def _hidden_kwargs() -> dict[str, Any]:
-    """Windows 下让子进程不弹控制台窗口。
-
-    自检会在后台悄悄跑 ``--version``；如果父进程没有控制台，控制台子程序默认
-    会新开一个黑色终端窗口，用户会看到窗口一闪而过。
-    """
-    if os.name != "nt":
-        return {}
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    startupinfo.wShowWindow = subprocess.SW_HIDE
-    return {
-        "startupinfo": startupinfo,
-        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    }
-
-
 def _probe_version(command: list[str], timeout: int = 8) -> str:
     try:
         proc = subprocess.run(
-            command, capture_output=True, timeout=timeout, **_hidden_kwargs()
+            command, capture_output=True, timeout=timeout, **hidden_kwargs()
         )
     except (OSError, subprocess.TimeoutExpired):
         return ""

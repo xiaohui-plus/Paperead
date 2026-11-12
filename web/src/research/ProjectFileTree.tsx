@@ -5,6 +5,7 @@ import type {
   ReactNode,
 } from 'react'
 import {
+  IconBook,
   IconChevron,
   IconClipboard,
   IconCopy,
@@ -102,7 +103,7 @@ export function ProjectFileTree({
   const autoExpanded = useRef<Set<string>>(new Set())
 
   const byId = new Map(items.map((item) => [item.id, item]))
-  const activeItem = activeFileId ? byId.get(activeFileId) : undefined
+
   const children = new Map<string | null, ProjectFile[]>()
   for (const item of items) {
     const key = item.parentId ?? null
@@ -485,13 +486,11 @@ export function ProjectFileTree({
         {onCreateFolder && (
           <button type="button" title="新建文件夹" onClick={onCreateFolder}>
             <IconPlus />
-            <span>新建</span>
           </button>
         )}
         {onUpload && (
           <button type="button" title="上传文件" onClick={onUpload}>
             <IconUpload />
-            <span>上传</span>
           </button>
         )}
         {onUploadFolder && (
@@ -501,7 +500,6 @@ export function ProjectFileTree({
             onClick={onUploadFolder}
           >
             <IconFolder />
-            <span>打开文件夹</span>
           </button>
         )}
         {onRefresh && (
@@ -516,34 +514,8 @@ export function ProjectFileTree({
             onClick={() => void pasteTo(currentParentId())}
           >
             <IconClipboard />
-            <span>粘贴</span>
           </button>
         )}
-        {selectedFiles && selectedFiles.length > 0 && onDeleteSelected && (
-          <button
-            type="button"
-            className="is-danger"
-            title="删除选中的文件"
-            onClick={onDeleteSelected}
-          >
-            <IconTrash />
-            <span>删除({selectedFiles.length})</span>
-          </button>
-        )}
-        {(!selectedFiles || selectedFiles.length === 0) &&
-          activeItem &&
-          onDelete &&
-          !isReadOnly(activeItem) && (
-            <button
-              type="button"
-              className="is-danger"
-              title="删除当前文件"
-              onClick={() => onDelete(activeItem)}
-            >
-              <IconTrash />
-              <span>删除</span>
-            </button>
-          )}
         <em>
           {fileCount} 个文件
           {selectedFiles && selectedFiles.length > 0
@@ -563,10 +535,22 @@ export function ProjectFileTree({
           className="project-tree-menu"
           style={{
             left: Math.min(menu.x, Math.max(8, window.innerWidth - 184)),
-            top: Math.min(menu.y, Math.max(8, window.innerHeight - 300)),
+            top: Math.min(menu.y, Math.max(8, window.innerHeight - 360)),
           }}
           onClick={(event) => event.stopPropagation()}
         >
+          {menu.item.kind !== 'folder' && (
+            <button
+              type="button"
+              onClick={() => {
+                onFile(menu.item)
+                setMenu(null)
+              }}
+            >
+              <IconBook />
+              打开预览
+            </button>
+          )}
           {isPdf(menu.item) && !isReadOnly(menu.item) && (
             <button
               type="button"
@@ -591,16 +575,6 @@ export function ProjectFileTree({
               重命名
             </button>
           )}
-          <button
-            type="button"
-            onClick={() => {
-              onCopyPath?.(menu.item)
-              setMenu(null)
-            }}
-          >
-            <IconCopy />
-            复制路径
-          </button>
           {!isReadOnly(menu.item) && (
             <>
               <div className="project-tree-menu-sep" />
@@ -632,6 +606,26 @@ export function ProjectFileTree({
               </button>
             </>
           )}
+          <button
+            type="button"
+            onClick={() => {
+              void navigator.clipboard?.writeText(menu.item.name)
+              setMenu(null)
+            }}
+          >
+            <IconCopy />
+            复制文件名称
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              onCopyPath?.(menu.item)
+              setMenu(null)
+            }}
+          >
+            <IconCopy />
+            复制文件路径
+          </button>
           {clipboard && pasteTargetFor(menu.item) !== undefined && (
             <button
               type="button"

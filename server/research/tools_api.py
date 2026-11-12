@@ -29,6 +29,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
+from server.winproc import hidden_kwargs
+
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -1657,6 +1659,7 @@ def build_router(
                 input=text.encode("utf-8"),
                 capture_output=True,
                 timeout=120,
+                **hidden_kwargs(),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             tmp.unlink(missing_ok=True)

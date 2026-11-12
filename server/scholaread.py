@@ -24,10 +24,12 @@ import os
 import re
 import shutil
 import sqlite3
-import subprocess
+
 import sys
 import tempfile
 import time
+
+from server.winproc import run_hidden
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -98,13 +100,11 @@ def _is_running() -> bool | None:
     if os.name != "nt":
         return None
     try:
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        out = subprocess.run(
+        out = run_hidden(
             ["tasklist", "/FI", "IMAGENAME eq Scholaread.exe", "/NH"],
             capture_output=True,
             text=True,
             timeout=5,
-            creationflags=flags,
         )
         return "scholaread.exe" in (out.stdout or "").lower()
     except Exception:
