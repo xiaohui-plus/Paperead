@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { Paper } from '../types'
 import type { Annotation, AnnotationColor } from '../lib/library'
 
@@ -9,6 +9,8 @@ interface Props {
   onJump: (blockId: string, page?: number) => void
   onUpdate: (id: string, patch: { color?: AnnotationColor; note?: string }) => Promise<void>
   onDelete: (id: string) => Promise<void>
+  /** 双击正文标注后聚焦到这一条：滚动到卡片并短暂描边 */
+  focusAnnotation?: { id: string; at: number } | null
 }
 
 const TYPE_LABEL: Record<Annotation['kind'], string> = {
@@ -66,7 +68,25 @@ export function downloadNotes(paper: Paper, annotations: Annotation[]): void {
  * 批注栏：正文里划词产生的荧光笔（填色）和下划线批注都收在这里，按页码排序。
  * 在原文上划的标注会在译文出现后自动补上对应片段，卡片同时展示原文与译文。
  */
-export function CommentsPanel({ paper, annotations, onJump, onUpdate, onDelete }: Props) {
+export function CommentsPanel({
+  paper,
+  annotations,
+  onJump,
+  onUpdate,
+  onDelete,
+  focusAnnotation,
+}: Props) {
+  const [flashId, setFlashId] = useState('')
+
+  useEffect(() => {
+    if (!focusAnnotation) return
+    setFlashId(focusAnnotation.id)
+    const el = document.getElementById(`note-${focusAnnotation.id}`)
+    el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    const timer = window.setTimeout(() => setFlashId(''), 2200)
+    return () => window.clearTimeout(timer)
+  }, [focusAnnotation])
+
   const pageOf = useMemo(
     () => new Map(paper.blocks.map((b) => [b.id, b.page])),
     [paper.blocks],
@@ -114,7 +134,12 @@ export function CommentsPanel({ paper, annotations, onJump, onUpdate, onDelete }
         const page = pageOfAnnotation(item, pageOf)
         const isPdf = Boolean(item.page)
         return (
-          <article className="note-card" key={`${item.id}-${item.updated_at}`}>
+          <article
+            className={`note-card${flashId === item.id ? ' is-focus' : ''}`}
+            id={`note-${item.id}`}
+            data-annotation-id={item.id}
+            key={`${item.id}-${item.updated_at}`}
+          >
             <div className="note-meta">
               <span
                 className={`note-swatch note-${item.kind} note-${item.kind}-${item.color}`}

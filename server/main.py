@@ -115,11 +115,10 @@ MOCK = env("PAPEREAD_MOCK") == "1"
 # 公式识别的整体时间预算：超时就先让论文可读，剩余公式保留裁图
 FORMULA_TIMEOUT = float(env("PAPEREAD_FORMULA_TIMEOUT", "180"))
 
-# 版本更新：Gitee（国内主通道，固定 tag `latest` 的发行版）优先，GitHub 与镜像作为回退。
+# 版本更新固定从 Gitee 检查（固定 tag `latest` 的发行版）。
+# GitHub/镜像只用于手动下载备份，不再参与应用内的检查与下载。
 UPDATE_ENDPOINTS = (
     "https://gitee.com/deng_xiaohui/paperead/releases/download/latest/latest.json",
-    "https://github.com/xiaohui-plus/Paperead/releases/latest/download/latest.json",
-    "https://ghproxy.net/https://github.com/xiaohui-plus/Paperead/releases/latest/download/latest.json",
 )
 UPDATE_RELEASE_PAGE = "https://gitee.com/deng_xiaohui/paperead/releases"
 UPDATE_TTL = 24 * 3600

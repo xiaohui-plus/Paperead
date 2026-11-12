@@ -17,7 +17,7 @@ interface Props {
   rootPath: string
   activeFile?: string | null
   onOpenFile: (entry: FsEntry) => void
-  onChooseFolder: () => void
+
   onResetRoot?: () => void
   onError?: (message: string) => void
 }
@@ -45,7 +45,7 @@ export function ProjectExplorer({
   rootPath,
   activeFile,
   onOpenFile,
-  onChooseFolder,
+
   onResetRoot,
   onError,
 }: Props) {
@@ -95,14 +95,7 @@ export function ProjectExplorer({
     <div className="project-explorer">
       <div className="project-explorer-toolbar">
         <button
-          className="project-explorer-choose"
-          title="打开电脑上的任意文件夹作为项目工作目录"
-          onClick={onChooseFolder}
-        >
-          <IconFolder />
-          打开文件夹
-        </button>
-        <button
+
           className="icon-btn"
           title="刷新"
           onClick={() => setTick((value) => value + 1)}

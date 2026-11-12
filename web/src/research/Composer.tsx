@@ -5,7 +5,6 @@ import {
   IconAt,
   IconChevronDown,
   IconClose,
-  IconFolder,
   IconPlus,
   IconShield,
   IconSlash,
@@ -15,7 +14,6 @@ import {
   researchApi,
   type ProjectFile,
   type ProjectKind,
-  type ProjectSummary,
   type ResearchCommand,
   type ResearchMode,
   type SendMeta,
@@ -39,11 +37,8 @@ interface Props {
   kind: ProjectKind
   /** 附件上传的目标项目；不传则隐藏上传按钮。 */
   projectId?: string
-  projectName?: string
-  projects?: ProjectSummary[]
   /** 有会话才能执行 / 指令与列出命令。 */
   sessionId?: string
-  onOpenProject?: (id: string) => void
   onUploaded?: (file: ProjectFile) => void
   onSend: (text: string, meta: SendMeta) => void
   onStop: () => void
@@ -93,7 +88,7 @@ function sizeText(size: number): string {
   return `${size} B`
 }
 
-/** 研究/综述输入框：项目条 + 模式 + 附件 + @ 引用 + / 指令 + 模型 + 圆形发送。 */
+/** 研究/综述输入框：模式 + 附件 + @ 引用 + / 指令 + 模型 + 圆形发送。 */
 export function Composer({
   running,
   placeholder,
@@ -101,10 +96,7 @@ export function Composer({
   hint,
   kind,
   projectId,
-  projectName,
-  projects,
   sessionId,
-  onOpenProject,
   onUploaded,
   onSend,
   onStop,
@@ -126,7 +118,6 @@ export function Composer({
   const [uploadError, setUploadError] = useState('')
   const [dragging, setDragging] = useState(false)
   const [menu, setMenu] = useState<'slash' | 'mention' | 'mode' | null>(null)
-  const [projectMenu, setProjectMenu] = useState(false)
   const [commands, setCommands] = useState<ResearchCommand[]>([])
   const [commandError, setCommandError] = useState('')
   const [candidates, setCandidates] = useState<Mention[]>([])
@@ -418,72 +409,6 @@ export function Composer({
 
   return (
     <div className={`rc${variant === 'home' ? ' rc-home' : ''}`} data-tour="composer">
-      <div className="rc-top">
-        <div className="rc-project-wrap">
-          <button
-            type="button"
-            className="rc-project"
-            onClick={() => setProjectMenu((prev) => !prev)}
-            disabled={!projects || projects.length === 0}
-          >
-            <IconFolder />
-            <span className="rc-project-name">{projectName || '当前项目'}</span>
-            <IconChevronDown />
-          </button>
-          {projectMenu && projects && projects.length > 0 && (
-            <div className="rc-menu rc-project-menu">
-              {projects.map((item) => (
-                <button
-                  type="button"
-                  key={item.id}
-                  className={`rc-option${item.name === projectName ? ' is-active' : ''}`}
-                  onClick={() => {
-                    setProjectMenu(false)
-                    onOpenProject?.(item.id)
-                  }}
-                >
-                  <span className="rc-option-label">{item.name}</span>
-                  <span className="rc-option-detail">
-                    {item.kind === 'review' ? '综述' : '研究'} · {item.sessionCount} 个会话
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-        <div className="rc-mode-wrap">
-          <button
-            type="button"
-            className="rc-mode"
-            onClick={() => setMenu(menu === 'mode' ? null : 'mode')}
-          >
-            <IconShield />
-            <span>{mode === 'deep' ? '深度研究' : '标准模式'}</span>
-            <IconChevronDown />
-          </button>
-          {menu === 'mode' && (
-            <div className="rc-menu rc-mode-menu">
-              <button
-                type="button"
-                className={`rc-option${mode === 'standard' ? ' is-active' : ''}`}
-                onClick={() => changeMode('standard')}
-              >
-                <span className="rc-option-label">标准模式</span>
-                <span className="rc-option-detail">直接给结论，按需检索</span>
-              </button>
-              <button
-                type="button"
-                className={`rc-option${mode === 'deep' ? ' is-active' : ''}`}
-                onClick={() => changeMode('deep')}
-              >
-                <span className="rc-option-label">深度研究</span>
-                <span className="rc-option-detail">多轮检索与交叉核验，列明来源</span>
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-
       <div
         className={`rc-box${dragging ? ' is-dragging' : ''}`}
         onDragOver={(event) => {
@@ -598,6 +523,38 @@ export function Composer({
 
         <div className="rc-foot">
           <div className="rc-tools">
+            <div className="rc-mode-wrap">
+              <button
+                type="button"
+                className="rc-mode"
+                title="切换研究模式"
+                onClick={() => setMenu(menu === 'mode' ? null : 'mode')}
+              >
+                <IconShield />
+                <span>{mode === 'deep' ? '深度研究' : '标准模式'}</span>
+                <IconChevronDown />
+              </button>
+              {menu === 'mode' && (
+                <div className="rc-menu rc-mode-menu is-up">
+                  <button
+                    type="button"
+                    className={`rc-option${mode === 'standard' ? ' is-active' : ''}`}
+                    onClick={() => changeMode('standard')}
+                  >
+                    <span className="rc-option-label">标准模式</span>
+                    <span className="rc-option-detail">直接给结论，按需检索</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`rc-option${mode === 'deep' ? ' is-active' : ''}`}
+                    onClick={() => changeMode('deep')}
+                  >
+                    <span className="rc-option-label">深度研究</span>
+                    <span className="rc-option-detail">多轮检索与交叉核验，列明来源</span>
+                  </button>
+                </div>
+              )}
+            </div>
             {projectId && (
               <>
                 <input

@@ -14,6 +14,8 @@ import type {
   PdfRect,
   ReadingHighlight,
 } from '../lib/library'
+import { lastAnnotationColor, rememberAnnotationColor } from '../lib/annotationPrefs'
+import { IconComment, IconHighlighter } from './icons'
 
 /** 自动重点的中文名，正文 tooltip 和「阅读重点」面板共用。 */
 export const HIGHLIGHT_LABELS: Record<HighlightCategory, string> = {
@@ -171,6 +173,8 @@ interface RichProps {
   className: string
   onCite?: (marker: string, rect: DOMRect, el: HTMLElement) => void
   onAnnotationClick?: (annotation: Annotation, rect: DOMRect) => void
+  /** 双击正文里的高亮/批注：切到左侧批注栏并定位到这一条 */
+  onAnnotationOpen?: (annotation: Annotation) => void
 }
 
 /** 正文段落：把引用编号、用户高亮、自动重点、术语标进同一段文本。 */
@@ -183,6 +187,7 @@ export function RichText({
   className,
   onCite,
   onAnnotationClick,
+  onAnnotationOpen,
 }: RichProps) {
   const spans = buildSpans(text, source, annotations, highlights, terms)
   const nodes: ReactNode[] = []
@@ -240,7 +245,13 @@ export function RichText({
         : annotation.note || (isComment ? '点击编辑这条批注' : '点击编辑这条高亮')
       const onPick = (e: ReactMouseEvent<HTMLElement>) => {
         e.stopPropagation()
+        // 双击的第二下不再弹编辑框，交给 onDoubleClick 切到批注栏
+        if (e.detail > 1) return
         onAnnotationClick?.(annotation, (e.target as HTMLElement).getBoundingClientRect())
+      }
+      const onOpen = (e: ReactMouseEvent<HTMLElement>) => {
+        e.stopPropagation()
+        onAnnotationOpen?.(annotation)
       }
       nodes.push(
         isComment ? (
@@ -251,6 +262,7 @@ export function RichText({
             data-pair={isMirror ? '1' : undefined}
             title={title}
             onClick={onPick}
+            onDoubleClick={onOpen}
           >
             {spanText}
           </span>
@@ -262,6 +274,7 @@ export function RichText({
             data-pair={isMirror ? '1' : undefined}
             title={title}
             onClick={onPick}
+            onDoubleClick={onOpen}
           >
             {spanText}
           </mark>
@@ -296,7 +309,7 @@ export function RichText({
   )
 }
 
-/** 划词后浮在选区上方的工具条：荧光笔填色，或加一份下划线批注。 */
+/** 划词后浮在选区上方的工具条：两个图标，点击用上次颜色，悬停展开调色板。 */
 export function SelectionToolbar({
   rect,
   onPick,
@@ -305,7 +318,7 @@ export function SelectionToolbar({
 }: {
   rect: DOMRect
   onPick: (color: AnnotationColor) => void
-  onComment: () => void
+  onComment: (color: AnnotationColor) => void
   onClose: () => void
 }) {
   useEffect(() => {
@@ -316,7 +329,21 @@ export function SelectionToolbar({
     return () => document.removeEventListener('pointerdown', onPointerDown)
   }, [onClose])
 
-  const width = 250
+  const [hlColor, setHlColor] = useState(() => lastAnnotationColor('highlight'))
+  const [cmColor, setCmColor] = useState(() => lastAnnotationColor('comment'))
+
+  const apply = (kind: 'highlight' | 'comment', color: AnnotationColor) => {
+    rememberAnnotationColor(kind, color)
+    if (kind === 'highlight') {
+      setHlColor(color)
+      onPick(color)
+    } else {
+      setCmColor(color)
+      onComment(color)
+    }
+  }
+
+  const width = 104
   const left = Math.min(
     window.innerWidth - width - 12,
     Math.max(12, rect.left + rect.width / 2 - width / 2),
@@ -329,26 +356,64 @@ export function SelectionToolbar({
       style={{ left, top }}
       onMouseDown={(e) => e.preventDefault()}
     >
-      <span className="hl-toolbar-label" title="原文划线会同步标到译文对应句子">
-        荧光笔
-      </span>
-      {HL_COLORS.map((c) => (
-        <button
-          key={c.key}
-          type="button"
-          className={`hl-dot hl-${c.key}`}
-          title={c.label}
-          onClick={() => onPick(c.key)}
-        />
-      ))}
-      <span className="hl-toolbar-sep" aria-hidden />
-      <button type="button" className="hl-toolbar-comment" onClick={onComment}>
-        <span className="cm-preview" aria-hidden />
-        批注
+      <ToolAction
+        icon={<IconHighlighter />}
+        label="荧光笔"
+        color={hlColor}
+        onUse={() => apply('highlight', hlColor)}
+        onChoose={(color) => apply('highlight', color)}
+      />
+      <ToolAction
+        icon={<IconComment />}
+        label="批注"
+        color={cmColor}
+        onUse={() => apply('comment', cmColor)}
+        onChoose={(color) => apply('comment', color)}
+      />
+    </div>
+  )
+}
+
+/** 单个工具：图标按钮直接使用上次颜色，悬停/聚焦时下方展开四个色点。 */
+function ToolAction({
+  icon,
+  label,
+  color,
+  onUse,
+  onChoose,
+}: {
+  icon: ReactNode
+  label: string
+  color: AnnotationColor
+  onUse: () => void
+  onChoose: (color: AnnotationColor) => void
+}) {
+  const colorLabel = HL_COLORS.find((c) => c.key === color)?.label ?? ''
+  return (
+    <div className="hl-tool">
+      <button
+        type="button"
+        className="hl-tool-btn"
+        title={`${label}：直接点击用上次颜色（${colorLabel}），悬停可选色`}
+        aria-label={label}
+        onClick={onUse}
+      >
+        {icon}
+        <span className={`hl-tool-current hl-${color}`} aria-hidden />
       </button>
-      <button type="button" className="hl-toolbar-close" onClick={onClose} title="取消">
-        ×
-      </button>
+      <div className="hl-tool-palette" role="menu" aria-label={`${label}颜色`}>
+        {HL_COLORS.map((c) => (
+          <button
+            key={c.key}
+            type="button"
+            className={`hl-dot hl-${c.key}`}
+            data-active={c.key === color}
+            title={c.label}
+            aria-label={`${label} ${c.label}`}
+            onClick={() => onChoose(c.key)}
+          />
+        ))}
+      </div>
     </div>
   )
 }

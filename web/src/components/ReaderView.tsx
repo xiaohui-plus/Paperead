@@ -84,6 +84,16 @@ function readPanelWidth(): number {
   return DEFAULT_PANEL_WIDTH
 }
 
+const PANEL_COLLAPSED_KEY = 'paperead.panelCollapsed'
+
+function readPanelCollapsed(): boolean {
+  try {
+    return localStorage.getItem(PANEL_COLLAPSED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
 export function ReaderView({ paperId, onBack }: Props) {
   const [paper, setPaper] = useState<Paper | null>(null)
   const [error, setError] = useState('')
@@ -129,7 +139,13 @@ export function ReaderView({ paperId, onBack }: Props) {
   // 示例数据没有后端，标注/进度只在真实论文上启用
   const annotationsEnabled = paperId !== 'demo'
   const [panelWidth, setPanelWidth] = useState(readPanelWidth)
+  const [panelCollapsed, setPanelCollapsed] = useState(readPanelCollapsed)
   const [panelTab, setPanelTab] = useState<TabKey>(readInitialTab)
+  // 双击正文高亮后要聚焦的批注条：at 让连续双击同一条也能重新滚动
+  const [focusAnnotation, setFocusAnnotation] = useState<{
+    id: string
+    at: number
+  } | null>(null)
   // 阅读页点图表/公式旁的小圆圈 → 加入左侧问答附录
   const [contextItems, setContextItems] = useState<ReaderContextItem[]>([])
   const contextIds = useMemo(
@@ -262,6 +278,18 @@ export function ReaderView({ paperId, onBack }: Props) {
     panelWidthRef.current = next
     setPanelWidth(next)
     persistPanelWidth(next)
+  }
+
+  const togglePanel = () => {
+    setPanelCollapsed((prev) => {
+      const next = !prev
+      try {
+        localStorage.setItem(PANEL_COLLAPSED_KEY, next ? '1' : '0')
+      } catch {
+        // 隐私模式写不了 localStorage：本次会话仍可折叠
+      }
+      return next
+    })
   }
 
   // ── 图表/公式 → 问答附录 ───────────────────────────────
@@ -845,6 +873,12 @@ export function ReaderView({ paperId, onBack }: Props) {
     node?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
+  /** 双击正文里的荧光笔/批注：左侧切到「批注」，并高亮对应卡片。 */
+  const openAnnotation = useCallback((annotation: Annotation) => {
+    setPanelTab('comments')
+    setFocusAnnotation({ id: annotation.id, at: Date.now() })
+  }, [])
+
   // 切到原版 PDF 时把当前页码带过去；切回来时恢复重排阅读的滚动位置
   const togglePdf = () => {
     if (!canShowPdf) return
@@ -948,14 +982,19 @@ export function ReaderView({ paperId, onBack }: Props) {
         pdfHref={pdfHref}
         pdfExpanded={pdfExpanded}
         onTogglePdfExpand={togglePdfExpand}
+        panelCollapsed={panelCollapsed}
+        onTogglePanel={togglePanel}
+        showPanelToggle={!(pdfMode && pdfExpanded)}
       />
 
       <div
         ref={workspaceRef}
-        className={`workspace ${pdfMode && pdfExpanded ? 'is-pdf-expanded' : ''}`}
+        className={`workspace ${pdfMode && pdfExpanded ? 'is-pdf-expanded' : ''}${
+          panelCollapsed ? ' is-panel-collapsed' : ''
+        }`}
         style={{ '--panel-w': `${panelWidth}px` } as CSSProperties}
       >
-        {!(pdfMode && pdfExpanded) && (
+        {!(pdfMode && pdfExpanded) && !panelCollapsed && (
           <>
             <LeftPanel
               paperId={paperId}
@@ -975,6 +1014,7 @@ export function ReaderView({ paperId, onBack }: Props) {
               highlights={highlights}
               tab={panelTab}
               onTab={setPanelTab}
+              focusAnnotation={focusAnnotation}
               contextItems={contextItems}
               onRemoveContext={removeContext}
               onClearContext={clearContext}
@@ -1039,6 +1079,7 @@ export function ReaderView({ paperId, onBack }: Props) {
             highlights={highlights}
             contextIds={contextIds}
             onAttachContext={attachContext}
+            onOpenAnnotation={openAnnotation}
           />
         )}
       </div>
@@ -1060,6 +1101,7 @@ export function ReaderView({ paperId, onBack }: Props) {
           onUpdateAnnotation={annotationActions?.update ?? (async () => {})}
           onDeleteAnnotation={annotationActions?.remove ?? (async () => {})}
           highlights={highlights}
+          focusAnnotation={focusAnnotation}
           contextItems={contextItems}
           onRemoveContext={removeContext}
           onClearContext={clearContext}

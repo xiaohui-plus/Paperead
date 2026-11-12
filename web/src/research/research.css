@@ -2953,62 +2953,42 @@
     justify-content: flex-end;
   }
 }
-/* ── 研究/综述输入框（项目条 + 模式 + @ / + 模型 + 圆形发送） ─────── */
+/* ── 研究/综述输入框（模式 + @ / + 模型 + 圆形发送） ─────── */
 
 .rc {
   position: relative;
   width: 100%;
 }
 
-.rc-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 8px;
-}
-
-.rc-project-wrap,
 .rc-mode-wrap {
   position: relative;
+  display: inline-flex;
 }
 
-.rc-project,
 .rc-mode {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   max-width: 100%;
-  padding: 4px 8px;
+  height: 27px;
+  padding: 0 6px;
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: var(--text, #1f2328);
-  font-size: 12.5px;
+  color: var(--text-2, #6b7280);
+  font-size: 11.5px;
   line-height: 1.4;
   cursor: pointer;
 }
 
-.rc-project:hover,
 .rc-mode:hover {
   background: var(--bg-2, #f3f4f6);
 }
 
-.rc-project:disabled {
-  cursor: default;
-  opacity: 0.75;
-}
-
-.rc-project-name {
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 500;
-}
-
-.rc-mode {
-  color: var(--text-2, #4b5563);
+/* 模式菜单在输入框底部，向上展开避免超出窗口 */
+.rc-mode-menu.is-up {
+  top: auto;
+  bottom: calc(100% + 6px);
 }
 
 .rc-box {
@@ -3312,10 +3292,6 @@
 
   .rc-hint {
     display: none;
-  }
-
-  .rc-project-name {
-    max-width: 150px;
   }
 
   .rc textarea {

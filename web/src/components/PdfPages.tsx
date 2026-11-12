@@ -362,7 +362,7 @@ export function PdfPages({
         <SelectionToolbar
           rect={selection.rect}
           onPick={(color) => void applyAnnotation(color, 'highlight')}
-          onComment={() => void applyAnnotation('blue', 'comment')}
+          onComment={(color) => void applyAnnotation(color, 'comment')}
           onClose={() => {
             setSelection(null)
             window.getSelection()?.removeAllRanges()

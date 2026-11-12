@@ -174,22 +174,12 @@ export function ResearchHome({ kind, projects, onStart }: Props) {
             disabled={busy}
             onChange={setWorkspace}
           />
-          <span className="research-composer-hint">
-            {effectiveProject && !workspace
-              ? '沿用项目文件夹；点左侧可换目录'
-              : 'agent 会在这个目录里读写文件'}
-          </span>
+
         </div>
         <Composer
           kind={kind}
           variant="home"
           projectId={effectiveProject ?? undefined}
-          projectName={
-            effectiveProject
-              ? projects.find((project) => project.id === effectiveProject)?.name
-              : undefined
-          }
-          projects={projects}
           running={busy}
           seed={seed ?? undefined}
           placeholder={

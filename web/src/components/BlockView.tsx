@@ -42,6 +42,8 @@ interface Props {
   /** 已加入左侧问答附录的 block id */
   attachedIds?: Set<string>
   onAttachContext?: (item: ReaderContextItem) => void
+  /** 双击正文中的高亮/批注：切到左侧批注栏并定位到该条 */
+  onOpenAnnotation?: (annotation: Annotation) => void
 }
 
 interface SelectionState {
@@ -60,6 +62,7 @@ export function BlockView({
   paperId,
   annotations = [],
   annotationActions,
+  onOpenAnnotation,
   highlights = [],
   attachedIds,
   onAttachContext,
@@ -337,6 +340,10 @@ export function BlockView({
           className="para-en"
           onCite={openCite}
           onAnnotationClick={(annotation, rect) => setEditing({ annotation, rect })}
+          onAnnotationOpen={(annotation) => {
+            setEditing(null)
+            onOpenAnnotation?.(annotation)
+          }}
         />
         {showZh &&
           (b.translated ? (
@@ -349,6 +356,10 @@ export function BlockView({
               className="para-zh"
               onCite={openCite}
               onAnnotationClick={(annotation, rect) => setEditing({ annotation, rect })}
+              onAnnotationOpen={(annotation) => {
+                setEditing(null)
+                onOpenAnnotation?.(annotation)
+              }}
             />
           ) : (
             <p className="para-zh">
@@ -373,7 +384,7 @@ export function BlockView({
         <SelectionToolbar
           rect={selection.rect}
           onPick={(color) => void applyHighlight(color, 'highlight')}
-          onComment={() => void applyHighlight('blue', 'comment')}
+          onComment={(color) => void applyHighlight(color, 'comment')}
           onClose={() => {
             setSelection(null)
             window.getSelection()?.removeAllRanges()

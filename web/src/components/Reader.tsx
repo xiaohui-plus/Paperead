@@ -21,6 +21,8 @@ interface Props {
   /** 已加入问答附录的块 */
   contextIds?: Set<string>
   onAttachContext?: (item: ReaderContextItem) => void
+  /** 双击正文里的高亮/批注：切到左侧批注栏并定位 */
+  onOpenAnnotation?: (annotation: Annotation) => void
 }
 
 export function Reader({
@@ -36,6 +38,7 @@ export function Reader({
   highlights = [],
   contextIds,
   onAttachContext,
+  onOpenAnnotation,
 }: Props) {
   const prepared = useMemo(() => prepareBlocks(paper.blocks), [paper.blocks])
   const flow = prepared.filter((r) => isFlowBlock(r.block))
@@ -105,6 +108,7 @@ export function Reader({
             highlights={highlights}
             attachedIds={contextIds}
             onAttachContext={onAttachContext}
+            onOpenAnnotation={onOpenAnnotation}
           />
         ))}
 

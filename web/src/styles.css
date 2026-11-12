@@ -320,6 +320,23 @@ textarea {
   overflow: hidden;
 }
 
+.workspace.is-panel-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.workspace.is-panel-collapsed .panel,
+.workspace.is-panel-collapsed .panel-resizer {
+  display: none;
+}
+
+.panel-toggle[data-active='true'] {
+  color: var(--blue);
+}
+
+.workspace.is-panel-collapsed .reader {
+  max-width: 980px;
+}
+
 /* ── 左栏 ─────────────────────────────────────────────── */
 
 .panel {
@@ -7955,62 +7972,72 @@ body.col-resizing * {
   z-index: 80;
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 4px;
   height: 38px;
-  padding: 0 10px;
+  padding: 0 6px;
   border: 1px solid var(--line-2);
   border-radius: 99px;
   background: var(--bg);
   box-shadow: var(--shadow-2);
 }
 
-.hl-toolbar-label {
-  font-size: 11px;
-  color: var(--muted);
+/* 单个工具：图标按钮 + 下方悬浮色板 */
+.hl-tool {
+  position: relative;
 }
 
-.hl-toolbar-sep {
-  width: 1px;
-  height: 14px;
-  background: var(--line-2);
-}
-
-.hl-toolbar-comment {
+.hl-tool-btn {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 24px;
-  padding: 0 8px;
-  border-radius: 99px;
-  color: var(--ink-2);
-  font-size: 11.5px;
-  white-space: nowrap;
-}
-
-.hl-toolbar-comment:hover {
-  background: var(--blue-soft);
-  color: var(--blue);
-}
-
-.cm-preview {
-  width: 12px;
-  height: 2px;
-  border-radius: 1px;
-  background: #3b82f6;
-}
-
-.hl-toolbar-close {
-  width: 20px;
-  height: 20px;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
-  color: var(--faint);
-  font-size: 15px;
-  line-height: 1;
+  color: var(--ink-2);
 }
 
-.hl-toolbar-close:hover {
+.hl-tool-btn:hover,
+.hl-tool:focus-within .hl-tool-btn {
   background: var(--bg-hover);
   color: var(--ink);
+}
+
+/* 按钮右下角的当前默认色点 */
+.hl-tool-current {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1.5px var(--bg);
+}
+
+/* 悬停/聚焦才展开；绝对定位浮在工具条下方，不改变工具条高度 */
+.hl-tool-palette {
+  position: absolute;
+  top: calc(100% + 7px);
+  left: 50%;
+  z-index: 2;
+  display: flex;
+  gap: 6px;
+  padding: 7px 9px;
+  border: 1px solid var(--line-2);
+  border-radius: 99px;
+  background: var(--bg);
+  box-shadow: var(--shadow-2);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(-2px);
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+
+.hl-tool:hover .hl-tool-palette,
+.hl-tool:focus-within .hl-tool-palette {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(-50%) translateY(0);
 }
 
 .hl-dot {
@@ -8158,6 +8185,12 @@ body.col-resizing * {
 
 .note-card:hover {
   border-color: var(--line-2);
+}
+
+/* 双击正文标注后，批注栏里对应卡片短暂描边，便于回查 */
+.note-card.is-focus {
+  border-color: var(--ink-2);
+  box-shadow: 0 0 0 2px rgba(61, 63, 69, 0.12);
 }
 
 .notes-intro {

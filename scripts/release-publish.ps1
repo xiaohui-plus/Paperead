@@ -59,7 +59,7 @@ Set-Content -LiteralPath $notesFile -Value $androidNotes -Encoding UTF8
     --version $Version `
     --apk $android.FullName `
     --url "https://gitee.com/$GiteeRepo/releases/download/$tag/$apkName" `
-    --fallback-url "https://github.com/$GithubRepo/releases/download/$tag/$apkName" `
+
     --notes-file $notesFile `
     --out $androidJson
 Remove-Item -LiteralPath $notesFile -ErrorAction SilentlyContinue

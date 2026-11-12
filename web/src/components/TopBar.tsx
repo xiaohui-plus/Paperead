@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { Paper, ViewMode } from '../types'
 import { downloadMarkdown } from '../lib/markdown'
 import { tourBus } from '../tour/tourBus'
-import { IconBack, IconCollapse, IconDownload, IconExpand, IconMinus, IconPdf, IconPlus, IconPrint, IconSettings } from './icons'
+import { IconBack, IconCollapse, IconDownload, IconExpand, IconMinus, IconPdf, IconPlus, IconPrint, IconSettings, IconSidebar } from './icons'
 
 interface Props {
   paper: Paper
@@ -26,6 +26,10 @@ interface Props {
   pdfHref: string
   pdfExpanded: boolean
   onTogglePdfExpand: () => void
+  /** 阅读侧栏折叠状态与切换；不传则不显示折叠按钮。 */
+  panelCollapsed?: boolean
+  onTogglePanel?: () => void
+  showPanelToggle?: boolean
 }
 
 const MODES: { key: ViewMode; label: string }[] = [
@@ -55,6 +59,9 @@ export function TopBar({
   pdfHref,
   pdfExpanded,
   onTogglePdfExpand,
+  panelCollapsed = false,
+  onTogglePanel,
+  showPanelToggle = false,
 }: Props) {
   const pct = total ? Math.round((translated / total) * 100) : 0
 
@@ -147,6 +154,17 @@ export function TopBar({
       </div>
 
       <div className="tools">
+        {showPanelToggle && onTogglePanel && (
+          <button
+            className="icon-btn panel-toggle"
+            data-active={!panelCollapsed}
+            aria-pressed={!panelCollapsed}
+            title={panelCollapsed ? '展开阅读侧栏' : '收起阅读侧栏'}
+            onClick={onTogglePanel}
+          >
+            <IconSidebar />
+          </button>
+        )}
         {!pdfMode && (
           <div className="segmented" data-tour="reader-mode" role="tablist" aria-label="阅读模式">
             {MODES.map((m) => (

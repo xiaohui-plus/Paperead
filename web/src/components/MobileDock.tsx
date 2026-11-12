@@ -20,6 +20,11 @@ export function MobileDock(props: Props) {
   const [open, setOpen] = useState<TabKey | null>(null)
   const active = PANEL_TABS.find((t) => t.key === open)
 
+  // 双击正文里的标注：手机端没有左侧栏，直接展开「批注」面板
+  useEffect(() => {
+    if (props.focusAnnotation) setOpen('comments')
+  }, [props.focusAnnotation])
+
   useEffect(() => {
     if (!open) return
     const onKey = (event: KeyboardEvent) => {

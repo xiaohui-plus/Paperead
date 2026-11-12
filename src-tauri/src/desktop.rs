@@ -334,26 +334,34 @@ fn maybe_onboard(app: &AppHandle, port: u16, data_dir: &std::path::Path) {
         });
 }
 
-fn updater_for(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
-    let endpoint = paths::var("PAPEREAD_UPDATE_ENDPOINT")
-        .and_then(|value| Url::parse(&value).ok());
-    if paths::var("PAPEREAD_UPDATE_ENDPOINT").is_some() && endpoint.is_none() {
-        paths::log_line(app, "invalid PAPEREAD_UPDATE_ENDPOINT, using config endpoint");
-    }
+/// 桌面端自动更新的唯一清单地址。
+///
+/// 帮助菜单的「检查更新」和设置页的「立即更新」都必须从 Gitee 检查与下载：
+/// GitHub/镜像只作为手动下载备份，不再参与客户端更新，避免国内网络在
+/// 检查或下载时退到 GitHub 长时间等待甚至失败。
+const GITEE_UPDATE_MANIFEST: &str =
+    "https://gitee.com/deng_xiaohui/paperead/releases/download/latest/latest.json";
 
-    let builder = if let Some(url) = endpoint {
-        match app.updater_builder().endpoints(vec![url]) {
-            Ok(builder) => builder,
+fn updater_for(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
+    // 仅保留给本机调试用的显式覆盖；正常安装包永远走 Gitee。
+    let endpoint = paths::var("PAPEREAD_UPDATE_ENDPOINT");
+    let url = match endpoint.as_deref() {
+        Some(value) => match Url::parse(value) {
+            Ok(url) => url,
             Err(error) => {
-                paths::log_line(app, &format!("invalid update endpoint: {error}"));
-                app.updater_builder()
+                paths::log_line(
+                    app,
+                    &format!("invalid PAPEREAD_UPDATE_ENDPOINT ({error}), using Gitee"),
+                );
+                Url::parse(GITEE_UPDATE_MANIFEST).expect("static Gitee update url")
             }
-        }
-    } else {
-        app.updater_builder()
+        },
+        None => Url::parse(GITEE_UPDATE_MANIFEST).expect("static Gitee update url"),
     };
 
-    builder
+    app.updater_builder()
+        .endpoints(vec![url])
+        .map_err(|error| format!("更新检查不可用：{error}"))?
         .build()
         .map_err(|error| format!("更新检查不可用：{error}"))
 }
@@ -399,7 +407,7 @@ async fn check_updates(app: AppHandle, interactive: bool) {
             let version = update.version.clone();
             let app_for_dialog = app.clone();
             app.dialog()
-                .message(format!("发现新版本 {version}，是否下载并安装？"))
+                .message(format!("发现新版本 {version}（Gitee），是否从 Gitee 下载并安装？"))
                 .title("发现更新")
                 .buttons(MessageDialogButtons::OkCancel)
                 .show(move |confirmed| {
@@ -439,7 +447,7 @@ async fn check_updates(app: AppHandle, interactive: bool) {
         Ok(None) => {
             if interactive {
                 app.dialog()
-                    .message("当前已是最新版本。")
+                    .message("当前已是最新版本（Gitee）。")
                     .title("检查更新")
                     .kind(MessageDialogKind::Info)
                     .show(|_| {});
@@ -449,7 +457,7 @@ async fn check_updates(app: AppHandle, interactive: bool) {
             paths::log_line(&app, &format!("update check failed: {error}"));
             if interactive {
                 app.dialog()
-                    .message(format!("检查更新失败：{error}"))
+                    .message(format!("从 Gitee 检查更新失败：{error}"))
                     .title("检查更新")
                     .kind(MessageDialogKind::Error)
                     .show(|_| {});

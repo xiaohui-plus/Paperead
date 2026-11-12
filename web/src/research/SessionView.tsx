@@ -5,7 +5,6 @@ import {
   researchApi,
   type ProjectFile,
   type ProjectKind,
-  type ProjectSummary,
   type SendMeta,
   type SessionSummary,
 } from '../lib/researchApi'
@@ -26,9 +25,6 @@ interface Props {
   /** 输入框上传的附件，交给项目页刷新文件树。 */
   onFilesUploaded?: (files: ProjectFile[]) => void
   kind: ProjectKind
-  projectName?: string
-  projects?: ProjectSummary[]
-  onOpenProject?: (projectId: string) => void
 }
 
 const FLUSH_MS = 40
@@ -40,9 +36,6 @@ export function SessionView({
   onMeta,
   onFilesUploaded,
   kind,
-  projectName,
-  projects,
-  onOpenProject,
 }: Props) {
   const [chat, setChat] = useState<ChatState>(EMPTY_CHAT)
   const [streamState, setStreamState] = useState<StreamState>('connecting')
@@ -212,10 +205,7 @@ export function SessionView({
         running={chat.running}
         kind={kind}
         projectId={session.projectId}
-        projectName={projectName}
-        projects={projects}
         sessionId={session.id}
-        onOpenProject={onOpenProject}
         onUploaded={(file) => onFilesUploaded?.([file])}
         hint={
           reconnecting && chat.messages.length === 0

@@ -18,11 +18,9 @@ export interface UpdateInfo {
   size?: number
 }
 
-/** Android 更新清单：Gitee latest 固定发行版优先，GitHub 与镜像回退。 */
+/** Android 更新清单：固定从 Gitee 的 latest 发行版检查；GitHub 只作手动下载备份。 */
 export const ANDROID_UPDATE_ENDPOINTS = [
   'https://gitee.com/deng_xiaohui/paperead/releases/download/latest/android.json',
-  'https://github.com/xiaohui-plus/Paperead/releases/latest/download/android.json',
-  'https://ghproxy.net/https://github.com/xiaohui-plus/Paperead/releases/latest/download/android.json',
 ]
 
 const ANDROID_RELEASE_PAGE = 'https://gitee.com/deng_xiaohui/paperead/releases'

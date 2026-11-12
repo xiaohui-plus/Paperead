@@ -1178,7 +1178,7 @@ export function SettingsDialog({
                   )}
                 </div>
                 <span className="update-time">
-                  上次检查：{formatCheckTime(updateCheckedAt)}
+                  上次检查：{formatCheckTime(updateCheckedAt)} · Gitee
                   {updateInfo?.cached ? ' · 当天缓存' : ''}
                 </span>
               </div>
@@ -1193,7 +1193,7 @@ export function SettingsDialog({
 
             {updateError && (
               <div className="update-error">
-                检查失败：{updateError}
+                从 Gitee 检查失败：{updateError}
                 <br />
                 可以稍后重试，或直接打开发布页查看。
               </div>
