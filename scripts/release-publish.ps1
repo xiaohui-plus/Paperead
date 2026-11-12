@@ -183,19 +183,15 @@ if (-not $SkipGitee) {
         $releaseId = [int64](@($Release.id)[0])
         $name = Split-Path -Leaf $Path
         $old = $null
-        $oldSize = 0
         foreach ($item in @(Get-GiteeAttachments $releaseId)) {
             if ($item.name -eq $name) {
                 $old = $item
-                $oldSize = [int64](@($item.size)[0])
                 break
             }
         }
-        if ($old -and $oldSize -eq (Get-Item $Path).Length) {
-            Write-Host "  $name 已存在且大小一致，跳过"
-            return
-        }
         if ($old) {
+            # 大小相同不代表内容相同（android.json 只改版本号时大小可能完全一致），
+            # 同名附件一律以本地文件为准，避免 latest 固定发行版残留旧版本。
             Write-Host "  替换同名附件 $name"
             Remove-GiteeFile -ReleaseId $releaseId -AttachId ([int64](@($old.id)[0]))
         }
