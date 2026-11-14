@@ -14,6 +14,9 @@ import type {
   PdfRect,
   ReadingHighlight,
 } from '../lib/library'
+import type { InlineMath } from '../types'
+import katex from 'katex'
+import { mediaUrl } from '../lib/mobile'
 import { lastAnnotationColor, rememberAnnotationColor } from '../lib/annotationPrefs'
 import { IconComment, IconHighlighter } from './icons'
 
@@ -164,12 +167,33 @@ function buildSpans(
   return kept
 }
 
+/** 正文行内公式：优先 KaTeX，规则无法重建时显示解析器裁的小图。 */
+function InlineMathNode({ item }: { item: InlineMath }) {
+  if (item.image_path) {
+    return <img className="inline-math-img" src={mediaUrl(item.image_path)} alt="" />
+  }
+  if (!item.latex) return null
+  return (
+    <span
+      className="inline-math"
+      dangerouslySetInnerHTML={{
+        __html: katex.renderToString(item.latex, {
+          throwOnError: false,
+          strict: false,
+          displayMode: false,
+        }),
+      }}
+    />
+  )
+}
+
 interface RichProps {
   text: string
   source: 'en' | 'zh'
   annotations: Annotation[]
   highlights?: ReadingHighlight[]
   terms?: Record<string, string>
+  inlineMath?: InlineMath[]
   className: string
   onCite?: (marker: string, rect: DOMRect, el: HTMLElement) => void
   onAnnotationClick?: (annotation: Annotation, rect: DOMRect) => void
@@ -186,15 +210,45 @@ export function RichText({
   annotations,
   highlights = [],
   terms = {},
+  inlineMath = [],
   className,
   onCite,
   onAnnotationClick,
   onAnnotationOpen,
   onHighlightOpen,
 }: RichProps) {
-  const spans = buildSpans(text, source, annotations, highlights, terms)
+  const formulas = inlineMath
+    .filter((m) => (m.latex || m.image_path) && m.start >= 0 && m.end > m.start)
+    .sort((a, b) => a.start - b.start)
+  const spans = buildSpans(text, source, annotations, highlights, terms).filter(
+    (span) => !formulas.some((m) => span.start < m.end && span.end > m.start),
+  )
   const nodes: ReactNode[] = []
   let cursor = 0
+
+  // 输出一段普通文本，遇到行内公式时换成 KaTeX / 小图。
+  // 与公式重叠的批注/高亮在上面已经过滤掉，所以这里不会切开一个公式。
+  const renderWithMath = (from: number, to: number): ReactNode[] => {
+    const out: ReactNode[] = []
+    let pos = from
+    for (const m of formulas) {
+      if (m.end <= pos) continue
+      if (m.start >= to) break
+      if (m.start > pos) {
+        out.push(<span key={`t${pos}`}>{text.slice(pos, m.start)}</span>)
+      }
+      const start = Math.max(m.start, from)
+      const end = Math.min(m.end, to)
+      if (start === m.start && end === m.end) {
+        out.push(<InlineMathNode key={`m${m.start}`} item={m} />)
+      } else if (end > start) {
+        out.push(<span key={`t${start}`}>{text.slice(start, end)}</span>)
+      }
+      pos = end
+    }
+    if (pos < to) out.push(<span key={`t${pos}`}>{text.slice(pos, to)}</span>)
+    return out
+  }
   // 悬停稍等一下再开预览，划词或快速划过整段时不会频繁弹层
   const hoverTimer = useRef<number | undefined>(undefined)
   // 单击编辑框延迟打开：双击时由 onOpen 取消，避免切到批注栏后正文下方又弹一个编辑框
@@ -215,7 +269,7 @@ export function RichText({
 
   for (const span of spans) {
     if (span.start > cursor) {
-      nodes.push(<span key={`t${cursor}`}>{text.slice(cursor, span.start)}</span>)
+      nodes.push(...renderWithMath(cursor, span.start))
     }
     if (span.kind === 'cite') {
       const marker = span.marker ?? ''
@@ -333,7 +387,7 @@ export function RichText({
     }
     cursor = span.end
   }
-  if (cursor < text.length) nodes.push(<span key={`t${cursor}`}>{text.slice(cursor)}</span>)
+  if (cursor < text.length) nodes.push(...renderWithMath(cursor, text.length))
 
   return (
     <p className={className} data-text-source={source}>

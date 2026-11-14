@@ -10,6 +10,29 @@ $androidJson = Join-Path $root "release\android.json"
 $sums = Join-Path $root "release\SHA256SUMS.txt"
 
 $errors = @()
+# 版本号分散在多个来源：桌面壳、前端、Python 包。任一处落后都会让设置页的
+# 「检查更新」与实际安装版本不一致（旧 sidecar 会一直显示有新版本，点立即更新却失败）。
+$versionSources = @(
+    @{ Path = "package.json"; Json = $true },
+    @{ Path = "web\package.json"; Json = $true },
+    @{ Path = "src-tauri\Cargo.toml"; Regex = '(?m)^version\s*=\s*"([^"]+)"' },
+    @{ Path = "pyproject.toml"; Regex = '(?m)^version\s*=\s*"([^"]+)"' },
+    @{ Path = "paperead\__init__.py"; Regex = '(?m)^__version__\s*=\s*"([^"]+)"' }
+)
+foreach ($source in $versionSources) {
+    $path = Join-Path $root $source.Path
+    if (-not (Test-Path $path)) { $errors += "缺少版本源：$($source.Path)"; continue }
+    if ($source.Json) {
+        $value = (Get-Content $path -Raw | ConvertFrom-Json).version
+    } elseif ((Get-Content $path -Raw) -match $source.Regex) {
+        $value = $Matches[1]
+    } else {
+        $value = $null
+    }
+    if (-not $value) { $errors += "无法读取版本：$($source.Path)" }
+    elseif ($value -ne $version) { $errors += "$($source.Path) 版本 $value != $version" }
+}
+
 if (-not (Test-Path $installer)) { $errors += "缺少安装包：$installer" }
 if (-not (Test-Path "$installer.sig")) { $errors += "缺少更新签名：$installer.sig" }
 # 默认只发 Windows；只有本轮产出 APK 时才要求并校验 Android 更新清单

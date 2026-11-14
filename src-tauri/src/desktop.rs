@@ -15,7 +15,7 @@ use std::sync::Mutex;
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::UpdaterExt;
 use url::Url;
@@ -47,7 +47,11 @@ pub fn run_desktop() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![install_update, restart_app])
+        .invoke_handler(tauri::generate_handler![
+            install_update,
+            check_desktop_update,
+            restart_app
+        ])
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;
@@ -341,6 +345,100 @@ fn maybe_onboard(app: &AppHandle, port: u16, data_dir: &std::path::Path) {
 /// 检查或下载时退到 GitHub 长时间等待甚至失败。
 const GITEE_UPDATE_MANIFEST: &str =
     "https://gitee.com/deng_xiaohui/paperead/releases/download/latest/latest.json";
+const GITEE_RELEASE_PAGE: &str = "https://gitee.com/deng_xiaohui/paperead/releases";
+/// 设置页订阅的更新进度事件；帮助菜单的原生弹窗不依赖它。
+const UPDATE_PROGRESS_EVENT: &str = "paperead:update-progress";
+
+/// Tauri 更新器检查到的版本信息，字段与前端 `UpdateInfo` 对齐。
+#[derive(Clone, serde::Serialize)]
+struct UpdateInfoPayload {
+    current: String,
+    latest: String,
+    has_update: bool,
+    notes: String,
+    pub_date: String,
+    url: String,
+    release_url: String,
+    source: String,
+}
+
+impl UpdateInfoPayload {
+    fn up_to_date(app: &AppHandle) -> Self {
+        let current = app.package_info().version.to_string();
+        Self {
+            current: current.clone(),
+            latest: current,
+            has_update: false,
+            notes: String::new(),
+            pub_date: String::new(),
+            url: String::new(),
+            release_url: GITEE_RELEASE_PAGE.into(),
+            source: "gitee".into(),
+        }
+    }
+
+    fn from_update(update: &tauri_plugin_updater::Update) -> Self {
+        let raw = &update.raw_json;
+        let notes = update
+            .body
+            .clone()
+            .or_else(|| raw.get("notes").and_then(|value| value.as_str()).map(str::to_string))
+            .unwrap_or_default();
+        let pub_date = raw
+            .get("pub_date")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or_else(|| update.date.map(|date| date.to_string()))
+            .unwrap_or_default();
+        Self {
+            current: update.current_version.clone(),
+            latest: update.version.clone(),
+            has_update: true,
+            notes,
+            pub_date,
+            url: update.download_url.to_string(),
+            release_url: GITEE_RELEASE_PAGE.into(),
+            source: "gitee".into(),
+        }
+    }
+}
+
+/// 更新流程的阶段性进度：checking → downloading → installing → launching。
+#[derive(Clone, serde::Serialize)]
+struct UpdateProgress {
+    stage: String,
+    version: String,
+    downloaded: u64,
+    total: u64,
+    percent: u8,
+    message: String,
+}
+
+fn emit_update_progress(
+    app: &AppHandle,
+    stage: &str,
+    version: &str,
+    downloaded: u64,
+    total: u64,
+    message: &str,
+) {
+    let percent = if total > 0 {
+        (downloaded.saturating_mul(100) / total).min(100) as u8
+    } else {
+        0
+    };
+    let _ = app.emit(
+        UPDATE_PROGRESS_EVENT,
+        UpdateProgress {
+            stage: stage.into(),
+            version: version.into(),
+            downloaded,
+            total,
+            percent,
+            message: message.into(),
+        },
+    );
+}
 
 fn updater_for(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
     // 仅保留给本机调试用的显式覆盖；正常安装包永远走 Gitee。
@@ -366,24 +464,85 @@ fn updater_for(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String>
         .map_err(|error| format!("更新检查不可用：{error}"))
 }
 
-/// 设置页「立即更新」：检查 → 下载 → 交给安装器，随后应用退出。
+/// 设置页「检查更新」：与帮助菜单共用同一个 Tauri 更新器，
+/// 用安装包自身的版本判断，避免 sidecar 版本与桌面程序版本不同步时误判。
+#[tauri::command]
+async fn check_desktop_update(app: AppHandle) -> Result<UpdateInfoPayload, String> {
+    let updater = updater_for(&app)?;
+    match updater.check().await {
+        Ok(Some(update)) => Ok(UpdateInfoPayload::from_update(&update)),
+        Ok(None) => Ok(UpdateInfoPayload::up_to_date(&app)),
+        Err(error) => {
+            paths::log_line(&app, &format!("desktop update check failed: {error}"));
+            Err(error.to_string())
+        }
+    }
+}
+
+/// 设置页「立即更新」：检查 → 下载（上报进度）→ 交给安装器，随后应用退出。
 #[tauri::command]
 async fn install_update(app: AppHandle) -> Result<String, String> {
     let updater = updater_for(&app)?;
-    match updater.check().await {
-        Ok(Some(update)) => {
-            let version = update.version.clone();
-            paths::log_line(&app, &format!("manual update download started: {version}"));
-            let bytes = update
-                .download(|_, _| {}, || {})
-                .await
-                .map_err(|error| format!("下载更新失败：{error}"))?;
-            install_downloaded_update(&app, &version, &bytes)?;
-            Ok(version)
+    emit_update_progress(&app, "checking", "", 0, 0, "正在检查更新…");
+    let update = match updater.check().await {
+        Ok(Some(update)) => update,
+        Ok(None) => {
+            let message = "当前已是最新版本".to_string();
+            emit_update_progress(&app, "up-to-date", "", 0, 0, &message);
+            return Err(message);
         }
-        Ok(None) => Err("当前已是最新版本".into()),
-        Err(error) => Err(format!("检查更新失败：{error}")),
+        Err(error) => {
+            let message = format!("检查更新失败：{error}");
+            paths::log_line(&app, &format!("manual update check failed: {error}"));
+            emit_update_progress(&app, "failed", "", 0, 0, &message);
+            return Err(message);
+        }
+    };
+
+    let version = update.version.clone();
+    paths::log_line(&app, &format!("manual update download started: {version}"));
+    emit_update_progress(&app, "downloading", &version, 0, 0, "正在下载安装包…");
+
+    let progress_app = app.clone();
+    let progress_version = version.clone();
+    let mut downloaded: u64 = 0;
+    let mut last_emit = std::time::Instant::now();
+    let bytes = match update
+        .download(
+            move |chunk, total| {
+                downloaded += chunk as u64;
+                // 每 ~120ms 上报一次，避免大包下载时把 WebView 事件队列塞满。
+                if last_emit.elapsed().as_millis() >= 120 {
+                    last_emit = std::time::Instant::now();
+                    emit_update_progress(
+                        &progress_app,
+                        "downloading",
+                        &progress_version,
+                        downloaded,
+                        total.unwrap_or(0),
+                        "正在下载安装包…",
+                    );
+                }
+            },
+            || {},
+        )
+        .await
+    {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let message = format!("下载更新失败：{error}");
+            paths::log_line(&app, &format!("manual update download failed: {error}"));
+            emit_update_progress(&app, "failed", &version, 0, 0, &message);
+            return Err(message);
+        }
+    };
+
+    emit_update_progress(&app, "installing", &version, 0, 0, "正在校验安装包…");
+    if let Err(error) = install_downloaded_update(&app, &version, &bytes) {
+        emit_update_progress(&app, "failed", &version, 0, 0, &error);
+        return Err(error);
     }
+    Ok(version)
 }
 
 /// 设置页更改文献库保存路径后：数据已复制完成，重启应用让 sidecar 指向新目录。
@@ -559,10 +718,19 @@ fn install_downloaded_update(
             temp_dir.display()
         ),
     );
-    // 先让命令返回、前端拿到成功结果；稍后再退出，避免「应用正在退出」被误判成更新失败。
+    // 先让命令返回、前端收到「安装程序已启动」，稍后再退出：退出得太快会让
+    // invoke 的 Promise 随 WebView 销毁被拒绝，被前端误判成「更新失败」。
+    emit_update_progress(
+        app,
+        "launching",
+        version,
+        0,
+        0,
+        "安装程序已启动，应用即将退出…",
+    );
     let handle = app.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(400));
+        std::thread::sleep(std::time::Duration::from_millis(3000));
         handle.exit(0);
     });
     Ok(())

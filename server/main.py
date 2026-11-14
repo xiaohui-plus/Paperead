@@ -127,7 +127,7 @@ UPDATE_ENDPOINTS = (
     "https://gitee.com/deng_xiaohui/paperead/releases/download/latest/latest.json",
 )
 UPDATE_RELEASE_PAGE = "https://gitee.com/deng_xiaohui/paperead/releases"
-UPDATE_TTL = 24 * 3600
+UPDATE_TTL = 10 * 60
 _update_cache: dict = {"checked_at": 0.0, "payload": None}
 
 store = LibraryStore(DATA_DIR)
@@ -255,6 +255,47 @@ class PingReq(BaseModel):
 class ImportReq(BaseModel):
     path: str = Field(..., min_length=1, description="本机 PDF 绝对路径")
     folder_id: str | None = None
+    # 解析阶段识别公式用的识图模型；不传时用启动时同步到服务端的配置
+    vision_config: LLMConfigIn | None = None
+
+
+class ParseReq(BaseModel):
+    """重新解析时可带上当前识图模型，避免服务端还没同步到配置。"""
+
+    vision_config: LLMConfigIn | None = None
+
+
+class FormulaRecognizeReq(BaseModel):
+    """给已有论文补齐公式 LaTeX（不重新解析版面）。"""
+
+    config: LLMConfigIn | None = None
+    force: bool = False
+
+
+def _paper_asset_path(paper_id: str, url: str) -> Path | None:
+    """把 blocks.json 里的 /api/.../asset/... 地址还原成本地文件。"""
+    prefix = f"/api/papers/{paper_id}/asset/"
+    if not url or not url.startswith(prefix):
+        return None
+    base = (store.papers_dir / f"{paper_id}_assets").resolve()
+    try:
+        target = (base / unquote(url[len(prefix):])).resolve()
+    except Exception:
+        return None
+    if target != base and base not in target.parents:
+        return None
+    return target if target.is_file() else None
+
+
+def _to_llm_config(req: LLMConfigIn | None) -> LLMConfig | None:
+    if req is None:
+        return None
+    return LLMConfig(
+        api_key=req.api_key,
+        base_url=req.base_url.rstrip("/"),
+        model=req.model,
+        timeout=req.timeout,
+    )
 
 
 class FolderIn(BaseModel):
@@ -870,9 +911,17 @@ async def list_papers() -> dict:
 async def upload_papers(
     files: list[UploadFile] = File(...),
     folder_id: str | None = Form(default=None),
+    vision_config: str = Form(default=""),
 ) -> dict:
     if folder_id and store.get_folder(folder_id) is None:
         raise HTTPException(status_code=404, detail="文件夹不存在")
+
+    cfg: LLMConfig | None = None
+    if vision_config:
+        try:
+            cfg = _to_llm_config(LLMConfigIn.model_validate_json(vision_config))
+        except Exception:
+            log.warning("上传时携带的识图配置无法解析，改用服务端已同步配置")
 
     added, failed = [], []
     for f in files:
@@ -884,11 +933,19 @@ async def upload_papers(
         if len(data) < 1024:
             failed.append({"filename": name, "error": "文件过小，可能不是有效 PDF"})
             continue
+        # 同一份 PDF 在同一文件夹里只保留一份；否则会生成两个副本，
+        # 其中一个永远停在旧解析结果（用户打不开新版公式的常见原因）。
+        existing = store.find_by_pdf_hash(data, folder_id=folder_id)
+        if existing is not None:
+            added.append(_public(existing))
+            if existing.get("status") != "ready":
+                asyncio.create_task(_parse_task(existing["id"], cfg))
+            continue
         meta = {"folder_id": folder_id} if folder_id else None
         row = store.add(name, data, meta)
         added.append(_public(row))
         # 上传后立刻后台解析（布局 + 图表 + 公式裁图），不阻塞上传响应
-        asyncio.create_task(_parse_task(row["id"]))
+        asyncio.create_task(_parse_task(row["id"], cfg))
     return {"added": added, "failed": failed}
 
 
@@ -953,9 +1010,18 @@ async def import_paper(req: ImportReq) -> dict:
     if req.folder_id and store.get_folder(req.folder_id) is None:
         raise HTTPException(status_code=404, detail="文件夹不存在")
 
+    data = path.read_bytes()
+    existing = store.find_by_pdf_hash(data, folder_id=req.folder_id)
+    if existing is not None:
+        if existing.get("status") != "ready":
+            asyncio.create_task(
+                _parse_task(existing["id"], _to_llm_config(req.vision_config))
+            )
+        return {"added": [_public(existing)], "failed": []}
+
     meta = {"folder_id": req.folder_id} if req.folder_id else None
-    row = store.add(path.name, path.read_bytes(), meta)
-    asyncio.create_task(_parse_task(row["id"]))
+    row = store.add(path.name, data, meta)
+    asyncio.create_task(_parse_task(row["id"], _to_llm_config(req.vision_config)))
     return {"added": [_public(row)], "failed": []}
 
 
@@ -2729,13 +2795,76 @@ async def paper_asset(paper_id: str, rel: str) -> FileResponse:
 
 
 @app.post("/api/papers/{paper_id}/parse")
-async def reparse(paper_id: str) -> dict:
+async def reparse(paper_id: str, req: ParseReq | None = None) -> dict:
     if not store.get(paper_id):
         raise HTTPException(status_code=404, detail="论文不存在")
     if paper_id in _parsing:
         return {"ok": True, "status": "parsing"}
-    asyncio.create_task(_parse_task(paper_id))
+    cfg = _to_llm_config(req.vision_config) if req else None
+    asyncio.create_task(_parse_task(paper_id, cfg))
     return {"ok": True, "status": "parsing"}
+
+
+@app.post("/api/papers/{paper_id}/formulas/recognize")
+async def recognize_formulas(paper_id: str, req: FormulaRecognizeReq) -> dict:
+    """把已有论文里还没有 LaTeX 的公式裁图批量送给识图模型。
+
+    不重新解析版面，也不动译文/标注；识别结果按图片 sha1 缓存并回写
+    blocks.json。阅读页打开论文时若发现公式还是截图，会自动调用一次。
+    """
+    if not store.get(paper_id):
+        raise HTTPException(status_code=404, detail="论文不存在")
+    cfg = _to_llm_config(req.config) or _vision_config
+    if cfg is None:
+        raise HTTPException(
+            status_code=400,
+            detail="未配置识图模型：请先在 设置 → 模型 里配置识图模型，公式会保留为截图。",
+        )
+
+    raw_blocks = store.read_blocks(paper_id) or []
+    blocks = raw_blocks.get("blocks") if isinstance(raw_blocks, dict) else raw_blocks
+    targets = [
+        b for b in (blocks or [])
+        if isinstance(b, dict)
+        and b.get("kind") == "equation"
+        and b.get("image_path")
+        and (req.force or not (b.get("latex") or "").strip())
+    ]
+    if not targets:
+        return {"ok": True, "total": 0, "recognized": 0, "failed": 0, "items": []}
+
+    backend = OpenAICompatBackend(cfg)
+    sem = asyncio.Semaphore(4)
+
+    async def one(block: dict) -> dict | None:
+        path = _paper_asset_path(paper_id, str(block.get("image_path") or ""))
+        if path is None:
+            return None
+        image = await asyncio.to_thread(path.read_bytes)
+        tex = read_cached_latex(image)
+        if not tex or req.force:
+            async with sem:
+                try:
+                    tex = await recognize_latex(image, model=cfg.model, backend=backend)
+                except Exception:
+                    log.warning("公式识别失败 %s/%s", paper_id, block.get("id"), exc_info=True)
+                    tex = ""
+        if not tex:
+            return None
+        write_cached_latex(image, tex)
+        await asyncio.to_thread(store.update_block_latex, paper_id, str(block["id"]), tex)
+        return {"block_id": block["id"], "latex": tex}
+
+    results = await asyncio.gather(*(one(b) for b in targets))
+    items = [r for r in results if r]
+    log.info("补齐公式 LaTeX %s：%d/%d", paper_id, len(items), len(targets))
+    return {
+        "ok": True,
+        "total": len(targets),
+        "recognized": len(items),
+        "failed": len(targets) - len(items),
+        "items": items,
+    }
 
 
 class TranslateReq(BaseModel):
@@ -2888,7 +3017,9 @@ async def _translate_pages(
         targets = [
             (i, b) for i, b in enumerate(all_blocks)
             if (pages is None or b.get("page") in pages)
-            and b.get("translatable")
+            # 历史数据的图注块 translatable=False，这里按 kind 放行，
+            # 否则图表栏的 captionZh 永远为空。
+            and (b.get("translatable") or b.get("kind") == "caption")
             and (b.get("text") or "").strip()
             and not b.get("translated")
         ]
@@ -2997,7 +3128,9 @@ async def translate_stream(paper_id: str, req: TranslateReq) -> StreamingRespons
                 targets = [
                     (i, b) for i, b in enumerate(all_blocks)
                     if (pages is None or b.get("page") in pages)
-                    and b.get("translatable")
+                    # 历史数据的图注块 translatable=False，这里按 kind 放行，
+                    # 否则图表栏的 captionZh 永远为空。
+                    and (b.get("translatable") or b.get("kind") == "caption")
                     and (b.get("text") or "").strip()
                     and not b.get("translated")
                 ]
@@ -3105,7 +3238,7 @@ async def translate_stream(paper_id: str, req: TranslateReq) -> StreamingRespons
     )
 
 
-async def _parse_task(paper_id: str) -> None:
+async def _parse_task(paper_id: str, vision_config: LLMConfig | None = None) -> None:
     row = store.get(paper_id)
     pdf = store.pdf_path(paper_id)
     if not row or not pdf or paper_id in _parsing:
@@ -3119,13 +3252,14 @@ async def _parse_task(paper_id: str) -> None:
         parsed = await asyncio.to_thread(parse_pdf, pdf, paper_id, assets)
         # 配了识图模型就把显示公式转成 LaTeX；阅读页优先用 KaTeX 矢量渲染，
         # 识别失败或没配置时自动回落到裁图，不影响阅读。
-        if _vision_config is not None:
+        cfg = vision_config or _vision_config
+        if cfg is not None:
             try:
                 stats = await asyncio.wait_for(
                     recognize_equations(
                         parsed.blocks,
                         concurrency=6,
-                        backend=OpenAICompatBackend(_vision_config),
+                        backend=OpenAICompatBackend(cfg),
                     ),
                     timeout=FORMULA_TIMEOUT,
                 )
@@ -3134,6 +3268,8 @@ async def _parse_task(paper_id: str) -> None:
                 log.warning("公式识别超时（%ss），剩余公式保留裁图", FORMULA_TIMEOUT)
             except Exception:
                 log.exception("公式识别失败 %s", paper_id)
+        else:
+            log.info("未配置识图模型，公式保留裁图：%s", paper_id)
         blocks: list[dict] = []
         for b in parsed.blocks:
             d = b.to_dict()
@@ -3143,6 +3279,16 @@ async def _parse_task(paper_id: str) -> None:
                     d["image_path"] = f"/api/papers/{paper_id}/asset/{rel.as_posix()}"
                 except Exception:
                     d["image_path"] = None
+            for item in d.get("inline_math") or []:
+                if not item.get("image_path"):
+                    continue
+                try:
+                    rel = Path(item["image_path"]).resolve().relative_to(assets.resolve())
+                    item["image_path"] = (
+                        f"/api/papers/{paper_id}/asset/{rel.as_posix()}"
+                    )
+                except Exception:
+                    item["image_path"] = None
             blocks.append(d)
         store.write_blocks(paper_id, blocks)
         store.update(

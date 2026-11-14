@@ -3,6 +3,7 @@ import rehypeKatex from 'rehype-katex'
 import remarkBreaks from 'remark-breaks'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
+import { normalizeMath } from '../lib/math'
 
 /**
  * 流式输出时补上未闭合的 Markdown 标记。
@@ -28,7 +29,8 @@ export function balanceMarkdown(src: string): string {
  *
  * - react-markdown 默认不解析原始 HTML，模型输出里即使混入标签也不会执行；
  * - 表格在 344px 的窄面板里横向滚动；
- * - 公式交给 KaTeX（样式已在 main.tsx 引入）；
+ * - 公式交给 KaTeX（样式已在 main.tsx 引入）；模型常见的 `\(...\)`、
+ *   `\[...\]`、`\begin{equation}` 等写法先统一成 `$` / `$$` 再渲染；
  * - remark-breaks 保留单换行，和旧版 pre-wrap 的观感一致。
  */
 export function Markdown({ text }: { text: string }) {
@@ -52,7 +54,7 @@ export function Markdown({ text }: { text: string }) {
           },
         }}
       >
-        {text}
+        {normalizeMath(text)}
       </ReactMarkdown>
     </div>
   )

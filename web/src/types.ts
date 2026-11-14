@@ -12,6 +12,17 @@ export type BlockKind =
   | 'reference'
   | 'footnote'
 
+/** 正文里的行内公式：start/end 是段落文本中的位置。 */
+export interface InlineMath {
+  start: number
+  end: number
+  latex: string
+  /** 规则无法可靠重建、由解析器裁了小图兜底 */
+  fallback: boolean
+  source: string
+  image_path?: string | null
+}
+
 export interface Block {
   id: string
   order: number
@@ -27,9 +38,13 @@ export interface Block {
   latex?: string
   /** 公式编号（PDF 里印出来的 (3) / (2.1)） */
   eq_number?: string
+  /** 正文里的行内公式（解析阶段按字体/字号/基线重建） */
+  inline_math?: InlineMath[]
   caption: string
   translatable: boolean
   bbox: number[]
+  /** 跨栏/跨页块的逐页矩形 [page, x0, y0, x1, y1]；单页块不返回 */
+  bboxes?: number[][]
 }
 
 /** 点击图表/公式旁的小圆圈后，加入左侧问答「附录」的条目。 */

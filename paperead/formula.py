@@ -60,6 +60,8 @@ def _strip_wrappers(tex: str) -> str:
 _NUMBER_SUFFIX_RE = re.compile(
     r"(?:\\tag\*?\{[^{}]*\}|[（(]\s*[A-Z]?\d{1,3}(?:\.\d+)?\s*[)）])\s*$"
 )
+# 编号被摘掉后，模型常留下 \quad / \, / 行尾逗号这类排版残留
+_TRAILING_NOISE_RE = re.compile(r"(?:\\quad|\\qquad|\\,|\\;|\\:|\\!|[,，;；])\s*$")
 
 
 def _strip_number(tex: str) -> str:
@@ -72,6 +74,10 @@ def _strip_number(tex: str) -> str:
     while tex and tex != prev:
         prev = tex
         tex = _NUMBER_SUFFIX_RE.sub("", tex).strip()
+    prev = None
+    while tex and tex != prev:
+        prev = tex
+        tex = _TRAILING_NOISE_RE.sub("", tex).strip()
     return tex
 
 

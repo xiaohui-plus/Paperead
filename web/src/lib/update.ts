@@ -32,6 +32,26 @@ interface UpdateCache {
 
 const CACHE_KEY = 'paperead.update.check'
 export const UPDATE_DAY_MS = 24 * 60 * 60 * 1000
+/** 打开设置页时，缓存超过这个时间就静默复查一次，避免发布新版本后仍显示旧结果。 */
+export const UPDATE_RECHECK_MS = 5 * 60 * 1000
+
+/** 桌面更新器上报的阶段进度。 */
+export interface UpdateProgress {
+  stage:
+    | 'checking'
+    | 'downloading'
+    | 'installing'
+    | 'launching'
+    | 'up-to-date'
+    | 'failed'
+  version?: string
+  downloaded?: number
+  total?: number
+  percent?: number
+  message?: string
+}
+
+const UPDATE_PROGRESS_EVENT = 'paperead:update-progress'
 
 export function loadUpdateCache(): UpdateCache | null {
   try {
@@ -88,6 +108,22 @@ export async function checkUpdate(force = false): Promise<UpdateInfo> {
   if (isAndroidApp()) {
     // 安卓壳连的是电脑后端，桌面版的版本号不代表 APK 版本，必须走原生检查
     info = await checkAndroidUpdate()
+  } else if (isDesktopApp()) {
+    // 桌面端用 Tauri 更新器检查：它拿安装包自身的版本与 Gitee 清单比较，
+    // 和「帮助 → 检查更新」同源，不会因 sidecar 版本不一致而漏报。
+    const invoke = tauriInvoke()
+    if (!invoke) throw new Error('当前环境不支持检查更新')
+    const raw = ((await invoke('check_desktop_update')) || {}) as UpdateInfo
+    info = {
+      current: String(raw.current || ''),
+      latest: String(raw.latest || ''),
+      has_update: Boolean(raw.has_update),
+      notes: String(raw.notes || ''),
+      pub_date: String(raw.pub_date || ''),
+      url: String(raw.url || ''),
+      release_url: String(raw.release_url || ANDROID_RELEASE_PAGE),
+      source: raw.source ? String(raw.source) : undefined,
+    }
   } else {
     const res = await fetch(`/api/update${force ? '?force=1' : ''}`)
     const data = await res.json().catch(() => ({}))
@@ -169,11 +205,33 @@ export function canInstallInApp(): boolean {
   return isDesktopApp() || isAndroidApp()
 }
 
+/** 订阅桌面安装器上报的进度；非桌面环境返回空解除函数。 */
+export async function watchUpdateProgress(
+  handler: (progress: UpdateProgress) => void,
+): Promise<() => void> {
+  if (!isDesktopApp()) return () => {}
+  try {
+    const { listen } = await import('@tauri-apps/api/event')
+    return await listen<UpdateProgress>(UPDATE_PROGRESS_EVENT, (event) => {
+      handler(event.payload)
+    })
+  } catch {
+    return () => {}
+  }
+}
+
 /**
  * 桌面版交给 Tauri 更新器：重新检查、下载并启动安装程序；
  * Android 走原生插件：下载 APK 后调起系统安装器。
+ *
+ * onProgress 会依次收到 checking / downloading（带百分比）/ installing / launching。
+ * 安装器启动后应用会自动退出，invoke 的 Promise 可能随 WebView 销毁被拒绝，
+ * 此时只要已经收到 launching 事件，就按成功处理，不再显示「更新失败」。
  */
-export async function installUpdateInApp(info?: UpdateInfo): Promise<string> {
+export async function installUpdateInApp(
+  info?: UpdateInfo,
+  onProgress?: (progress: UpdateProgress) => void,
+): Promise<string> {
   const invoke = tauriInvoke()
   if (!invoke) {
     throw new Error('当前环境不支持自动安装，请下载安装包')
@@ -187,7 +245,24 @@ export async function installUpdateInApp(info?: UpdateInfo): Promise<string> {
     })
     return String(info.latest || '')
   }
-  const version = await invoke('install_update')
-  return String(version ?? '')
+
+  let launched = false
+  let launchedVersion = ''
+  const unlisten = await watchUpdateProgress((progress) => {
+    if (progress.stage === 'launching') {
+      launched = true
+      launchedVersion = String(progress.version || '')
+    }
+    onProgress?.(progress)
+  })
+  try {
+    const version = await invoke('install_update')
+    return String(version ?? '') || launchedVersion
+  } catch (error) {
+    if (launched) return launchedVersion
+    throw error
+  } finally {
+    unlisten()
+  }
 }
 

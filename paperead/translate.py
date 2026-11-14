@@ -311,9 +311,12 @@ async def translate_paper(
         {"translated": n, "failed": n, "quality_warn": n}
     """
     glossary = glossary or {}
+    # 历史论文的 caption 块是 translatable=False（旧解析器产物），图注仍要翻译，
+    # 否则图表栏永远只有英文；新解析结果已把 caption 置为可翻译。
     targets = [
         b for b in blocks
-        if b.translatable and b.text.strip() and _is_translatable(b.text)
+        if (b.translatable or b.kind == "caption")
+        and b.text.strip() and _is_translatable(b.text)
     ]
     if limit:
         targets = targets[:limit]

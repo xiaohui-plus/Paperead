@@ -14,11 +14,18 @@ import {
   type Folder,
   type PaperRow,
 } from '../lib/library'
+import { toPayload, visionModel } from '../lib/settings'
 import { PaperCard } from './PaperCard'
 import { Sidebar } from './Sidebar'
 import type { NavKey } from './Sidebar'
 import { SettingsDialog } from './SettingsDialog'
 import { FileSyncDialog } from './FileSyncDialog'
+
+/** 上传/重新解析时把当前识图模型一并交给服务端，顺便让解析阶段直接产出 LaTeX。 */
+function visionPayload() {
+  const model = visionModel()
+  return model ? toPayload(model) : null
+}
 import {
   IconBack,
   IconFolder,
@@ -186,7 +193,7 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
       }
       setUploading(true)
       try {
-        const res = await uploadPapers(pdfs, activeFolderId)
+        const res = await uploadPapers(pdfs, activeFolderId, visionPayload())
         await refresh()
         if (res.added.length > 0) {
           tourBus.emit('library:uploaded', { paperId: res.added[0].id })
@@ -228,7 +235,7 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
       try {
         for (const path of pdfs) {
           try {
-            const res = await importPaperByPath(path, activeFolderId)
+            const res = await importPaperByPath(path, activeFolderId, visionPayload())
             added.push(...res.added)
             for (const item of res.failed) {
               failures.push(`${item.filename}：${item.error}`)
@@ -410,7 +417,7 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
 
   const onReparse = async (paper: PaperRow) => {
     try {
-      await reparsePaper(paper.id)
+      await reparsePaper(paper.id, visionPayload())
       notify('已重新开始解析')
       await refresh()
     } catch (e) {

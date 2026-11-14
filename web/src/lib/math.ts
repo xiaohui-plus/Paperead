@@ -69,3 +69,90 @@ export function splitMath(input: string): MathSegment[] {
     seg.type === 'text' ? splitBare(seg.value) : [seg],
   )
 }
+/* ── Markdown 渲染前的公式定界符归一化 ─────────────────────
+ *
+ * remark-math 只认 `$...$` / `$$...$$`，但模型和论文文本里常见的写法是
+ * `\(...\)`、`\[...\]`、`\begin{equation}`、`\begin{align}`，这些会原样显示成
+ * LaTeX 源码。这里把各种写法统一成 remark-math 能识别的形式，代码块里的
+ * 内容保持原样。
+ */
+
+const CODE_OR_INLINE = /(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`)/g
+const EXISTING_DISPLAY = /\$\$[\s\S]*?\$\$/g
+
+// 顶层数学环境：单独成块、需要整块转成 $$...$$
+const MATH_ENV =
+  String.raw`equation\*?|displaymath|math|align\*?|alignat\*?|gather\*?|multline\*?|eqnarray\*?|flalign\*?|split|alignedat\*?|aligned|gathered|cases|pmatrix|bmatrix|Bmatrix|vmatrix|Vmatrix|matrix|array`
+
+const ENV_RE = new RegExp(
+  String.raw`\\begin\{(${MATH_ENV})\}([\s\S]*?)\\end\{\1\}`,
+  'g',
+)
+const BRACKET_RE = new RegExp(String.raw`(?<!\\)\\\[([\s\S]*?)(?<!\\)\\\]`, 'g')
+const PAREN_RE = new RegExp(String.raw`(?<!\\)\\\(([\s\S]*?)(?<!\\)\\\)`, 'g')
+
+// 独立成行的裸 LaTeX（整行都没有写 $ 定界符）
+const BARE_MATH_LINE =
+  /^\s*\\(?:frac|dfrac|tfrac|sqrt|sum|prod|int|oint|lim|left|right|mathbb|mathcal|mathbf|mathrm|mathit|text|alpha|beta|gamma|delta|epsilon|zeta|eta|theta|iota|kappa|lambda|mu|nu|xi|rho|sigma|tau|upsilon|phi|chi|psi|omega|partial|nabla|cdot|times|pm|mp|leq|geq|neq|approx|equiv|sim|infty|log|exp|sin|cos|tan|max|min|arg|det|binom)\b[^$]*$/
+
+// 裸公式行里只允许数学符号，避免把「\frac 是除法命令」这类说明文字吞进公式
+const BARE_MATH_CHARS = /^[\s\\a-zA-Z0-9{}^_=+\-*/()[\].,:;|&<>!]+$/
+
+function stripUnsupported(body: string): string {
+  return body
+    .replace(/\\(?:label|nonumber|notag)\{[^{}]*\}/g, '')
+    .replace(/\\(?:nonumber|notag)\b/g, '')
+}
+
+function asDisplay(body: string): string {
+  const text = body.trim()
+  if (!text) return ''
+  if (text.includes('\n')) return `\n\n$$\n${text}\n$$\n\n`
+  return `$$${text}$$`
+}
+
+function envToDisplay(name: string, body: string): string {
+  const base = name.replace(/\*$/, '')
+  const inner = stripUnsupported(body).trim()
+  if (!inner) return ''
+
+  if (base === 'equation' || base === 'displaymath' || base === 'math') {
+    return asDisplay(inner)
+  }
+  if (base === 'multline' || base === 'eqnarray' || base === 'flalign') {
+    return asDisplay(`\\begin{gathered}\n${inner}\n\\end{gathered}`)
+  }
+  return asDisplay(`\\begin{${name}}\n${inner}\n\\end{${name}}`)
+}
+
+export function normalizeMath(input: string): string {
+  if (!input || (!input.includes('\\') && !input.includes('$'))) return input
+
+  const saved: string[] = []
+  const keep = (value: string) => {
+    saved.push(value)
+    return `\u0000${saved.length - 1}\u0000`
+  }
+
+  // 代码块 / 行内代码 / 已经是 $$...$$ 的内容不参与改写
+  let text = input.replace(CODE_OR_INLINE, keep)
+  text = text.replace(EXISTING_DISPLAY, keep)
+  // 先处理 \[...\]：里面的 aligned 等环境随外层一起包进同一个 $$...$$
+  text = text.replace(BRACKET_RE, (_full, body: string) => keep(asDisplay(body)))
+  text = text.replace(ENV_RE, (_full, name: string, body: string) =>
+    keep(envToDisplay(name, body)),
+  )
+  text = text.replace(PAREN_RE, (_full, body: string) => {
+    const value = body.trim()
+    if (!value) return ''
+    return value.includes('\n') ? keep(asDisplay(value)) : keep(`$${value}$`)
+  })
+  text = text
+    .split('\n')
+    .map((line) =>
+      BARE_MATH_LINE.test(line) && BARE_MATH_CHARS.test(line) ? keep(asDisplay(line)) : line,
+    )
+    .join('\n')
+
+  return text.replace(/\u0000(\d+)\u0000/g, (_full, index: string) => saved[Number(index)] ?? '')
+}

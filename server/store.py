@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -110,6 +111,30 @@ class LibraryStore:
                 r for r in self._read()
                 if r.get("source_id") == source_id
                 and (r.get("project_id") or None) == scope
+            ),
+            None,
+        )
+
+    def find_by_pdf_hash(
+        self,
+        data: bytes,
+        folder_id: str | None = None,
+        project_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """按 PDF 字节的 sha256 查重（同一文件夹/项目内）。
+
+        用户重复上传同一份 PDF 时复用已有论文，避免生成两个副本、
+        其中一个永远停在旧解析结果。
+        """
+        digest = hashlib.sha256(data).hexdigest()
+        folder = folder_id or None
+        project = project_id or None
+        return next(
+            (
+                r for r in self._read()
+                if r.get("pdf_sha256") == digest
+                and (r.get("folder_id") or None) == folder
+                and (r.get("project_id") or None) == project
             ),
             None,
         )
@@ -325,6 +350,8 @@ class LibraryStore:
             "error": "",
             "translated": 0,
             "blocks": 0,
+            # 同一份 PDF 重复导入时用于去重；老数据没有这个字段，按缺失跳过
+            "pdf_sha256": hashlib.sha256(data).hexdigest(),
         }
         # 检索页导入时带上来源信息：source / source_id 用于去重，标题作者兜底用
         if meta:

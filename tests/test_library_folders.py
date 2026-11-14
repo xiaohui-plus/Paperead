@@ -123,7 +123,7 @@ def api(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(main, "store", store)
     monkeypatch.setattr(main, "TOKEN", "")
 
-    async def _noop(_paper_id: str) -> None:
+    async def _noop(_paper_id: str, _vision_config=None) -> None:
         return None
 
     monkeypatch.setattr(main, "_parse_task", _noop)

@@ -34,6 +34,8 @@ _AAAI_BREAK_RE = re.compile(
 _QUOTED_RE = re.compile(r"[“\"']([^”\"']{8,240})[”\"']")
 # "Author et al. 2021. Title" / "Author, X. 2021. Title"
 _YEAR_PREFIX_RE = re.compile(r"^\s*(.{0,180}?)\b((?:19|20)\d{2})[a-z]?\.\s+(.{8,})", re.S)
+# 括号年份：`Wang H, ... et al (2023) Title...`
+_BRACKET_YEAR_RE = re.compile(r"\((?:19|20)\d{2}[a-z]?\)\s*")
 
 
 @dataclass
@@ -79,9 +81,6 @@ def _looks_author_year(text: str) -> bool:
         return True
     return bool(re.fullmatch(r"[A-Z][A-Za-z\-'’]+(?:\s+and\s+[A-Z][A-Za-z\-'’]+)?", authors))
 
-
-def _looks_year_first(text: str) -> bool:
-    return bool(re.match(r"^\s*(?:19|20)\d{2}[a-z]?[.,]\s", text))
 
 
 def _is_continuation(piece: str, prev: str | None) -> bool:
@@ -144,10 +143,48 @@ def _only_reference_section(blocks: list[Block], fallback: list[str]) -> list[st
         for b in blocks
         if b.kind == "reference" and len((b.text or "").strip()) >= 6 and in_refs(b.section)
     ]
-    # 只有明确章节覆盖了大多数 reference 块时才采用，避免把真正文献一起过滤掉
-    if len(canonical) >= max(10, int(len(fallback) * 0.6)):
+    # canonical 依赖 block.section；分页/标题打断会让一部分条目的 section
+    # 变成空或别的章节名。只有 canonical 基本覆盖 fallback 时才收窄，
+    # 否则用 fallback，避免把 [14]-[32] 这类条目整段丢掉。
+    if canonical and (not fallback or len(canonical) >= len(fallback) * 0.9):
         return canonical
-    return fallback
+    return fallback or canonical
+
+
+# 块内任意位置的编号：`[12]` / `(12)` / `12.` / `12)`，后面必须跟内容
+_NUM_TOKEN_RE = re.compile(
+    r"(?:(?<=\s)|^)(?:\[(\d{1,3})\]|\((\d{1,3})\)|(\d{1,3})[.)])\s+(?=\S)"
+)
+
+
+def _split_numbered(text: str, last_num: int | None) -> list[str]:
+    """按「递增的文献编号」补切块内条目。
+
+    PyMuPDF 偶尔把连续几条文献并进同一个块，`_pieces` 的固定模式又会
+    漏掉其中几条。这里扫描块内所有编号，只有落在 `last_num+1 .. +20`
+    的编号才当作新条目，避免把卷号（`PMLR 43.`）、页码、年份
+    （`2024.`）误切成文献。
+    """
+    cuts: list[tuple[int, int]] = []
+    expect = last_num
+    for m in _NUM_TOKEN_RE.finditer(text):
+        num = next((int(g) for g in m.groups() if g), 0)
+        if num < 1:
+            continue
+        ok = 1 <= num <= 500 if expect is None else expect < num <= expect + 20
+        if ok:
+            cuts.append((m.start(), num))
+            expect = num
+    if not cuts:
+        return [text]
+    out: list[str] = []
+    prev = 0
+    for pos, _ in cuts:
+        if pos > prev:
+            out.append(text[prev:pos].strip())
+        prev = pos
+    out.append(text[prev:].strip())
+    return [p for p in out if p]
 
 
 def _split_entries(blocks: list[Block]) -> list[tuple[int | None, str]]:
@@ -159,6 +196,13 @@ def _split_entries(blocks: list[Block]) -> list[tuple[int | None, str]]:
     ]
     if not ref_blocks:
         ref_blocks = _fallback_reference_blocks(blocks)
+    else:
+        # reference 块可能只覆盖参考文献区的前几页（页码/分页打断分类
+        # 状态），剩余条目落到 para。按 References 标题收集的 fallback
+        # 更全时改用 fallback，否则 `[22]` 之后的引用全都对不上。
+        fallback = _fallback_reference_blocks(blocks)
+        if len(fallback) > len(ref_blocks):
+            ref_blocks = fallback
     # 双栏排版偶尔会把正文误标成 reference；有明确 References 章节时只取那一段
     ref_blocks = _only_reference_section(blocks, ref_blocks)
     # 有 `[1]` / `1.` 编号时用编号模式；Nature 这类无编号文献按「一块一条」处理
@@ -175,18 +219,34 @@ def _split_entries(blocks: list[Block]) -> list[tuple[int | None, str]]:
         cur_num, cur_parts = None, []
 
     for text in ref_blocks:
+        # 编号校验只在「块内」生效：双栏/分页会让参考文献块的顺序错乱
+        # （例如 [33..43] 块排在 [14..32] 前面），用全局 last_num 会把
+        # 后出现的 [14..32] 全当成编号回退丢掉。
+        block_last: int | None = None
         if numbered:
-            for piece in _pieces(text):
-                m = _NUM_START_RE.match(piece)
-                if m and not _looks_year_first(piece):
-                    flush()
-                    cur_num = int(m.group(1))
-                    cur_parts = [piece]
-                elif _looks_author_year(piece) and cur_parts and not cur_parts[-1].rstrip().endswith(("-", "—")):
-                    flush()
-                    cur_parts = [piece]
-                else:
-                    cur_parts.append(piece)
+            for raw_piece in _pieces(text):
+                for piece in _split_numbered(raw_piece, block_last):
+                    m = _NUM_START_RE.match(piece)
+                    if m:
+                        num = int(m.group(1))
+                        # 编号 <= 0、超过 500、块内回退或突跳（>20）说明不是
+                        # 文献编号：页码、表格数据行、卷号（`PMLR 43.`）。
+                        # 跳过而不是并入上一条，否则会污染内容并制造 717/0 假条目。
+                        if num < 1 or num > 500:
+                            continue
+                        if block_last is not None and (
+                            num <= block_last or num > block_last + 20
+                        ):
+                            continue
+                        block_last = num
+                        flush()
+                        cur_num = num
+                        cur_parts = [piece]
+                    elif _looks_author_year(piece) and cur_parts and not cur_parts[-1].rstrip().endswith(("-", "—")):
+                        flush()
+                        cur_parts = [piece]
+                    else:
+                        cur_parts.append(piece)
         else:
             # 无编号文献通常是「一个文本块一条」；只有明确是续行时才并入上一条
             pieces = _pieces(text)
@@ -298,6 +358,13 @@ def _clean_title(raw: str) -> str:
         if _good_title(cand):
             return cand[:240]
 
+    # 2b) 作者-年份用括号：`Wang H, ... et al (2023) Title...`
+    m2 = _BRACKET_YEAR_RE.search(t)
+    if m2:
+        cand = _norm_title(_first_sentence(t[m2.end():]))
+        if _good_title(cand):
+            return cand[:240]
+
     # 3) 兜底：按句点切段，挑最像标题的一段
     parts = [p.strip() for p in re.split(r"\.\s+", t) if p.strip()]
     best = ""
@@ -341,9 +408,10 @@ def parse(blocks: list[Block]) -> list[Reference]:
         if len(text) < 20:
             continue
         title = _clean_title(text)
-        # 标题都抽不出来的条目留着只会污染脉络，直接丢弃
+        # 标题抽不出来也不能丢条：正文的 [n] 要靠它对齐到具体文献。
+        # 用原文前缀降级保留，比整条消失好（出处仍可用 raw 文本）。
         if not _good_title(title):
-            continue
+            title = _norm_title(text[:160]) or text[:160]
         if num is None:
             # 无编号条目用顺序号；避开正文里已出现的印刷编号
             index = seq

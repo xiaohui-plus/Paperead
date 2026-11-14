@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { Paper, ViewMode } from '../types'
 import { downloadMarkdown } from '../lib/markdown'
 import { tourBus } from '../tour/tourBus'
-import { IconBack, IconCollapse, IconDownload, IconExpand, IconMinus, IconPdf, IconPlus, IconPrint, IconSettings, IconSidebar } from './icons'
+import { IconAutoHighlight, IconBack, IconCollapse, IconDownload, IconExpand, IconExternalLink, IconMinus, IconPdf, IconPlus, IconPrint, IconSettings, IconSidebar, IconTranslate } from './icons'
 
 interface Props {
   paper: Paper
@@ -30,6 +30,11 @@ interface Props {
   panelCollapsed?: boolean
   onTogglePanel?: () => void
   showPanelToggle?: boolean
+  /** 自动阅读重点 / 自动翻译的快捷开关 */
+  autoHighlights: boolean
+  onToggleAutoHighlights: () => void
+  autoTranslate: boolean
+  onToggleAutoTranslate: () => void
 }
 
 const MODES: { key: ViewMode; label: string }[] = [
@@ -62,6 +67,10 @@ export function TopBar({
   panelCollapsed = false,
   onTogglePanel,
   showPanelToggle = false,
+  autoHighlights,
+  onToggleAutoHighlights,
+  autoTranslate,
+  onToggleAutoTranslate,
 }: Props) {
   const pct = total ? Math.round((translated / total) * 100) : 0
 
@@ -141,12 +150,7 @@ export function TopBar({
           <IconBack />
         </button>
       )}
-      <div className="brand">
-        <span className="brand-mark">P</span>
-        <span className="brand-name">Paperead</span>
-      </div>
 
-      <div className="divider" />
 
       <div className="doc-title">
         {paper.title}
@@ -165,6 +169,24 @@ export function TopBar({
             <IconSidebar />
           </button>
         )}
+        <button
+          className="icon-btn tool-toggle"
+          data-active={autoHighlights}
+          aria-pressed={autoHighlights}
+          title={autoHighlights ? '自动阅读重点：已开启，点击关闭' : '自动阅读重点：已关闭，点击开启'}
+          onClick={onToggleAutoHighlights}
+        >
+          <IconAutoHighlight />
+        </button>
+        <button
+          className="icon-btn tool-toggle"
+          data-active={autoTranslate}
+          aria-pressed={autoTranslate}
+          title={autoTranslate ? '自动翻译：已开启，点击关闭' : '自动翻译：已关闭，点击开启'}
+          onClick={onToggleAutoTranslate}
+        >
+          <IconTranslate />
+        </button>
         {!pdfMode && (
           <div className="segmented" data-tour="reader-mode" role="tablist" aria-label="阅读模式">
             {MODES.map((m) => (
@@ -227,13 +249,14 @@ export function TopBar({
 
         {pdfMode && (
           <a
-            className="pill"
+            className="icon-btn"
             href={pdfHref}
             target="_blank"
             rel="noreferrer"
+            aria-label="在新标签页打开 PDF"
             title="在新标签页打开 PDF（浏览器自带阅读器）"
           >
-            新窗口 ↗
+            <IconExternalLink />
           </a>
         )}
 
@@ -243,13 +266,13 @@ export function TopBar({
             onClick={onOpenSettings}
             title="未配置回答模型，翻译不会启动"
           >
-            未配置回答模型
+            未配置模型
           </button>
         )}
 
         <span className="pill" title={`已翻译 ${translated} / ${total} 段`}>
           {page ? <>P{page} · </> : null}
-          已译 <b>{translated}</b>/{total}
+          <b>{translated}</b>/{total}
           {translating && <i className="spin-dot" />}
         </span>
 

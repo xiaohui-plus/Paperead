@@ -7,8 +7,9 @@ import {
   isAndroidApp,
   loadUpdateCache,
   parseUpdateNotes,
-  UPDATE_DAY_MS,
+  UPDATE_RECHECK_MS,
   type UpdateInfo,
+  type UpdateProgress,
 } from '../lib/update'
 import {
   activeModel,
@@ -69,6 +70,8 @@ import {
 import {
   loadAutoHighlights,
   saveAutoHighlights,
+  loadAutoTranslate,
+  saveAutoTranslate,
   loadReadingFonts,
   saveReadingFonts,
   loadDefaultReadingMode,
@@ -157,6 +160,40 @@ function providerLabel(editor: EditorState): string {
   return preset?.provider ?? '服务商官网'
 }
 
+function installButtonText(progress: UpdateProgress | null, android: boolean): string {
+  if (android) return '正在下载安装包…'
+  switch (progress?.stage) {
+    case 'downloading':
+      return progress.total
+        ? `正在下载 ${progress.percent ?? 0}%`
+        : '正在下载安装包…'
+    case 'installing':
+      return '正在校验安装包…'
+    case 'launching':
+      return '安装程序已启动'
+    default:
+      return '正在检查更新…'
+  }
+}
+
+function installHintText(progress: UpdateProgress | null, android: boolean): string {
+  if (android) {
+    return '正在下载安装包，完成后会调起系统安装器，请在系统弹窗里确认安装。'
+  }
+  switch (progress?.stage) {
+    case 'downloading':
+      return progress.total
+        ? `正在从 Gitee 下载安装包（${progress.percent ?? 0}%），下载完成后会自动退出并启动安装程序。`
+        : '正在从 Gitee 下载安装包，下载完成后会自动退出并启动安装程序。'
+    case 'installing':
+      return '安装包已下载完成，正在校验签名并启动安装程序。'
+    case 'launching':
+      return '安装程序已启动，应用即将退出；如果安装窗口稍后出现，请在窗口里完成安装。'
+    default:
+      return '正在检查更新…'
+  }
+}
+
 function TestBox({ test }: { test: TestState }) {
   if (test.kind === 'idle') {
     return (
@@ -233,6 +270,8 @@ export function SettingsDialog({
   const [updateError, setUpdateError] = useState('')
   const [installing, setInstalling] = useState(false)
   const [installError, setInstallError] = useState('')
+  const [installProgress, setInstallProgress] = useState<UpdateProgress | null>(null)
+
   const [closing, setClosing] = useState(false)
   const [syncTarget, setSyncTarget] = useState<FileSyncTarget | null>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
@@ -290,6 +329,8 @@ export function SettingsDialog({
     setUpdateError('')
     setInstalling(false)
     setInstallError('')
+    setInstallProgress(null)
+
   }, [open, initialKind])
 
   const runUpdateCheck = useCallback(async (force = false) => {
@@ -308,7 +349,8 @@ export function SettingsDialog({
     }
   }, [])
 
-  // 打开设置时：本地缓存超过一天就自动检查一次，手动检查不受这个限制
+  // 打开设置时：先显示本地缓存，超过几分钟就静默复查一次，避免发布新版本后
+  // 仍把当天早些时候的「已是最新」一直显示下去；手动检查始终重新请求。
   useEffect(() => {
     if (!open) return
     const cached = loadUpdateCache()
@@ -316,19 +358,40 @@ export function SettingsDialog({
       setUpdateInfo(cached.data)
       setUpdateCheckedAt(cached.checkedAt)
     }
-    if (!cached || Date.now() - cached.checkedAt >= UPDATE_DAY_MS) {
-      void runUpdateCheck(false)
+    if (!cached || Date.now() - cached.checkedAt >= UPDATE_RECHECK_MS) {
+      void runUpdateCheck(true)
     }
   }, [open, runUpdateCheck])
 
   const installUpdate = async () => {
     setInstalling(true)
     setInstallError('')
+    setInstallProgress({ stage: 'checking', message: '正在检查更新…' })
+    const report = (progress: UpdateProgress) => {
+      setInstallProgress(progress)
+      if (progress.stage === 'failed' && progress.message) {
+        setInstallError(progress.message)
+      }
+    }
     try {
-      await installUpdateInApp(updateInfo ?? undefined)
+      await installUpdateInApp(updateInfo ?? undefined, report)
+      // Rust 成功返回意味着安装器已经调度，保持「即将退出」状态直到程序关闭。
+      setInstallProgress((prev) =>
+        prev?.stage === 'launching'
+          ? prev
+          : { stage: 'launching', message: '安装程序已启动，应用即将退出…' },
+      )
+
     } catch (e) {
-      setInstallError(e instanceof Error ? e.message : '自动更新失败，请下载安装包')
-    } finally {
+      const message = e instanceof Error ? e.message : '自动更新失败，请下载安装包'
+      if (message.includes('已是最新')) {
+        // 缓存里的「有新版本」可能已经过期，立即按真实清单刷新。
+        setInstallProgress(null)
+        setInstalling(false)
+        void runUpdateCheck(true)
+        return
+      }
+      setInstallError(message)
       setInstalling(false)
     }
   }
@@ -920,7 +983,10 @@ export function SettingsDialog({
               {editor.kind === 'vision' && (
                 <div className="vision-sample">
                   <img src={formulaSample} alt="示例公式" />
-                  <span>测试会用这张公式图验证识图能力。</span>
+                  <span>
+                    测试会用这张公式图验证识图能力。论文里的公式默认保留为截图；
+                    配好识图模型后，解析新论文或重新打开旧论文时会自动转成 LaTeX。
+                  </span>
                 </div>
               )}
 
@@ -1031,6 +1097,9 @@ export function SettingsDialog({
                         </div>
 
                         <p>{selected.note || preset.note}</p>
+                        {preset.modelIdHint && (
+                          <p className="preset-id-hint">{preset.modelIdHint}</p>
+                        )}
                         <div className="preset-actions">
                           <button
                             className="btn small"
@@ -1225,9 +1294,7 @@ export function SettingsDialog({
                       onClick={() => void installUpdate()}
                       disabled={installing}
                     >
-                      {installing
-                        ? '正在下载并安装…'
-                        : `立即更新到 v${updateInfo.latest}`}
+                      {installing ? installButtonText(installProgress, isAndroidApp()) : `立即更新到 v${updateInfo.latest}`}
                     </button>
                   ) : (
                     <a
@@ -1251,11 +1318,24 @@ export function SettingsDialog({
                   )}
                 </div>
                 {installing && (
-                  <p className="update-install-hint">
-                    {isAndroidApp()
-                      ? '正在下载安装包，完成后会调起系统安装器，请在系统弹窗里确认安装。'
-                      : '下载完成后应用会自动关闭并启动安装程序，请勿关闭窗口。'}
-                  </p>
+                  <div className="update-install">
+                    {!isAndroidApp() &&
+                      installProgress?.stage === 'downloading' &&
+                      installProgress.total ? (
+                        <div
+                          className="update-progress"
+                          role="progressbar"
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-valuenow={installProgress.percent ?? 0}
+                        >
+                          <span style={{ width: `${installProgress.percent ?? 0}%` }} />
+                        </div>
+                      ) : null}
+                    <p className="update-install-hint">
+                      {installHintText(installProgress, isAndroidApp())}
+                    </p>
+                  </div>
                 )}
                 {installError && (
                   <div className="update-error">更新失败：{installError}</div>
@@ -1520,6 +1600,7 @@ function ReadingPanel() {
   const [fonts, setFonts] = useState<ReadingFonts>(loadReadingFonts)
   const [mode, setMode] = useState<ViewMode>(loadDefaultReadingMode)
   const [enabled, setEnabled] = useState(loadAutoHighlights)
+  const [autoTranslate, setAutoTranslate] = useState(loadAutoTranslate)
 
   const changeFonts = (patch: Partial<ReadingFonts>) => {
     const next = { ...fonts, ...patch }
@@ -1561,6 +1642,27 @@ function ReadingPanel() {
         <p className="reading-note">
           切换后，已经翻译过的论文会在下次打开时按新语言重新翻译；原文、高亮和笔记不受影响。只对当前这台机器生效。
         </p>
+        <div className="reading-row">
+          <div className="reading-row-label">
+            <b>打开论文自动翻译</b>
+            <span>外文论文打开时自动翻译当前页和下一页；中文论文默认不翻译，可在阅读页顶栏临时打开。关闭后所有论文都不再自动翻译。</span>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={autoTranslate}
+            className="switch"
+            data-on={autoTranslate}
+            onClick={() => {
+              const next = !autoTranslate
+              setAutoTranslate(next)
+              saveAutoTranslate(next)
+            }}
+            title={autoTranslate ? '关闭自动翻译' : '开启自动翻译'}
+          >
+            <i />
+          </button>
+        </div>
       </section>
 
       <section className="reading-card">

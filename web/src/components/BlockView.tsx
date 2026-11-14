@@ -340,6 +340,7 @@ export function BlockView({
           source="en"
           annotations={blockAnnotations}
           highlights={blockHighlights}
+          inlineMath={b.inline_math}
           className="para-en"
           onCite={openCite}
           onAnnotationClick={(annotation, rect) => setEditing({ annotation, rect })}

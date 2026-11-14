@@ -66,7 +66,12 @@ export async function translatePagesLocal(options: LocalTranslateOptions): Promi
   for (const page of options.pages) {
     if (options.signal?.aborted) throw new DOMException('已停止翻译', 'AbortError')
     const blocks = options.paper.blocks.filter(
-      (block) => block.page === page && block.translatable && block.text.trim() && !block.translated,
+      (block) =>
+        block.page === page
+        // 图注/表注也要翻：历史论文的 caption 块 translatable 仍是 false
+        && (block.translatable || block.kind === 'caption')
+        && block.text.trim()
+        && !block.translated,
     )
     if (!blocks.length) continue
 

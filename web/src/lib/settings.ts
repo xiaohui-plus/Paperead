@@ -52,6 +52,8 @@ export interface ProviderPreset {
   provider: string
   baseUrl: string
   note: string
+  /** 模型 ID 需要用户自行核对时给一句短提示 */
+  modelIdHint?: string
   /** 官方「创建 / 查看 API Key」页面 */
   keyUrl: string
   recommended?: boolean
@@ -208,6 +210,7 @@ export const PRESETS: ProviderPreset[] = [
     provider: 'SiliconFlow 平台',
     baseUrl: 'https://api.siliconflow.cn/v1',
     note: '一个 Key 切换 2026 新模型：DeepSeek V4.1 / GLM-5.3 / Qwen3.8 / Kimi K2.7',
+    modelIdHint: '模型 ID 以硅基流动首页模型广场为准',
     keyUrl: 'https://cloud.siliconflow.cn/account/ak',
     recommended: true,
     defaultModel: 'deepseek-ai/DeepSeek-V4.1-Flash',
@@ -242,9 +245,24 @@ export const PRESETS: ProviderPreset[] = [
         note: '2026-08 旗舰；纯文本，复杂推理强',
       },
       {
+        id: 'zai-org/GLM-5.2',
+        label: 'GLM-5.2',
+        note: '2026-06 前代旗舰；1M 上下文，长程任务稳',
+      },
+      {
         id: 'tencent/Hy4-preview',
         label: '腾讯 Hy4 Preview',
         note: '2026-08 混元新一代；1M 上下文（Preview）',
+      },
+      {
+        id: 'meituan-longcat/LongCat-2.0',
+        label: 'LongCat 2.0',
+        note: '2026-06；Agent 与代码任务强',
+      },
+      {
+        id: 'deepseek-ai/DeepSeek-V4-Flash',
+        label: 'DeepSeek V4 Flash',
+        note: '上一代 Flash；1M 上下文，价格更低',
       },
       {
         id: 'deepseek-ai/DeepSeek-V4-Pro',
@@ -388,6 +406,7 @@ export const PRESETS: ProviderPreset[] = [
     provider: 'SiliconFlow 平台',
     baseUrl: 'https://api.siliconflow.cn/v1',
     note: '一个 Key 切换 2026 多模态新模型；列表外模型用自定义',
+    modelIdHint: '模型 ID 以硅基流动首页模型广场为准',
     keyUrl: 'https://cloud.siliconflow.cn/account/ak',
     recommended: true,
     defaultModel: 'deepseek-ai/DeepSeek-V4.1-Flash',
@@ -396,12 +415,6 @@ export const PRESETS: ProviderPreset[] = [
         id: 'deepseek-ai/DeepSeek-V4.1-Flash',
         label: 'DeepSeek V4.1 Flash',
         note: '2026-09 最新；原生视觉，通用识图/公式',
-        recommended: true,
-      },
-      {
-        id: 'zai-org/GLM-5.3-Flash',
-        label: 'GLM-5.3-Flash',
-        note: '2026-08 最新 GLM；原生多模态',
         recommended: true,
       },
       {

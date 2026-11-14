@@ -226,3 +226,58 @@ def test_table_swallows_page_detects_full_page_misdetection():
 
     assert _table_swallows_page(3, pymupdf.Rect(50, 33, 562, 708), blocks) is True
     assert _table_swallows_page(3, pymupdf.Rect(50, 40, 300, 100), blocks) is False
+
+def test_caption_number_merges_centered_title_line():
+    """TABLE I 这类纯编号表注要把居中大写标题并回来，避免标题只剩编号。"""
+    from paperead.layout import Block, _merge_caption_continuations
+
+    cap = Block(
+        id="c0", order=0, page=6, kind="caption", text="TABLE I",
+        bbox=(291, 49, 321, 57), size=8.0,
+    )
+    title = Block(
+        id="c1", order=1, page=6, kind="reference",
+        text="QUALITATIVE COMPARISON OF AGENT STRATEGIES DURING THE 2019 DROUGHT",
+        bbox=(167, 61, 445, 69), size=8.0,
+    )
+    out = _merge_caption_continuations([cap, title])
+    assert len(out) == 1
+    assert out[0].kind == "caption"
+    assert out[0].text == (
+        "TABLE I QUALITATIVE COMPARISON OF AGENT STRATEGIES DURING THE 2019 DROUGHT"
+    )
+
+
+def test_body_line_is_not_merged_into_caption():
+    """普通图注后面的另一栏正文不能被并进图注。"""
+    from paperead.layout import Block, _merge_caption_continuations
+
+    cap = Block(
+        id="c0", order=0, page=2, kind="caption",
+        text="Figure 2: Framework overview.", bbox=(54, 100, 300, 112), size=9.0,
+    )
+    body = Block(
+        id="c1", order=1, page=2, kind="para",
+        text="The framework consists of several stages that are described below.",
+        bbox=(320, 114, 560, 126), size=10.0,
+    )
+    out = _merge_caption_continuations([cap, body])
+    assert len(out) == 2
+    assert out[0].text == "Figure 2: Framework overview."
+
+def test_caption_number_merges_same_line_title():
+    """同一行被拆开的「Fig. 1.」与标题要并回同一条图注。"""
+    from paperead.layout import Block, _merge_caption_continuations
+
+    cap = Block(
+        id="c0", order=1, page=3, kind="caption", text="Fig. 1.",
+        bbox=(246, 247, 268, 255), size=8.0,
+    )
+    title = Block(
+        id="c1", order=0, page=3, kind="para",
+        text="Architecture of Agri-SAGE", bbox=(276, 247, 366, 255), size=8.0,
+    )
+    out = _merge_caption_continuations([title, cap])
+    assert len(out) == 1
+    assert out[0].kind == "caption"
+    assert out[0].text == "Fig. 1. Architecture of Agri-SAGE"

@@ -93,6 +93,30 @@ textarea {
   overflow: hidden;
 }
 
+.formula-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-soft);
+  color: var(--faint);
+  font-size: 11.5px;
+}
+
+.formula-notice button {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--blue);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.formula-notice button:hover {
+  text-decoration: underline;
+}
+
 /* ── 顶栏 ─────────────────────────────────────────────── */
 
 .topbar {
@@ -201,6 +225,20 @@ textarea {
 
 .icon-btn:hover {
   background: var(--bg-hover);
+  color: var(--blue);
+}
+
+/* 顶栏快捷开关：开启时蓝色底，关闭时弱化，状态一眼可辨 */
+.topbar .tool-toggle:not([data-active='true']) {
+  color: var(--faint);
+}
+
+.topbar .tool-toggle[data-active='true'] {
+  background: var(--blue-soft);
+  color: var(--blue-ink);
+}
+
+.topbar .tool-toggle:hover {
   color: var(--blue);
 }
 
@@ -1469,6 +1507,22 @@ body.col-resizing * {
 }
 
 /* ── 公式渲染 ─────────────────────────────────────────── */
+
+.inline-math {
+  display: inline-block;
+  margin: 0 1px;
+  vertical-align: baseline;
+}
+
+.inline-math .katex {
+  font-size: 1.02em;
+}
+
+.inline-math-img {
+  display: inline-block;
+  max-height: 1.45em;
+  vertical-align: -0.25em;
+}
 
 .equation .katex-host {
   display: block;
@@ -4107,6 +4161,27 @@ body.col-resizing * {
   padding: 7px 16px;
 }
 
+.update-install {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.update-progress {
+  height: 4px;
+  border-radius: 99px;
+  background: var(--bg-soft);
+  overflow: hidden;
+}
+
+.update-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--blue);
+  transition: width 0.2s ease;
+}
+
 .update-install-hint {
   margin: 0;
   font-size: 11.5px;
@@ -4823,6 +4898,11 @@ body.col-resizing * {
   font-size: 10.5px;
   line-height: 1.55;
   color: var(--muted);
+}
+
+.preset-id-hint {
+  color: var(--faint);
+  font-size: 10px;
 }
 
 .preset-actions {

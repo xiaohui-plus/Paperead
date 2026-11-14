@@ -20,6 +20,7 @@ import {
   extractHighlights,
   listAnnotations,
   listHighlights,
+  recognizePaperFormulas,
   saveProgress,
   translateStream,
   updateAnnotation,
@@ -33,12 +34,18 @@ import { translatePagesLocal } from '../lib/localTranslate'
 import { mapRangeToOther, pairFits } from '../lib/align'
 import type { AnnotationActions } from './Annotations'
 import { loadTargetLang } from '../lib/translation'
-import { loadAutoHighlights, loadDefaultReadingMode } from '../lib/readingPrefs'
+import {
+  detectPaperLanguage,
+  defaultAutoTranslateForPaper,
+  type PaperLang,
+} from '../lib/paperLang'
+import { loadAutoHighlights, loadAutoTranslate, loadDefaultReadingMode, loadPaperAutoTranslate, saveAutoHighlights, savePaperAutoTranslate } from '../lib/readingPrefs'
 import {
   loadModelSettings,
   readyModel,
   syncVisionConfig,
   toPayload,
+  visionModel,
   type ModelKind,
 } from '../lib/settings'
 import { TopBar } from './TopBar'
@@ -133,9 +140,14 @@ export function ReaderView({ paperId, onBack }: Props) {
   )
   const [settingsKind, setSettingsKind] = useState<ModelKind>('answer')
   const [settingsVersion, setSettingsVersion] = useState(0)
+  const [formulaRepairing, setFormulaRepairing] = useState(false)
+  const formulaRepairTried = useRef<Set<string>>(new Set())
   const [annotations, setAnnotations] = useState<Annotation[]>([])
   const [highlights, setHighlights] = useState<ReadingHighlight[]>([])
   const [autoHighlights, setAutoHighlights] = useState(loadAutoHighlights)
+  const [autoTranslate, setAutoTranslate] = useState(loadAutoTranslate)
+  // 当前论文原文语种：中文文献打开时默认关掉自动翻译
+  const [paperLang, setPaperLang] = useState<PaperLang>('unknown')
   // 示例数据没有后端，标注/进度只在真实论文上启用
   const annotationsEnabled = paperId !== 'demo'
   const [panelWidth, setPanelWidth] = useState(readPanelWidth)
@@ -178,6 +190,32 @@ export function ReaderView({ paperId, onBack }: Props) {
   /** 已经提取过阅读重点的页（服务端也会去重，这里只减少请求） */
   const extractedPages = useRef<Set<number>>(new Set())
   const requestingHighlights = useRef<Set<number>>(new Set())
+
+  /** 切换当前论文的自动翻译：关闭时立刻中止正在跑的翻译流 */
+  const applyAutoTranslate = useCallback((enabled: boolean) => {
+    setAutoTranslate(enabled)
+    if (!enabled) {
+      abortRef.current?.abort()
+      queued.current = null
+    }
+  }, [])
+
+  /** 按论文语种给出默认值：中文文献关闭、外文文献打开（尊重设置里的总开关） */
+  const adoptPaperLanguage = useCallback((next: Paper) => {
+    const lang = detectPaperLanguage(next)
+    setPaperLang(lang)
+    const manual = loadPaperAutoTranslate(paperId)
+    applyAutoTranslate(
+      manual ?? defaultAutoTranslateForPaper(lang, loadAutoTranslate()),
+    )
+  }, [paperId, applyAutoTranslate])
+
+  /** 顶栏手动切换：只记这篇论文，不改全局总开关 */
+  const toggleAutoTranslate = useCallback(() => {
+    const next = !autoTranslate
+    applyAutoTranslate(next)
+    if (paperId !== 'demo') savePaperAutoTranslate(paperId, next)
+  }, [autoTranslate, applyAutoTranslate, paperId])
 
   // ── 阅读助手宽度：拖动中间分隔线调整 ───────────────────
   const maxPanelWidth = () => {
@@ -323,6 +361,8 @@ export function ReaderView({ paperId, onBack }: Props) {
     setPageUrls({})
     setLocalKind('none')
     setLocalPdfUrl(null)
+
+    setPaperLang('unknown')
     requested.current.clear()
 
     const attempt = async (n: number) => {
@@ -334,6 +374,7 @@ export function ReaderView({ paperId, onBack }: Props) {
         setPageUrls(local.pageUrls)
         setLocalPdfUrl(local.pdfUrl)
         setLocalKind(local.source)
+        adoptPaperLanguage(local.paper)
         setPaper(local.paper)
         return
       }
@@ -341,6 +382,7 @@ export function ReaderView({ paperId, onBack }: Props) {
         const p = await loadPaper(paperId)
         if (!alive) return
         setParsing(false)
+        adoptPaperLanguage(p)
         setPaper(p)
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
@@ -360,7 +402,47 @@ export function ReaderView({ paperId, onBack }: Props) {
       alive = false
       if (timer) window.clearTimeout(timer)
     }
-  }, [paperId])
+  }, [paperId, adoptPaperLanguage])
+
+  // 旧论文解析时还没有识图模型：打开后批量补一次公式 LaTeX，不改版面、不动译文。
+  // 设置里换了识图模型（settingsVersion 变化）后会重新检查没识别出来的公式。
+  useEffect(() => {
+    if (!paper || paperId === 'demo' || localKind !== 'none') return
+    const pending = paper.blocks.some(
+      (b) => b.kind === 'equation' && b.image_path && !b.latex,
+    )
+    if (!pending) return
+    const cfg = visionModel()
+    if (!cfg) return
+    const key = `${paperId}:${settingsVersion}`
+    if (formulaRepairTried.current.has(key)) return
+    formulaRepairTried.current.add(key)
+
+    let alive = true
+    setFormulaRepairing(true)
+    void recognizePaperFormulas(paperId, toPayload(cfg))
+      .then((result) => {
+        if (!alive || !result.items.length) return
+        const latex = new Map(result.items.map((item) => [item.block_id, item.latex]))
+        setPaper((prev) =>
+          prev
+            ? {
+                ...prev,
+                blocks: prev.blocks.map((b) =>
+                  latex.has(b.id) ? { ...b, latex: latex.get(b.id) } : b,
+                ),
+              }
+            : prev,
+        )
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (alive) setFormulaRepairing(false)
+      })
+    return () => {
+      alive = false
+    }
+  }, [paper, paperId, localKind, settingsVersion])
 
   // StoryReader 导入的书没有 PDF，误带 ?view=pdf 时回到重排阅读
   useEffect(() => {
@@ -403,6 +485,17 @@ export function ReaderView({ paperId, onBack }: Props) {
     return () =>
       window.removeEventListener('paperead:auto-highlights-changed', onChanged)
   }, [])
+
+  // 设置里切换「自动翻译」总开关：中文文献仍保持默认关闭，需在顶栏手动打开
+  useEffect(() => {
+    const onChanged = (event: Event) => {
+      const enabled = Boolean((event as CustomEvent).detail)
+      applyAutoTranslate(enabled && paperLang !== 'zh')
+    }
+    window.addEventListener('paperead:auto-translate-changed', onChanged)
+    return () =>
+      window.removeEventListener('paperead:auto-translate-changed', onChanged)
+  }, [applyAutoTranslate, paperLang])
 
   // 设置里切换「默认阅读模式」：当前论文立即跟着换视图
   useEffect(() => {
@@ -597,6 +690,7 @@ export function ReaderView({ paperId, onBack }: Props) {
     async (pages: number[]) => {
       const current = paperRef.current
       if (!current || paperId === 'demo') return
+      if (!autoTranslate) return
       const cfg = readyModel(loadModelSettings(), 'answer')
       if (!cfg) return
       const targetLang = loadTargetLang()
@@ -614,7 +708,11 @@ export function ReaderView({ paperId, onBack }: Props) {
       const need = pages.filter((pg) => {
         if (requested.current.has(pg)) return false
         const blocks = current.blocks.filter(
-          (b) => b.page === pg && b.translatable && b.text.trim(),
+          (b) =>
+            b.page === pg
+            // 图注/表注随论文一起翻，历史论文的 caption 块也要放行
+            && (b.translatable || b.kind === 'caption')
+            && b.text.trim(),
         )
         if (!blocks.length) return false
         // 目标语言变了：即使本地已有旧译文，也要重新请求
@@ -725,7 +823,7 @@ export function ReaderView({ paperId, onBack }: Props) {
         if (next) window.setTimeout(() => void ensurePages(next), 0)
       }
     },
-    [paperId, mergeHighlights, autoHighlights],
+    [paperId, mergeHighlights, autoHighlights, autoTranslate],
   )
 
   // 进入阅读页先翻当前页 + 下一页；滚动停稳后换页继续增量翻
@@ -745,7 +843,7 @@ export function ReaderView({ paperId, onBack }: Props) {
   // 看门狗：每 3 秒检查当前页是否还有没翻的块。
   // 流被中断、429、网络抖动都能自愈，不会出现"一直转圈但不动"。
   useEffect(() => {
-    if (paperId === 'demo') return
+    if (paperId === 'demo' || !autoTranslate) return
     const timer = window.setInterval(() => {
       if (inFlight.current) return
       const current = paperRef.current
@@ -756,13 +854,17 @@ export function ReaderView({ paperId, onBack }: Props) {
       const pages = [settledPage, settledPage + 1].filter((p) => p >= 1 && p <= maxPage)
       const hasPending = pages.some((pg) =>
         current.blocks.some(
-          (b) => b.page === pg && b.translatable && b.text.trim() && !b.translated,
+          (b) =>
+            b.page === pg
+            && (b.translatable || b.kind === 'caption')
+            && b.text.trim()
+            && !b.translated,
         ),
       )
       if (hasPending) void ensurePages(pages)
     }, 3000)
     return () => window.clearInterval(timer)
-  }, [settledPage, ensurePages, paperId])
+  }, [settledPage, ensurePages, paperId, autoTranslate])
 
   // 翻译完成后补提取阅读重点：新翻的页由翻译流直接带回，
   // 这里兜底处理「打开时已经翻好」的旧论文。服务端会跳过已处理页。
@@ -955,11 +1057,17 @@ export function ReaderView({ paperId, onBack }: Props) {
   }
 
   const translated = paper.blocks.filter((b) => b.translated).length
-  const total = paper.blocks.filter((b) => b.translatable && b.text.trim()).length
+  const total = paper.blocks.filter(
+    (b) => (b.translatable || b.kind === 'caption') && b.text.trim(),
+  ).length
   const outline = outlineOf(paper.blocks)
   const points = keyPoints(paper.blocks)
   const sampleImage =
     paper.blocks.find((b) => b.kind === 'equation' && b.image_path)?.image_path ?? undefined
+  const formulaPending = paper.blocks.some(
+    (b) => b.kind === 'equation' && b.image_path && !b.latex,
+  )
+  const hasVision = Boolean(visionModel())
 
   return (
     <div className="app">
@@ -998,7 +1106,34 @@ export function ReaderView({ paperId, onBack }: Props) {
         panelCollapsed={panelCollapsed}
         onTogglePanel={togglePanel}
         showPanelToggle={!(pdfMode && pdfExpanded)}
+        autoHighlights={autoHighlights}
+        onToggleAutoHighlights={() => saveAutoHighlights(!autoHighlights)}
+        autoTranslate={autoTranslate}
+        onToggleAutoTranslate={toggleAutoTranslate}
       />
+
+      {formulaPending && !pdfMode && (
+        <div className="formula-notice">
+          <span>
+            {hasVision
+              ? formulaRepairing
+                ? '正在把公式截图转换为 LaTeX…'
+                : '部分公式暂时无法识别，保留为截图'
+              : '公式当前以截图显示'}
+          </span>
+          {!hasVision && (
+            <button
+              type="button"
+              onClick={() => {
+                setSettingsKind('vision')
+                setSettingsOpen(true)
+              }}
+            >
+              配置识图模型后自动转成 LaTeX →
+            </button>
+          )}
+        </div>
+      )}
 
       <div
         ref={workspaceRef}
@@ -1084,9 +1219,13 @@ focusAnnotation={focusAnnotation}
             hint={
               !configured
                 ? '未配置回答模型，翻译未开启。填写模型与密钥后，打开论文会自动翻译当前页和下一页。'
-                : translating
-                  ? '正在翻译当前页…'
-                  : '当前页还没有译文，停在这里几秒会自动开始翻译。'
+                : paperLang === 'zh' && !autoTranslate
+                  ? '本篇是中文文献，已默认关闭翻译。可在顶栏开启自动翻译。'
+                  : !autoTranslate
+                    ? '自动翻译已关闭，可在顶栏开启自动翻译。'
+                    : translating
+                      ? '正在翻译当前页…'
+                      : '当前页还没有译文，停在这里几秒会自动开始翻译。'
             }
             annotations={annotations}
             annotationActions={annotationActions}

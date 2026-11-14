@@ -5,6 +5,9 @@
 import type { ViewMode } from '../types'
 
 const AUTO_KEY = 'paperead.autoReadingHighlights'
+const AUTO_TRANSLATE_KEY = 'paperead.autoTranslate'
+/** 按论文记住用户手动切换过的自动翻译；未记录时按论文语种给默认值 */
+const PAPER_AUTO_TRANSLATE_KEY = 'paperead.autoTranslate.byPaper'
 const FONTS_KEY = 'paperead.readingFonts'
 const MODE_KEY = 'paperead.readingMode'
 
@@ -44,6 +47,52 @@ export function saveAutoHighlights(enabled: boolean): void {
   window.dispatchEvent(
     new CustomEvent('paperead:auto-highlights-changed', { detail: enabled }),
   )
+}
+
+export function loadAutoTranslate(): boolean {
+  try {
+    return localStorage.getItem(AUTO_TRANSLATE_KEY) !== '0'
+  } catch {
+    // 隐私模式读不到 localStorage：保持默认开启
+    return true
+  }
+}
+
+export function saveAutoTranslate(enabled: boolean): void {
+  try {
+    localStorage.setItem(AUTO_TRANSLATE_KEY, enabled ? '1' : '0')
+    // 总开关变了，各论文的手动记忆作废，重新按语种给默认值
+    localStorage.removeItem(PAPER_AUTO_TRANSLATE_KEY)
+  } catch {
+    // 写不了就只在本次会话生效
+  }
+  window.dispatchEvent(
+    new CustomEvent('paperead:auto-translate-changed', { detail: enabled }),
+  )
+}
+
+/** 读取这篇论文上次手动切换过的自动翻译；没手动切过返回 null。 */
+export function loadPaperAutoTranslate(paperId: string): boolean | null {
+  try {
+    const raw = localStorage.getItem(PAPER_AUTO_TRANSLATE_KEY)
+    if (!raw) return null
+    const map = JSON.parse(raw) as Record<string, unknown>
+    return typeof map[paperId] === 'boolean' ? map[paperId] : null
+  } catch {
+    return null
+  }
+}
+
+/** 顶栏手动切换：只记这篇论文，不改全局总开关，也不影响其他论文。 */
+export function savePaperAutoTranslate(paperId: string, enabled: boolean): void {
+  try {
+    const raw = localStorage.getItem(PAPER_AUTO_TRANSLATE_KEY)
+    const map = raw ? (JSON.parse(raw) as Record<string, unknown>) : {}
+    map[paperId] = enabled
+    localStorage.setItem(PAPER_AUTO_TRANSLATE_KEY, JSON.stringify(map))
+  } catch {
+    // 写不了就只在本次会话生效
+  }
 }
 
 export function loadReadingFonts(): ReadingFonts {

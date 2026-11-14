@@ -100,10 +100,12 @@ export async function movePaperToFolder(
 export async function uploadPapers(
   files: File[],
   folderId: string | null = null,
+  vision?: LLMConfigPayload | null,
 ): Promise<{ added: PaperRow[]; failed: { filename: string; error: string }[] }> {
   const fd = new FormData()
   files.forEach((f) => fd.append('files', f))
   if (folderId) fd.append('folder_id', folderId)
+  if (vision) fd.append('vision_config', JSON.stringify(vision))
   return jsonFetch('/api/papers/upload', { method: 'POST', body: fd })
 }
 
@@ -111,11 +113,12 @@ export async function uploadPapers(
 export async function importPaperByPath(
   path: string,
   folderId: string | null = null,
+  vision?: LLMConfigPayload | null,
 ): Promise<{ added: PaperRow[]; failed: { filename: string; error: string }[] }> {
   return jsonFetch('/api/papers/import', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path, folder_id: folderId }),
+    body: JSON.stringify({ path, folder_id: folderId, vision_config: vision ?? null }),
   })
 }
 
@@ -123,8 +126,35 @@ export async function deletePaper(id: string): Promise<void> {
   await jsonFetch(`/api/papers/${id}`, { method: 'DELETE' })
 }
 
-export async function reparsePaper(id: string): Promise<void> {
-  await jsonFetch(`/api/papers/${id}/parse`, { method: 'POST' })
+export async function reparsePaper(
+  id: string,
+  vision?: LLMConfigPayload | null,
+): Promise<void> {
+  await jsonFetch(`/api/papers/${id}/parse`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ vision_config: vision ?? null }),
+  })
+}
+
+export interface FormulaRecognizeResult {
+  total: number
+  recognized: number
+  failed: number
+  items: { block_id: string; latex: string }[]
+}
+
+/** 给已有论文补齐公式 LaTeX：不重新解析版面，只识别公式裁图并回写 blocks。 */
+export async function recognizePaperFormulas(
+  id: string,
+  config: LLMConfigPayload,
+  force = false,
+): Promise<FormulaRecognizeResult> {
+  return jsonFetch(`/api/papers/${id}/formulas/recognize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ config, force }),
+  })
 }
 
 export async function translatePaper(id: string, config: LLMConfigPayload): Promise<void> {
