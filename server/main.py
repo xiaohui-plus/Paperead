@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import mimetypes
@@ -65,9 +66,13 @@ from paperead.tutor import memory as memory_engine
 from paperead.tutor import qa as qa_engine
 from paperead.tutor import web as web_search
 from paperead.tutor.agent import AgentTool, ToolOutcome, run_agent
-from paperead.tutor.citations import find as find_citations, resolve as resolve_citations
+from paperead.tutor.citations import (
+    find as find_citations,
+    marker_key as citation_marker_key,
+    resolve as resolve_citations,
+)
 from paperead.tutor.lineage import LINEAGE_VERSION, build_lineage
-from paperead.tutor.provenance import enrich as enrich_provenance
+from paperead.tutor.provenance import enrich as enrich_provenance, ref_only as ref_only_provenance
 from paperead.tutor.references import Reference, parse as parse_references
 from paperead.translate import (
     build_glossary,
@@ -1176,11 +1181,29 @@ async def make_guide(paper_id: str, req: GuideReq | None = None) -> dict:
         _guiding.discard(paper_id)
 
 
+# 出处缓存版本：结构或匹配逻辑变化时递增，旧文件自动失效。
+PROV_CACHE_VERSION = 2
+# 一段正文的引用上限：正常论文远小于这个数，只防异常数据把响应撑爆。
+PROV_MAX = 80
+# 只为前几条抓摘要（外部接口慢），其余条目直接给标题 + DOI/arXiv 链接。
+PROV_SNIPPET_TOP = 6
+# 单条摘要抓取预算（秒）：超时就退回 ref_only，不让整段一起等网络。
+PROV_TIMEOUT = 2.5
+
+
+def _prov_sig(block: dict) -> str:
+    """块内容签名：重新解析后文本变了，缓存自动失效。"""
+    raw = f"{block.get('kind', '')}\n{block.get('text', '')}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
 @app.get("/api/papers/{paper_id}/block/{block_id}/provenance")
 async def block_provenance(paper_id: str, block_id: str) -> dict:
     """这一段引用了哪些文献、原文怎么说。
 
-    结果按块缓存到 `{paper_id}.prov.json`，同一段只查一次外部接口。
+    返回整段**全部**可解析引用（不再只给前 6 条），并把解析不到的标记
+    单独放进 `unresolved`，前端能区分「参考文献里没有」和「接口失败」。
+    结果按块缓存到 `{paper_id}.prov2.json`，缓存带版本与块文本签名。
     """
     if not store.get(paper_id):
         raise HTTPException(status_code=404, detail="论文不存在")
@@ -1192,43 +1215,94 @@ async def block_provenance(paper_id: str, block_id: str) -> dict:
     if not block:
         raise HTTPException(status_code=404, detail="段落不存在")
 
-    cache_path = store.papers_dir / f"{paper_id}.prov.json"
-    cache: dict = {}
+    cache_path = store.papers_dir / f"{paper_id}.prov2.json"
+    cache: dict = {"version": PROV_CACHE_VERSION, "blocks": {}}
     if cache_path.exists():
         try:
-            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+            raw = json.loads(cache_path.read_text(encoding="utf-8"))
+            if (
+                isinstance(raw, dict)
+                and raw.get("version") == PROV_CACHE_VERSION
+                and isinstance(raw.get("blocks"), dict)
+            ):
+                cache = raw
         except Exception:
-            cache = {}
-    if block_id in cache:
-        return {"block_id": block_id, "citations": cache[block_id]}
+            cache = {"version": PROV_CACHE_VERSION, "blocks": {}}
 
     text = block.get("text") or ""
+    sig = _prov_sig(block)
+    entry = (cache.get("blocks") or {}).get(block_id)
+    if isinstance(entry, dict) and entry.get("sig") == sig:
+        return {
+            "block_id": block_id,
+            "citations": entry.get("citations") or [],
+            "unresolved": entry.get("unresolved") or [],
+            "truncated": bool(entry.get("truncated")),
+        }
+
+    if not text:
+        return {"block_id": block_id, "citations": [], "unresolved": [], "truncated": False}
+
     cites = find_citations(text)
     if not cites:
-        return {"block_id": block_id, "citations": []}
+        return {"block_id": block_id, "citations": [], "unresolved": [], "truncated": False}
 
     objs = [Block(**{**b, "bbox": tuple(b["bbox"])}) for b in blocks]
     refs = parse_references(objs)
-    resolved = resolve_citations(cites, refs)
+    all_resolved = resolve_citations(cites, refs)
+    truncated = len(all_resolved) > PROV_MAX
+    resolved = all_resolved[:PROV_MAX]
+
+    resolved_markers = {citation_marker_key(item["marker"]) for item in all_resolved}
+    unresolved: list[str] = []
+    for c in cites:
+        if citation_marker_key(c.marker) in resolved_markers or c.marker in unresolved:
+            continue
+        unresolved.append(c.marker)
+
     if not resolved:
-        return {"block_id": block_id, "citations": []}
+        return {
+            "block_id": block_id,
+            "citations": [],
+            "unresolved": unresolved,
+            # 全部条目都可能因 PROV_MAX 被截掉，截断标记要如实返回
+            "truncated": truncated,
+        }
 
     by_index = {r.index: r for r in refs}
-    sem = asyncio.Semaphore(4)
+    sem = asyncio.Semaphore(8)
 
-    async def one(item: dict) -> dict | None:
+    async def one(rank: int, item: dict) -> dict | None:
         ref = by_index.get(item["ref"]["index"])
         if not ref:
             return None
+        marker = item["marker"]
+        if rank >= PROV_SNIPPET_TOP:
+            return ref_only_provenance(ref, marker)
         async with sem:
-            data = await enrich_provenance(ref, text)
-        data["marker"] = item["marker"]
+            try:
+                data = await asyncio.wait_for(enrich_provenance(ref, text), PROV_TIMEOUT)
+            except Exception:
+                data = ref_only_provenance(ref, marker)
+        data["marker"] = marker
         return data
 
-    results = [r for r in await asyncio.gather(*(one(x) for x in resolved[:6])) if r]
-    cache[block_id] = results
+    results = [
+        r for r in await asyncio.gather(*(one(i, x) for i, x in enumerate(resolved))) if r
+    ]
+    cache.setdefault("blocks", {})[block_id] = {
+        "sig": sig,
+        "citations": results,
+        "unresolved": unresolved,
+        "truncated": truncated,
+    }
     cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=1), encoding="utf-8")
-    return {"block_id": block_id, "citations": results}
+    return {
+        "block_id": block_id,
+        "citations": results,
+        "unresolved": unresolved,
+        "truncated": truncated,
+    }
 
 
 # ── 标注 / 笔记 ──────────────────────────────────────────

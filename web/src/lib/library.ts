@@ -832,14 +832,28 @@ export interface ProvenanceCitation {
   ref: { index: number; title: string; year: number | null; raw: string }
 }
 
+/** 一段正文的出处结果：可解析条目 + 参考文献里找不到的标记。 */
+export interface ProvenanceResult {
+  citations: ProvenanceCitation[]
+  unresolved: string[]
+  /** 条目过多被后端截断（正常论文不会触发） */
+  truncated: boolean
+}
+
 export async function getProvenance(
   paperId: string,
   blockId: string,
-): Promise<ProvenanceCitation[]> {
-  const data = await jsonFetch<{ citations: ProvenanceCitation[] }>(
-    `/api/papers/${paperId}/block/${blockId}/provenance`,
-  )
-  return data.citations ?? []
+): Promise<ProvenanceResult> {
+  const data = await jsonFetch<{
+    citations?: ProvenanceCitation[]
+    unresolved?: string[]
+    truncated?: boolean
+  }>(`/api/papers/${paperId}/block/${blockId}/provenance`)
+  return {
+    citations: data.citations ?? [],
+    unresolved: data.unresolved ?? [],
+    truncated: Boolean(data.truncated),
+  }
 }
 
 // ── 高亮 / 笔记 ──────────────────────────────────────────

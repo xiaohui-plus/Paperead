@@ -3,6 +3,7 @@ import {
   canInstallInApp,
   checkUpdate,
   formatCheckTime,
+  getCurrentVersion,
   installUpdateInApp,
   isAndroidApp,
   loadUpdateCache,
@@ -243,6 +244,23 @@ function TestBox({ test }: { test: TestState }) {
   )
 }
 
+/** Tauri 的 invoke 拒绝值是字符串，直接判断 instanceof Error 会把真实原因吞掉。 */
+function errorText(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message) return error.message
+  if (typeof error === 'string' && error.trim()) return error
+  if (error && typeof error === 'object') {
+    const message = (error as { message?: unknown }).message
+    if (typeof message === 'string' && message.trim()) return message
+    try {
+      const text = JSON.stringify(error)
+      if (text && text !== '{}') return text
+    } catch {
+      /* 不可序列化时用兜底文案 */
+    }
+  }
+  return fallback
+}
+
 export function SettingsDialog({
   open,
   onClose,
@@ -262,6 +280,9 @@ export function SettingsDialog({
   const [selections, setSelections] = useState<Record<string, string>>({})
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(
     () => loadUpdateCache()?.data ?? null,
+  )
+  const [currentVersion, setCurrentVersion] = useState(
+    () => loadUpdateCache()?.data.current ?? '',
   )
   const [updateCheckedAt, setUpdateCheckedAt] = useState(
     () => loadUpdateCache()?.checkedAt ?? 0,
@@ -339,27 +360,42 @@ export function SettingsDialog({
     try {
       const data = await checkUpdate(force)
       setUpdateInfo(data)
+      if (data.current) setCurrentVersion(data.current)
       setUpdateCheckedAt(Number(data.checked_at) || Date.now())
       return data
     } catch (e) {
-      setUpdateError(e instanceof Error ? e.message : '检查更新失败')
+      setUpdateError(errorText(e, '检查更新失败'))
       return null
     } finally {
       setUpdateChecking(false)
     }
   }, [])
 
-  // 打开设置时：先显示本地缓存，超过几分钟就静默复查一次，避免发布新版本后
-  // 仍把当天早些时候的「已是最新」一直显示下去；手动检查始终重新请求。
+  // 打开设置时：先取真实安装版本，旧版本留下的检查缓存在版本对不上时直接丢弃，
+  // 避免把「v0.2.8 / 可更新至 0.2.10」这类过期状态继续显示出来。
   useEffect(() => {
     if (!open) return
+    let cancelled = false
     const cached = loadUpdateCache()
-    if (cached) {
-      setUpdateInfo(cached.data)
-      setUpdateCheckedAt(cached.checkedAt)
-    }
-    if (!cached || Date.now() - cached.checkedAt >= UPDATE_RECHECK_MS) {
-      void runUpdateCheck(true)
+    void (async () => {
+      const version = await getCurrentVersion()
+      if (cancelled) return
+      if (version) setCurrentVersion(version)
+      const sameVersion =
+        Boolean(cached) && (!version || !cached?.data.current || cached.data.current === version)
+      if (cached && sameVersion) {
+        setUpdateInfo(cached.data)
+        setUpdateCheckedAt(cached.checkedAt)
+      } else {
+        setUpdateInfo(null)
+        setUpdateCheckedAt(0)
+      }
+      if (!cached || !sameVersion || Date.now() - cached.checkedAt >= UPDATE_RECHECK_MS) {
+        void runUpdateCheck(true)
+      }
+    })()
+    return () => {
+      cancelled = true
     }
   }, [open, runUpdateCheck])
 
@@ -383,7 +419,7 @@ export function SettingsDialog({
       )
 
     } catch (e) {
-      const message = e instanceof Error ? e.message : '自动更新失败，请下载安装包'
+      const message = errorText(e, '自动更新失败，请下载安装包')
       if (message.includes('已是最新')) {
         // 缓存里的「有新版本」可能已经过期，立即按真实清单刷新。
         setInstallProgress(null)
@@ -813,7 +849,9 @@ export function SettingsDialog({
             </button>
           </nav>
           <div className="settings-sidebar-foot">
-            <span className="settings-nav-version">v{updateInfo?.current || '—'}</span>
+            <span className="settings-nav-version">
+              v{currentVersion || updateInfo?.current || '—'}
+            </span>
           </div>
         </aside>
 
@@ -1230,7 +1268,9 @@ export function SettingsDialog({
               <div className="update-current-info">
                 <span className="update-label">当前版本</span>
                 <div className="update-current-line">
-                  <b className="update-version">v{updateInfo?.current || '—'}</b>
+                  <b className="update-version">
+                    v{currentVersion || updateInfo?.current || '—'}
+                  </b>
                   {updateChecking ? (
                     <span className="update-status is-muted">检查中…</span>
                   ) : updateError ? (

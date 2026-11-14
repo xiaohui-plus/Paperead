@@ -7,5 +7,12 @@
   "remote": {
     "urls": ["http://127.0.0.1:*", "http://localhost:*"]
   },
-  "permissions": ["core:default", "dialog:default", "opener:default"]
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "opener:default",
+    "allow-check-desktop-update",
+    "allow-install-update",
+    "allow-restart-app"
+  ]
 }

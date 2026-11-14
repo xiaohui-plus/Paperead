@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 
@@ -26,6 +27,33 @@ _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z\-]{3,}")
 
 _cache: dict[str, dict] = {}
+
+
+def _link_for(ref: Reference) -> tuple[str, str]:
+    """不联网也能给出的原文链接：DOI > arXiv。"""
+    doi_m = _DOI_RE.search(ref.raw)
+    if doi_m:
+        return f"https://doi.org/{doi_m.group(1).rstrip('.')}", "doi"
+    arxiv_m = _ARXIV_RE.search(ref.raw)
+    if arxiv_m:
+        return f"https://arxiv.org/abs/{arxiv_m.group(1)}", "arxiv"
+    return "", "none"
+
+
+def ref_only(ref: Reference, marker: str = "") -> dict:
+    """只返回参考文献条目本身（标题/年份/链接），不抓摘要。
+
+    接口要在一次请求里返回整段所有引用，不可能为每条都等外部接口；
+    拿不到摘要的条目用这个兜底，至少保证点开有标题和可点链接。
+    """
+    url, source = _link_for(ref)
+    return {
+        "marker": marker,
+        "ref": ref.to_dict(),
+        "snippet": "",
+        "url": url,
+        "source": source,
+    }
 
 
 def _abstract_from_inverted(inv: dict | None) -> str:
@@ -122,7 +150,7 @@ def _best_sentence(abstract: str, context: str, limit: int = 240) -> str:
 
 async def enrich(ref: Reference, context: str) -> dict:
     """给一条参考文献配上原文片段。失败返回空 snippet。"""
-    key = f"{ref.index}:{ref.title[:40]}"
+    key = f"{ref.index}:{ref.title[:40]}:{hashlib.sha1(context.encode('utf-8')).hexdigest()[:8]}"
     if key in _cache:
         return _cache[key]
 
@@ -145,8 +173,9 @@ async def enrich(ref: Reference, context: str) -> dict:
         "marker": "",
         "ref": ref.to_dict(),
         "snippet": _best_sentence(got[0], context) if got else "",
-        "url": got[1] if got else "",
-        "source": source if got else "none",
+        # 摘要没取到也要给出 DOI / arXiv 链接，别让「能解析」变成「什么都没有」
+        "url": got[1] if got else _link_for(ref)[0],
+        "source": source if got else _link_for(ref)[1],
     }
     _cache[key] = result
     return result

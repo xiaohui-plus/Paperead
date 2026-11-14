@@ -18,6 +18,7 @@ import type { InlineMath } from '../types'
 import katex from 'katex'
 import { mediaUrl } from '../lib/mobile'
 import { lastAnnotationColor, rememberAnnotationColor } from '../lib/annotationPrefs'
+import { CITE_RE, hasCitation } from '../lib/citationMark'
 import { IconComment, IconHighlighter } from './icons'
 
 /** 自动重点的中文名，正文 tooltip 和「阅读重点」面板共用。 */
@@ -27,9 +28,7 @@ export const HIGHLIGHT_LABELS: Record<HighlightCategory, string> = {
   conclusion: '主要结论',
 }
 
-/** 数字引用 [12] / [3-5]，或作者-年份 (Zhang et al. 2018) */
-export const CITE_RE =
-  /\[\d{1,3}(?:\s*[,\-–]\s*\d{1,3})*\]|\([A-Z][A-Za-z\-']+(?:\s+(?:et\s+al\.?|and\s+[A-Z][A-Za-z\-']+))?\s*,?\s*(?:19|20)\d{2}[a-z]?\)/g
+export { CITE_RE, hasCitation }
 
 export const HL_COLORS: { key: AnnotationColor; label: string }[] = [
   { key: 'yellow', label: '黄' },
@@ -60,10 +59,6 @@ export interface AnnotationActions {
   remove: (id: string) => Promise<void>
 }
 
-export function hasCitation(text: string): boolean {
-  CITE_RE.lastIndex = 0
-  return CITE_RE.test(text)
-}
 
 interface Span {
   start: number

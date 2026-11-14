@@ -53,14 +53,44 @@ export interface UpdateProgress {
 
 const UPDATE_PROGRESS_EVENT = 'paperead:update-progress'
 
+/** 旧版后端返回秒级 checked_at，统一换算成毫秒，避免显示成 1970 年。 */
+export function normalizeCheckedAt(value: unknown): number {
+  const n = Number(value) || 0
+  return n > 0 && n < 1e12 ? Math.round(n * 1000) : n
+}
+
 export function loadUpdateCache(): UpdateCache | null {
   try {
     const raw = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null')
     if (!raw || !raw.checkedAt || !raw.data) return null
-    return raw as UpdateCache
+    return { checkedAt: normalizeCheckedAt(raw.checkedAt), data: raw.data as UpdateInfo }
   } catch {
     return null
   }
+}
+
+/**
+ * 当前安装的版本号：桌面端取 Tauri 应用版本（与安装包一致），
+ * 网页端回退到后端版本。更新检查失败时界面仍可显示真实版本。
+ */
+export async function getCurrentVersion(): Promise<string> {
+  const invoke = tauriInvoke()
+  if (invoke && isDesktopApp()) {
+    try {
+      const version = await invoke('plugin:app|version')
+      if (version) return String(version)
+    } catch {
+      /* 回退到后端版本 */
+    }
+  }
+  try {
+    const res = await fetch('/api/health')
+    const data = await res.json().catch(() => ({}))
+    if (res.ok && data?.version) return String(data.version)
+  } catch {
+    /* 离线时保持空 */
+  }
+  return ''
 }
 
 interface AndroidUpdatePayload {
@@ -152,9 +182,10 @@ export async function autoCheckUpdate(): Promise<UpdateInfo | null> {
 }
 
 export function formatCheckTime(ts: number): string {
-  if (!ts) return '尚未检查'
+  const value = normalizeCheckedAt(ts)
+  if (!value) return '尚未检查'
   try {
-    return new Date(ts).toLocaleString('zh-CN', { hour12: false })
+    return new Date(value).toLocaleString('zh-CN', { hour12: false })
   } catch {
     return '刚刚'
   }

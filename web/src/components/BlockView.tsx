@@ -15,6 +15,7 @@ import {
   type AnnotationColor,
   type AnnotationKind,
   type ProvenanceCitation,
+  type ProvenanceResult,
   type ReadingHighlight,
 } from '../lib/library'
 import {
@@ -24,6 +25,7 @@ import {
   hasCitation,
   type AnnotationActions,
 } from './Annotations'
+import { matchMarkers, markerMatches } from '../lib/citationMark'
 import { Katex } from './Katex'
 import { IconCheck, IconClose, IconCopy, IconPlus } from './icons'
 import { configBody, visionModel } from '../lib/settings'
@@ -73,7 +75,7 @@ export function BlockView({
   const b = rb.block
   const [copied, setCopied] = useState(false)
   const [provOpen, setProvOpen] = useState(false)
-  const [prov, setProv] = useState<ProvenanceCitation[] | null>(null)
+  const [prov, setProv] = useState<ProvenanceResult | null>(null)
   const [provBusy, setProvBusy] = useState(false)
   const [selection, setSelection] = useState<SelectionState | null>(null)
   const [editing, setEditing] = useState<{ annotation: Annotation; rect: DOMRect } | null>(null)
@@ -82,9 +84,17 @@ export function BlockView({
     rect: DOMRect
     el: HTMLElement
   } | null>(null)
-  const [citeItems, setCiteItems] = useState<ProvenanceCitation[] | null>(null)
+  const [citeItems, setCiteItems] = useState<ProvenanceResult | null>(null)
   const [citeBusy, setCiteBusy] = useState(false)
   const hasCites = b.kind === 'para' && hasCitation(b.text)
+  // 当前点击的引用：只在整段结果里挑这一条；找不到但后端明确标为未解析时给出准确提示
+  const citeHits = citePopup && citeItems ? matchMarkers(citeItems.citations, citePopup.marker) : []
+  const citeUnresolved = Boolean(
+    citePopup &&
+      citeItems &&
+      citeHits.length === 0 &&
+      citeItems.unresolved.some((m) => markerMatches(m, citePopup.marker)),
+  )
   const blockAnnotations = useMemo(
     () => annotations.filter((a) => a.block_id === b.id),
     [annotations, b.id],
@@ -101,7 +111,7 @@ export function BlockView({
     try {
       setProv(await getProvenance(paperId, b.id))
     } catch {
-      setProv([])
+      setProv({ citations: [], unresolved: [], truncated: false })
     } finally {
       setProvBusy(false)
     }
@@ -121,16 +131,16 @@ export function BlockView({
         return
       }
       if (!paperId) {
-        setCiteItems([])
+        setCiteItems({ citations: [], unresolved: [], truncated: false })
         return
       }
       setCiteBusy(true)
       try {
-        const items = await getProvenance(paperId, b.id)
-        setProv(items)
-        setCiteItems(items)
+        const data = await getProvenance(paperId, b.id)
+        setProv(data)
+        setCiteItems(data)
       } catch {
-        setCiteItems([])
+        setCiteItems({ citations: [], unresolved: [], truncated: false })
       } finally {
         setCiteBusy(false)
       }
@@ -420,7 +430,8 @@ export function BlockView({
           anchor={citePopup.el}
           initialRect={citePopup.rect}
           loading={citeBusy}
-          citations={matchMarkers(citeItems, citePopup.marker)}
+          citations={citeHits}
+          unresolved={citeUnresolved}
           onClose={() => setCitePopup(null)}
         />
       )}
@@ -428,7 +439,8 @@ export function BlockView({
       {provOpen && (
         <ProvenanceDialog
           loading={provBusy}
-          citations={prov}
+          citations={prov?.citations ?? null}
+          unresolved={prov?.unresolved ?? []}
           onClose={() => setProvOpen(false)}
         />
       )}
@@ -444,18 +456,6 @@ function offsetIn(root: HTMLElement, node: Node, offset: number): number {
   return range.toString().length
 }
 
-/** [12] 可能对应解析出的 [12]；[12,13] 则命中其中每一条。 */
-function matchMarkers(
-  items: ProvenanceCitation[] | null,
-  marker: string,
-): ProvenanceCitation[] {
-  if (!items) return []
-  const clean = (value: string) => value.replace(/\s+/g, '')
-  const target = clean(marker)
-  const exact = items.filter((item) => clean(item.marker) === target)
-  if (exact.length) return exact
-  return items.filter((item) => target.includes(clean(item.marker)))
-}
 
 /** 同一时刻只允许一个引用浮层：打开新的会先关掉旧的。 */
 let activeCiteCloser: (() => void) | null = null
@@ -498,6 +498,7 @@ function CitePopover({
   initialRect,
   loading,
   citations,
+  unresolved,
   onClose,
 }: {
   marker: string
@@ -505,6 +506,8 @@ function CitePopover({
   initialRect: DOMRect
   loading: boolean
   citations: ProvenanceCitation[]
+  /** 后端明确标记：这条在参考文献里没有对应条目 */
+  unresolved: boolean
   onClose: () => void
 }) {
   const boxRef = useRef<HTMLDivElement>(null)
@@ -594,7 +597,11 @@ function CitePopover({
           正在找回这条引用…
         </div>
       ) : citations.length === 0 ? (
-        <div className="prov-empty">没有解析到这条引用，可以在「引」面板里看整段出处。</div>
+        <div className="prov-empty">
+          {unresolved
+            ? '这条引用在本文参考文献里没有找到对应条目：可能是 PDF 参考文献抽取缺条，或正文与参考文献的作者写法不一致。'
+            : '没有解析到这条引用，可以在「引」面板里看整段出处。'}
+        </div>
       ) : (
         citations.map((c, i) => (
           <div className="prov-item" key={`${c.ref.index}-${i}`}>
@@ -606,7 +613,7 @@ function CitePopover({
             {c.snippet ? (
               <p className="prov-snippet">“{c.snippet}”</p>
             ) : (
-              <p className="prov-snippet muted">没有取到原文片段（可能是付费墙或未收录）</p>
+              <p className="prov-snippet muted">没有取到原文片段（外部索引不可用或未收录）</p>
             )}
             <div className="prov-foot">
               {c.url && (
@@ -614,7 +621,9 @@ function CitePopover({
                   打开原文 ↗
                 </a>
               )}
-              <span className="prov-source">{c.source}</span>
+              {c.source && c.source !== 'none' && (
+                <span className="prov-source">{c.source}</span>
+              )}
             </div>
           </div>
         ))
@@ -626,10 +635,12 @@ function CitePopover({
 function ProvenanceDialog({
   loading,
   citations,
+  unresolved,
   onClose,
 }: {
   loading: boolean
   citations: ProvenanceCitation[] | null
+  unresolved: string[]
   onClose: () => void
 }) {
   useEffect(() => {
@@ -660,7 +671,17 @@ function ProvenanceDialog({
           )}
 
           {!loading && citations && citations.length === 0 && (
-            <div className="prov-empty">这一段没有可解析的引用。</div>
+            <div className="prov-empty">
+              {unresolved.length > 0
+                ? `这一段有 ${unresolved.length} 条引用在参考文献里没有找到对应条目。`
+                : '这一段没有可解析的引用。'}
+            </div>
+          )}
+
+          {!loading && unresolved.length > 0 && Boolean(citations?.length) && (
+            <p className="prov-snippet muted">
+              另有 {unresolved.length} 条引用未在参考文献中找到对应条目。
+            </p>
           )}
 
           {!loading &&
@@ -674,7 +695,9 @@ function ProvenanceDialog({
                 {c.snippet ? (
                   <p className="prov-snippet">“{c.snippet}”</p>
                 ) : (
-                  <p className="prov-snippet muted">没有取到原文片段（可能是付费墙或未收录）</p>
+                  <p className="prov-snippet muted">
+                    没有取到原文片段（其余条目只展示标题与链接）
+                  </p>
                 )}
                 <div className="prov-foot">
                   {c.url && (
@@ -682,7 +705,9 @@ function ProvenanceDialog({
                       打开原文 ↗
                     </a>
                   )}
-                  <span className="prov-source">{c.source}</span>
+                  {c.source && c.source !== 'none' && (
+                    <span className="prov-source">{c.source}</span>
+                  )}
                 </div>
               </div>
             ))}

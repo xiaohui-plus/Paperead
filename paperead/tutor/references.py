@@ -11,7 +11,7 @@ PDF 抽出的参考文献经常有三种坏情况，这里逐一处理：
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..layout import Block
 
@@ -44,9 +44,22 @@ class Reference:
     raw: str
     title: str
     year: int | None
+    # 作者区解析出的姓名（按出现顺序），供正文引用做首作者匹配。
+    # PDF 抽出的作者串经常被拆成 `Lada; A; Adamic` 这种分号碎片，
+    # 这里只保留像姓名的词，首元素即首作者。
+    authors: list[str] = field(default_factory=list)
+    # 年份后缀 a/b/c：同一作者同年有多篇时靠它区分。
+    suffix: str = ""
 
     def to_dict(self) -> dict:
-        return {"index": self.index, "title": self.title, "year": self.year, "raw": self.raw}
+        return {
+            "index": self.index,
+            "title": self.title,
+            "year": self.year,
+            "raw": self.raw,
+            "authors": list(self.authors),
+            "suffix": self.suffix,
+        }
 
 
 def _pieces(text: str) -> list[str]:
@@ -89,11 +102,23 @@ def _is_continuation(piece: str, prev: str | None) -> bool:
         return False
     if prev.rstrip().endswith(("-", "—")):
         return True
+    # 分号作者串单独成一个条目：PyMuPDF 会把 `Lada Adamic` 抽成
+    # `Lada; A; Adamic; ...`，旧规则只认逗号，于是整条被当成上一条的续行吞掉，
+    # 正文里的 `(Lada et al. 2003)` 就永远没有落点。
+    if _AUTHOR_LIST_START_RE.match(piece):
+        return False
     return not _ENTRY_START_RE.match(piece)
 
 
-# 一条新文献的开头：`Guan, Y.` / `A. Author` / `12.`
-_ENTRY_START_RE = re.compile(r"^(?:[A-Z][A-Za-z\-'’]+,\s*(?:[A-Z]\.|[A-Z][a-z])|[A-Z]\.\s|\d{1,3}\.\s)")
+# 一条新文献的开头：`Guan, Y.` / `Lada; A` / `A. Author` / `12.`
+_ENTRY_START_RE = re.compile(
+    r"^(?:[A-Z][A-Za-z\-'’]+(?:[;,]\s*|\s+)(?:[A-Z]\.|[A-Z][a-z])"
+    r"|[A-Z]\.\s|\d{1,3}[.)\]]?\s)"
+)
+# 作者串开头（含分号分隔）：`Lada; A; Adamic` / `Song, X.; Ma, R.`
+_AUTHOR_LIST_START_RE = re.compile(
+    r"^[A-Z][A-Za-z\-'’]{1,24}(?:\s*[;,]\s*(?:and\s+|&\s*)?[A-Z][A-Za-z\-'’.]{0,24}){1,6}"
+)
 
 
 _REF_HEAD_RE = re.compile(r"^[\W_]*\s*(?:references?|bibliography|参考文献)\s*$", re.I)
@@ -280,6 +305,47 @@ def _split_entries(blocks: list[Block]) -> list[tuple[int | None, str]]:
 
 _NAME_LIKE = re.compile(r"^(?:[A-Z][A-Za-z\-']+|[A-Z]\.)(?:\s*(?:,|and|&)\s*(?:[A-Z][A-Za-z\-']+|[A-Z]\.))*")
 
+_NAME_TOKEN_RE = re.compile(r"[A-Z][A-Za-z\u2019'\-]{1,24}")
+# 作者区里混进来的正文/期刊词，避免被当成作者姓氏
+_STOP_NAME_WORDS = {
+    "the", "this", "these", "those", "and", "for", "with", "from", "using",
+    "via", "towards", "toward", "into", "over", "under", "between", "among",
+    "graph", "graphs", "neural", "network", "networks", "learning", "deep",
+    "proceedings", "conference", "journal", "transactions", "press",
+    "arxiv", "preprint", "ieee", "acm", "pmlr", "springer", "nature",
+    "figure", "table", "section", "appendix", "university", "institute",
+}
+
+
+def _author_names(raw: str) -> list[str]:
+    """从参考文献的作者区抽出姓名串，首元素用于正文引用的首作者匹配。
+
+    `Lada; A; Adamic; ; ; Eytan; and Adar. 2003.` 这类分号碎片也要能取到
+    `Lada / Adamic / Eytan / Adar`，只保留长度 >= 2 的大写开头词。
+    """
+    text = re.sub(r"^\s*\[?\d{1,3}\]?[.)]?\s*", "", raw)
+    m = _YEAR_RE.search(text)
+    zone = text[: m.start()] if m and m.start() > 10 else text[:180]
+    out: list[str] = []
+    for tok in _NAME_TOKEN_RE.finditer(zone):
+        name = tok.group(0).strip(".'’")
+        if len(name) < 2 or name.isupper():
+            continue
+        if name.lower() in _STOP_NAME_WORDS:
+            continue
+        out.append(name)
+        if len(out) >= 10:
+            break
+    return out
+
+
+def _year_suffix(raw: str, year: int | None) -> str:
+    """文献年份后缀：`Kipf and Welling 2016b` 的 b。"""
+    if not year:
+        return ""
+    m = re.search(rf"\b{year}([a-z])\b", raw)
+    return m.group(1) if m else ""
+
 
 def _norm_title(text: str) -> str:
     t = re.sub(r"\s+", " ", text).strip()
@@ -422,12 +488,15 @@ def parse(blocks: list[Block]) -> list[Reference]:
             if index in used:
                 continue
         used.add(index)
+        year = _extract_year(text)
         out.append(
             Reference(
                 index=index,
                 raw=text,
                 title=title,
-                year=_extract_year(text),
+                year=year,
+                authors=_author_names(text),
+                suffix=_year_suffix(text, year),
             )
         )
     return out

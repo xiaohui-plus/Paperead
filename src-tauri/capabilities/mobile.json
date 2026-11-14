@@ -4,5 +4,12 @@
   "description": "Paperead Android capability",
   "windows": ["main"],
   "platforms": ["android", "iOS"],
-  "permissions": ["core:default", "barcode-scanner:default"]
+  "permissions": [
+    "core:default",
+    "barcode-scanner:default",
+    "allow-llm-stream",
+    "allow-llm-cancel",
+    "allow-check-apk-update",
+    "allow-install-apk-update"
+  ]
 }

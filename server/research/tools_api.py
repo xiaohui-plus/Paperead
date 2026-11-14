@@ -7,6 +7,7 @@
 工具与接口的对应关系：
     academic_search  GET  /internal/research/scholar/search
     paper_import     POST /internal/research/scholar/import
+                     POST /internal/research/sessions/{id}/papers/import
     project_read     GET  /internal/research/sessions/{id}/project
     project_write    PATCH /internal/research/sessions/{id}/project
                      POST /internal/research/sessions/{id}/files
@@ -43,7 +44,7 @@ from server.research import explorer, ppt_templates, templates as template_store
 from server.research.citations import audit_review
 from server.research.deck import build_deck, parse_outline
 from server.research.docx_edit import DocxError, edit_docx, read_docx
-from server.research.files import safe_name, save_bytes_in
+from server.research.files import resolve_in_root, safe_name, save_bytes_in
 from server.research.latex import (
     bib_stem,
     build_tex,
@@ -63,6 +64,58 @@ MAX_READ_CHARS = 20000
 TEXT_SUFFIXES = {".md", ".txt", ".json", ".csv", ".bib", ".tex", ".yaml", ".yml"}
 SOURCES = set(SOURCE_KEYS)
 CITATION_REPORT_NAME = "citation-report.md"
+# 下载的论文默认放在当前项目工作文件夹下的 papers/，避免堆在根目录。
+DEFAULT_PAPER_FOLDER = "papers"
+
+
+def _paper_folder(root: Path, raw: str | None) -> str:
+    """把用户/模型给的相对目录规范到项目工作文件夹内；空值用 papers/。"""
+    given = str(raw or "").strip()
+    if not given:
+        return DEFAULT_PAPER_FOLDER
+    if Path(given).is_absolute() or Path(given).drive:
+        raise ValueError("保存目录必须使用相对当前项目工作文件夹的路径")
+    text = given.replace("\\", "/").strip("/")
+    parts: list[str] = []
+    for segment in text.split("/"):
+        segment = segment.strip()
+        if segment in ("", "."):
+            continue
+        if segment == "..":
+            raise ValueError("保存目录必须在当前项目工作文件夹内")
+        cleaned = safe_name(segment, "")
+        if cleaned:
+            parts.append(cleaned)
+    relative = "/".join(parts) or DEFAULT_PAPER_FOLDER
+    try:
+        resolve_in_root(root, relative)
+    except ValueError as error:
+        raise ValueError("保存目录必须在当前项目工作文件夹内") from error
+    return relative
+
+
+def _ensure_folder_item(
+    research: ResearchStore, project_id: str, folder: str
+) -> str | None:
+    """为 papers/ 这类目录补上文件树条目；已有同路径文件夹时直接复用。"""
+    parent_id: str | None = None
+    current = ""
+    for name in folder.split("/"):
+        current = f"{current}/{name}".strip("/")
+        row = next(
+            (
+                item
+                for item in research.list_items(project_id)
+                if item.get("kind") == "folder" and item.get("path") == current
+            ),
+            None,
+        )
+        if row is None:
+            row = research.add_item(
+                project_id, "folder", name, parent_id=parent_id, path=current
+            )
+        parent_id = str(row["id"])
+    return parent_id
 
 
 def _check(token: str | None) -> None:
@@ -109,6 +162,8 @@ class DocxEditIn(BaseModel):
 
 class ImportIn(BaseModel):
     id: str = Field(..., min_length=3, max_length=300)
+    # 项目内保存目录（相对当前工作文件夹）；空值落到默认的 papers/。
+    folder: str | None = None
 
 
 class RunIn(BaseModel):
@@ -971,14 +1026,25 @@ def build_router(
         body: ImportIn,
         x_internal_token: str | None = Header(default=None, alias="x-internal-token"),
     ) -> dict[str, Any]:
-        """把学术检索结果放进**当前项目自己的论文文件夹**，不进全局文献库。
+        """下载论文：正文进文献库，并复制一份到当前项目工作文件夹。
 
-        全局库里已有同一篇时直接复用，避免重复下载；项目文件树里仍会出现一条
-        ``kind=paper`` 的条目，可读、可删除，右键可加入文献库。
+        默认保存到 ``<项目工作文件夹>/papers/``；``folder`` 可以指定工作文件夹
+        内的其他子目录。文献库里保留独立副本，项目文件被移动/删除不会影响
+        文献库的阅读、同步与推送。
         """
         _check(x_internal_token)
         _session, project = _session_project(session_id)
         pid = str(project["id"])
+        root = Path(research.workspace_root(pid))
+        try:
+            folder = _paper_folder(root, body.folder)
+        except ValueError as exc:
+            return {
+                "imported": False,
+                "already": False,
+                "error": str(exc),
+            }
+
         global_row = library.find_by_source(body.id, project_id=None)
         imported = False
         already = False
@@ -987,9 +1053,7 @@ def build_router(
             already = True
         else:
             try:
-                result = await import_paper(
-                    library, add_pdf, public, body.id, project_id=pid
-                )
+                result = await import_paper(library, add_pdf, public, body.id)
             except HTTPException as exc:
                 detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
                 return {"imported": False, "already": False, "error": detail}
@@ -1003,26 +1067,60 @@ def build_router(
             return {"imported": imported, "already": already, "error": "导入后找不到文献记录。"}
 
         paper_id = str(row["id"])
+        pdf = library.pdf_path(paper_id)
+        if pdf is None or not Path(pdf).is_file():
+            return {
+                "imported": imported,
+                "already": already,
+                "error": "文献库里没有这篇论文的 PDF 文件。",
+            }
+
+        # 文献库按 paper_id 存一份主副本；这里再把内容复制到用户打开的项目
+        # 工作文件夹里，文件树与 Finder/资源管理器都能直接看到。
+        data = Path(pdf).read_bytes()
+        filename = safe_name(
+            str(row.get("filename") or f"{paper_id}.pdf"), f"{paper_id}.pdf"
+        )
+        target = resolve_in_root(root, folder) / filename
+        copied = True
+        if target.is_file() and target.stat().st_size == len(data):
+            relative = target.resolve().relative_to(root.resolve()).as_posix()
+            copied = False
+        else:
+            relative, _size = save_bytes_in(root, filename, data, folder)
+
         existing_item = next(
-            (item for item in research.list_items(pid) if item.get("ref_id") == paper_id),
+            (item for item in research.list_items(pid) if item.get("path") == relative),
             None,
         )
-        item = existing_item or research.add_item(
-            pid,
-            "paper",
-            row.get("title") or "论文",
-            path="",
-            ref_id=paper_id,
-            mime="application/pdf",
-            size=int(row.get("size") or 0),
-            meta={"projectScoped": (row.get("project_id") or None) == pid},
-        )
+        if existing_item is not None:
+            item = existing_item
+        else:
+            parent_id = _ensure_folder_item(research, pid, folder)
+            item = research.add_item(
+                pid,
+                "paper",
+                str(row.get("title") or Path(filename).stem),
+                parent_id=parent_id,
+                path=relative,
+                ref_id=paper_id,
+                mime="application/pdf",
+                size=int(row.get("size") or len(data)),
+                meta={"library": True},
+            )
         return {
             "paper": public(row),
-            "item": {"id": item["id"], "name": item["title"], "path": item.get("path") or ""},
+            "item": {
+                "id": item["id"],
+                "name": item["title"],
+                "path": item.get("path") or "",
+            },
+            "folder": folder,
+            "saved": relative,
+            "copied": copied,
             "imported": imported,
-            "already": already or bool(existing_item),
-            "projectScoped": (row.get("project_id") or None) == pid,
+            "already": already or existing_item is not None,
+            "projectScoped": False,
         }
 
     # ── 项目上下文 ─────────────────────────────────────

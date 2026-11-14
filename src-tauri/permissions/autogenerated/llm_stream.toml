@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-llm-stream"
+description = "Enables the llm_stream command without any pre-configured scope."
+commands.allow = ["llm_stream"]
+
+[[permission]]
+identifier = "deny-llm-stream"
+description = "Denies the llm_stream command without any pre-configured scope."
+commands.deny = ["llm_stream"]

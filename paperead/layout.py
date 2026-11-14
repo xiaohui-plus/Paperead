@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import re
+from bisect import bisect_left
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -97,6 +98,16 @@ _CAPTION_NUM_ONLY_RE = re.compile(
 )
 # 只包含公式编号的行：(3) / （3.1）。裸数字多是页码或图里的数据标签，不收
 _EQ_NUM_ONLY_RE = re.compile(r"^[（(]\s*[A-Z]?\d{1,3}(?:\.\d+)?\s*[)）]$")
+
+
+def _aligns_column_edge(xs: list[float], x: float, tol: float = 5.0) -> bool:
+    """x 是否贴着某一条栏的右边界（xs 为该页非编号行的右边界集合）。
+
+    双栏 PDF 里公式编号贴在**栏**右缘，而不是页面右缘：左栏编号的 x1 通常在
+    页面宽度 48% 左右，用整页宽度的 0.6 判断会整批漏掉。
+    """
+    i = bisect_left(xs, x - tol)
+    return i < len(xs) and xs[i] <= x + tol
 
 
 def _is_caption_text(text: str) -> bool:
@@ -494,14 +505,24 @@ def _mark_margins(lines: list[Line], doc: pymupdf.Document) -> None:
                 norm[key] += 1
         threshold = max(3, int(len(doc) * 0.3))
         repeats = {k for k, c in norm.items() if c >= threshold}
+        # 各页非编号行的右边界，用于区分「贴在栏右缘的公式编号」与真正的页码
+        edge_xs: dict[int, list[float]] = {}
+        for ln in lines:
+            if ln.is_margin or _EQ_NUM_ONLY_RE.match(ln.text.strip()):
+                continue
+            edge_xs.setdefault(ln.page, []).append(ln.x1)
+        edge_xs = {p: sorted(v) for p, v in edge_xs.items()}
         for ln in lines:
             key = re.sub(r"\d+", "#", ln.text.strip().lower())
             if key in repeats and ln.page > 1:
                 # 右边缘的「(2)」这类是公式编号，不是页码：每页公式编号会重复
-                # 出现 (1)(2)...，归一化后都是 (##)，不能被当成页眉页脚丢掉
+                # 出现 (1)(2)...，归一化后都是 (##)，不能被当成页眉页脚丢掉。
+                # 双栏左栏的编号贴在栏右缘、不到整页 60%，须按栏边界判断。
                 if _EQ_NUM_ONLY_RE.match(ln.text.strip()):
                     w = widths.get(ln.page - 1, 612)
-                    if ln.x1 > w * 0.6:
+                    if ln.x1 > w * 0.6 or _aligns_column_edge(
+                        edge_xs.get(ln.page, []), ln.x1
+                    ):
                         continue
                 ln.is_margin = True
 
@@ -921,22 +942,34 @@ def _looks_equation(
     return not _STOP_RE.search(t)
 
 
-_EQ_NUMBER_RE = re.compile(r"[（(]\s*([A-Z]?\d{1,3}(?:\.\d+)?)\s*[)）]\s*[.,;]?\s*$")
+_EQ_NUMBER_RE = re.compile(
+    r"(?:^|(?<=\s))[（(]\s*([A-Z]?\d{1,3}(?:\.\d+)?)\s*[)）]\s*[.,;]?\s*$"
+)
+# 夹在公式正文中间的编号：视觉行按 x 拼接时，编号可能落在上下标之间
+# （如 `aij = ... √ (9) j + bij d`）。前后必须是空白/边界，避免误删
+# `f(9)` 这类真正的数学内容。
+_EQ_NUMBER_INLINE_RE = re.compile(
+    r"(?:^|(?<=\s))[（(]\s*([A-Z]?\d{1,3}(?:\.\d+)?)\s*[)）](?=\s|$)"
+)
 
 
 def _split_eq_number(text: str) -> tuple[str, str]:
-    """把行尾右对齐的公式编号 `(3)` 从公式正文里拆出来。
+    """把公式里的右对齐编号 `(3)` 从公式正文里拆出来。
 
     编号要单独渲染（前端右对齐），不能留在 LaTeX 里：视觉模型会把
     `(3)` 当成公式的一部分，导致 KaTeX 排版出一个漂移的编号。
     """
     m = _EQ_NUMBER_RE.search(text)
-    if not m:
-        return text, ""
-    body = text[: m.start()].rstrip()
-    if len(body) < 2:
-        return text, ""
-    return body, m.group(1)
+    if m:
+        body = text[: m.start()].rstrip()
+        if len(body) >= 2:
+            return body, m.group(1)
+    for m in _EQ_NUMBER_INLINE_RE.finditer(text):
+        body = (text[: m.start()] + " " + text[m.end():]).strip()
+        body = re.sub(r"\s{2,}", " ", body)
+        if len(body) >= 2:
+            return body, m.group(1)
+    return text, ""
 
 
 def _build_blocks(ordered: list[Line], body_size: float) -> list[Block]:
@@ -1420,12 +1453,21 @@ def _attach_equation_numbers(blocks: list[Block], doc: pymupdf.Document) -> list
         return blocks
 
     widths = {p + 1: doc[p].rect.width for p in range(len(doc))}
+    # 各页非编号块的右边界：编号贴着某一栏的右缘，不一定是整页右缘
+    edge_xs: dict[int, list[float]] = {}
+    for blk in blocks:
+        if _EQ_NUM_ONLY_RE.match(blk.text.strip()):
+            continue
+        edge_xs.setdefault(blk.page, []).append(blk.bbox[2])
+    edge_xs = {p: sorted(v) for p, v in edge_xs.items()}
     drop: set[int] = set()
     for b in blocks:
         if b.kind != "para" or not _EQ_NUM_ONLY_RE.match(b.text.strip()):
             continue
         width = widths.get(b.page, 612)
-        if b.bbox[2] < width * 0.6:
+        if b.bbox[2] < width * 0.6 and not _aligns_column_edge(
+            edge_xs.get(b.page, []), b.bbox[2]
+        ):
             continue
         cy = (b.bbox[1] + b.bbox[3]) / 2
         cands = [
@@ -1463,6 +1505,7 @@ def _drop_noise(blocks: list[Block]) -> list[Block]:
             continue
         if re.fullmatch(r"[\d\s\.\-–—]+", t):
             continue
+
         out.append(b)
     for i, b in enumerate(out):
         b.order = i

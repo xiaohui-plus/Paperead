@@ -569,12 +569,17 @@ export function apply(ctx, config = {}) {
     defineTool({
       name: 'paper_import',
       description:
-        'Download the open-access PDF of one academic_search result into the current project paper folder (NOT the global library) and parse it, so it can be read with paper_read. Pass the paper id exactly as returned. Prefer using abstracts from academic_search first; only import when full text is needed.',
+        'Download the open-access PDF of one academic_search result into the local library, and also copy it into the current project workspace so the user can see the file in the project folder. The default subfolder is "papers/"; pass folder only when the user explicitly asks for another subfolder INSIDE the opened project folder (absolute paths and paths escaping it are rejected). Pass the paper id exactly as returned. Prefer using abstracts from academic_search first; only import when full text is needed.',
       parameters: {
         paperId: {
           type: 'string',
           required: true,
           description: 'Paper id from academic_search, e.g. arxiv:2401.00001.',
+        },
+        folder: {
+          type: 'string',
+          description:
+            'Optional subfolder inside the current project workspace, relative to its root. Default "papers". Never an absolute path; must stay inside the opened project folder.',
         },
       },
       output: {
@@ -591,27 +596,27 @@ export function apply(ctx, config = {}) {
         return call(
           `/internal/research/sessions/${encodeURIComponent(sessionId)}/papers/import`,
           {},
-          { method: 'POST', body: { id: args.paperId } },
+          { method: 'POST', body: { id: args.paperId, folder: args.folder } },
         )
       },
       presentCall(args) {
         return {
           card: 'generic',
           kind: 'paper_import',
-          title: '导入项目论文',
+          title: args.folder ? `导入文献 · ${args.folder}` : '导入文献 · papers/',
           rawInput: args,
         }
       },
       presentResult(_args, value) {
         if (value?.error) return textResult('导入失败', value.error)
         const paper = value?.paper || {}
-        const verb = value?.already ? '已在项目论文里' : value?.imported ? '已导入项目' : '未导入'
+        const verb = value?.already ? '文献库已有' : value?.imported ? '已下载到文献库' : '未导入'
         return textResult(
           `${verb} · ${paper.title || ''}`,
           [
             paper.title || '',
             `paperId: ${paper.id || ''}`,
-            value?.item?.path ? `项目文件: ${value.item.path}` : '',
+            value?.saved ? `项目文件: ${value.saved}` : '',
           ]
             .filter(Boolean)
             .join('\n'),
