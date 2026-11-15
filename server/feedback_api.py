@@ -4,9 +4,9 @@ Gitee 开放 API 没有「Issue 附件上传」接口，唯一可用的附件接
 因此截图先通过「仓库内容」接口落到公开仓库的 `feedback-attachments/` 目录，
 再用 raw 链接内嵌到 Issue 正文里，这样 Issue 页面能直接看到图片。
 
-提交令牌的优先级：用户在设置里填写的令牌 > 环境变量 > 打包内置令牌文件。
-内置令牌文件不进 git（见 .gitignore），只在构建安装包时随 sidecar 一起打进，
-用户端开箱即用；用户也可以用自己的令牌覆盖掉它。
+提交令牌的优先级：用户在设置里填写的令牌 > 环境变量 > 无。
+内置令牌由 Rust 壳用 AES-256-GCM 解密后通过 PAPEREAD_FEEDBACK_TOKEN 注入，
+Python 侧不再读取任何明文令牌文件。
 """
 
 from __future__ import annotations
@@ -15,24 +15,23 @@ import base64
 import binascii
 import json
 import os
-import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 API_BASE = "https://gitee.com/api/v5"
-OWNER = "deng_xiaohui"
-REPO = "paperead"
-BRANCH = "master"
+# 反馈统一收集到独立仓库；可用环境变量临时指向别的仓库，避免改代码重编译。
+OWNER = os.getenv("PAPEREAD_FEEDBACK_OWNER", "deng_xiaohui").strip()
+REPO = os.getenv("PAPEREAD_FEEDBACK_REPO", "paperead_issue").strip()
+BRANCH = os.getenv("PAPEREAD_FEEDBACK_BRANCH", "master").strip()
 
 TOKEN_ENV = "PAPEREAD_FEEDBACK_TOKEN"
 SETTINGS_NAME = "feedback-settings.json"
-TOKEN_ASSET = Path("server") / "resources" / "gitee-feedback-token.txt"
 
 ATTACHMENT_DIR = "feedback-attachments"
 MAX_IMAGES = 6
@@ -47,15 +46,6 @@ IMAGE_EXTENSIONS = {
     "image/webp": ".webp",
 }
 
-
-def _token_assets() -> Iterator[Path]:
-    """内置令牌文件的候选位置：打包后的 sidecar 与源码目录。"""
-    if getattr(sys, "frozen", False):
-        bundle = getattr(sys, "_MEIPASS", None)
-        if bundle:
-            yield Path(bundle) / TOKEN_ASSET
-        yield Path(sys.executable).resolve().parent / TOKEN_ASSET
-    yield Path(__file__).resolve().parent / "resources" / "gitee-feedback-token.txt"
 
 
 class FeedbackSettings:
@@ -92,20 +82,16 @@ class FeedbackSettings:
         tmp.replace(self.path)
 
     def resolve(self) -> tuple[str, str]:
-        """返回 (令牌, 来源)；来源用于界面上说明当前用的是哪一份令牌。"""
+        """返回 (令牌, 来源)；来源用于界面上说明当前用的是哪一份令牌。
+
+        壳注入的环境变量对用户就是「内置提交通道」，故来源标为 builtin。
+        """
         user = self.user_token()
         if user:
             return user, "user"
         env_token = os.getenv(TOKEN_ENV, "").strip()
         if env_token:
-            return env_token, "env"
-        for asset in _token_assets():
-            try:
-                token = asset.read_text(encoding="utf-8").strip()
-            except OSError:
-                continue
-            if token:
-                return token, "builtin"
+            return env_token, "builtin"
         return "", "none"
 
 

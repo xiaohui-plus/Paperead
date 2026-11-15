@@ -1,5 +1,5 @@
 import { useMemo, type CSSProperties, type RefObject } from 'react'
-import type { Paper, ReaderContextItem, ViewMode } from '../types'
+import type { Paper, ReaderContextItem, ReaderQuoteDraft, ViewMode } from '../types'
 import { isFlowBlock, prepareBlocks } from '../lib/blocks'
 import type { Annotation, ReadingHighlight } from '../lib/library'
 import type { AnnotationActions } from './Annotations'
@@ -21,6 +21,8 @@ interface Props {
   /** 已加入问答附录的块 */
   contextIds?: Set<string>
   onAttachContext?: (item: ReaderContextItem) => void
+  /** 划词工具条点「提问」：把选中的文字带到左侧问答面板 */
+  onAskQuote?: (quote: ReaderQuoteDraft) => void
   /** 双击正文里的高亮/批注：切到左侧批注栏并定位 */
   onOpenAnnotation?: (annotation: Annotation) => void
   /** 双击自动阅读重点：切到左侧「阅读重点」并定位 */
@@ -40,6 +42,7 @@ export function Reader({
   highlights = [],
   contextIds,
   onAttachContext,
+  onAskQuote,
   onOpenAnnotation,
   onOpenHighlight,
 }: Props) {
@@ -111,6 +114,7 @@ export function Reader({
             highlights={highlights}
             attachedIds={contextIds}
             onAttachContext={onAttachContext}
+            onAskQuote={onAskQuote}
             onOpenAnnotation={onOpenAnnotation}
             onOpenHighlight={onOpenHighlight}
           />

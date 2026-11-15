@@ -81,14 +81,38 @@ def _strip_number(tex: str) -> str:
     return tex
 
 
+# \left. / \right\X 这类空定界符或转义定界符：KaTeX 可以渲染，但裸计数会把
+# \right\} 的 } 当成未配对的组括号。历史日志里
+# `\left.x_{t+1}^{\mathrm{down}}\right\}` 就是因此被当成 unbalanced braces 丢掉。
+_DELIM_CMD_RE = re.compile(r"\\(?:left|right)\s*(\\?[{}()\[\]|.])")
+
+
+def _normalize_delimiters(tex: str) -> str:
+    """把 \\left. / \\right\\} 这类定界符命令还原成字符本身。"""
+    tex = tex.replace(r"\left.", "").replace(r"\right.", "")
+    return _DELIM_CMD_RE.sub(lambda m: m.group(1), tex)
+
+
+def _brace_balance(tex: str) -> tuple[int, int]:
+    """统计分组括号，忽略 \\{ \\} 转义定界符与 \\left/\\right 命令。"""
+    cleaned = tex.replace(r"\{", "").replace(r"\}", "")
+    cleaned = re.sub(r"\\(?:left|right)\s*", "", cleaned)
+    return cleaned.count("{"), cleaned.count("}")
+
+
 def validate_latex(tex: str) -> tuple[bool, str]:
-    """粗校验：括号配平、环境配对、长度合理。宁可判错回落到图片，也不要把坏公式交给 KaTeX。"""
+    """粗校验：括号配平、环境配对、长度合理。
+
+    宁可判错回落到图片，也不要把坏公式交给 KaTeX；但集合公式的 `\\{`/`\\}`
+    与 `\\right\\}` 属于定界符字符，不是分组括号，不能参与配平计数。
+    """
     t = tex.strip()
     if not t or t.upper() == "NONE":
         return False, "empty"
     if len(t) > 2000:
         return False, "too long"
-    if t.count("{") != t.count("}"):
+    open_braces, close_braces = _brace_balance(t)
+    if open_braces != close_braces:
         return False, "unbalanced braces"
     if t.count("\\begin") != t.count("\\end"):
         return False, "unbalanced environments"
@@ -163,6 +187,7 @@ async def recognize_latex(image: bytes, model: str | None = None, backend=None) 
     caller = backend.chat if backend is not None else chat
     raw = await caller(messages, model=model, temperature=0.0, max_tokens=1600)
     tex = _strip_wrappers(raw)
+    tex = _normalize_delimiters(tex)
     tex = _strip_number(tex)
     ok, reason = validate_latex(tex)
     if not ok:

@@ -31,11 +31,8 @@ pptx_hidden = collect_submodules("pptx")
 docx_datas = collect_data_files("docx")
 docx_hidden = collect_submodules("docx")
 
-# 反馈令牌只在构建机上存在（已 gitignore），有就打进 sidecar，让发布包开箱可用。
-_feedback_token = ROOT / "server" / "resources" / "gitee-feedback-token.txt"
-feedback_datas = (
-    [(str(_feedback_token), "server/resources")] if _feedback_token.is_file() else []
-)
+# 反馈令牌不再打进 sidecar：Rust 壳解密后经环境变量注入（见 src/feedback.rs），
+# Python 侧不保存明文。
 
 a = Analysis(
     [str(ROOT / "packaging" / "server_entry.py")],
@@ -48,7 +45,7 @@ a = Analysis(
             "server/research/ppt_templates",
         )
     ]
-    + feedback_datas
+
     + pymupdf_datas
     + pptx_datas
     + docx_datas,

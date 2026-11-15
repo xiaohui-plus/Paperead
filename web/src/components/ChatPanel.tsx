@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { Paper, ReaderContextItem } from '../types'
+import type { Paper, ReaderContextItem, ReaderQuote } from '../types'
 import {
   askPaperStream,
   getChat,
@@ -65,6 +65,8 @@ interface Turn {
   demo?: boolean
   /** 本轮随问题引用的图表/公式（阅读页小圆圈加入的附录） */
   contexts?: ReaderContextItem[]
+  /** 本轮随问题引用的阅读页划词片段 */
+  quotes?: ReaderQuote[]
   /** 后端历史里的轮次 id（恢复来的轮次才有；往前翻页时作为 before） */
   memoryId?: string
 }
@@ -167,6 +169,10 @@ export function ChatPanel({
   contextItems = [],
   onRemoveContext,
   onClearContext,
+  quotes = [],
+  onRemoveQuote,
+  onClearQuotes,
+  quoteFocusAt = 0,
 }: {
   paper: Paper
   paperId: string
@@ -176,6 +182,11 @@ export function ChatPanel({
   contextItems?: ReaderContextItem[]
   onRemoveContext?: (id: string) => void
   onClearContext?: () => void
+  quotes?: ReaderQuote[]
+  onRemoveQuote?: (id: string) => void
+  onClearQuotes?: () => void
+  /** 阅读页划词提问后递增：聚焦输入框，让用户直接打字 */
+  quoteFocusAt?: number
 }) {
   const [turns, setTurns] = useState<Turn[]>([])
   // 演示论文没有后端历史，直接算就绪
@@ -196,6 +207,7 @@ export function ChatPanel({
   const pickerRef = useRef<HTMLDivElement>(null)
   const libraryRef = useRef<HTMLDivElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
   const canUpload = paperId !== 'demo'
   const seq = useRef(0)
   const busyRef = useRef(false)
@@ -223,6 +235,12 @@ export function ChatPanel({
     if (!settingsVersion) return
     setSettings(loadModelSettings())
   }, [settingsVersion])
+
+  // 阅读页划词点「提问」：引用已经在输入框上方，聚焦后用户可直接打字
+  useEffect(() => {
+    if (!quoteFocusAt) return
+    inputRef.current?.focus()
+  }, [quoteFocusAt])
 
   useEffect(() => {
     if (!pickerOpen) return
@@ -386,6 +404,7 @@ export function ChatPanel({
     kind?: AskKind,
     files: PaperAttachment[] = attachments,
     contexts: ReaderContextItem[] = contextItems,
+    quoteRefs: ReaderQuote[] = quotes,
   ) => {
     if (busyRef.current) return
     busyRef.current = true
@@ -397,6 +416,7 @@ export function ChatPanel({
     const cfg = readyModel(loadModelSettings(), 'answer')
     const sentFiles = files.slice()
     const sentContexts = contexts.slice()
+    const sentQuotes = quoteRefs.slice()
 
     setTurns((prev) => [
       ...prev,
@@ -411,10 +431,12 @@ export function ChatPanel({
         demo: !cfg,
         attachments: sentFiles.length > 0 ? sentFiles : undefined,
         contexts: sentContexts.length > 0 ? sentContexts : undefined,
+        quotes: sentQuotes.length > 0 ? sentQuotes : undefined,
       },
     ])
     setAttachments([])
     onClearContext?.()
+    onClearQuotes?.()
 
     // 没配置回答模型时退回本地演示答案
     if (!cfg) {
@@ -484,6 +506,16 @@ export function ChatPanel({
           ? hits
           : index.docs.slice(0, 6).map((doc) => ({ doc, score: 0 }))
         const context = buildLocalContext(index, chosen)
+        // 划词引用没有块检索结果兜底：直接放进材料最前面，保证模型一定看得到
+        const quoteBlock =
+          sentQuotes.length > 0
+            ? `【用户选中的片段】\n${sentQuotes
+                .map(
+                  (q) =>
+                    `- ${q.page ? `第 ${q.page} 页：` : ''}${q.text.replace(/\s+/g, ' ')}`,
+                )
+                .join('\n')}\n\n`
+            : ''
         const sources: AskSource[] = hits.map((hit) => ({
           type: 'paper',
           label: `[P${hit.doc.page}]`,
@@ -510,7 +542,7 @@ export function ChatPanel({
             { role: 'system', content: LOCAL_ANSWER_SYS },
             {
               role: 'user',
-              content: `${recent ? `【最近对话】\n${recent}\n\n` : ''}【材料】\n${
+              content: `${recent ? `【最近对话】\n${recent}\n\n` : ''}【材料】\n${quoteBlock}${
                 context || '（没有检索到相关段落）'
               }\n\n【问题】${question}`,
             },
@@ -603,6 +635,12 @@ export function ChatPanel({
         controller.signal,
         sentFiles.map((item) => item.name),
         sentContexts.map((item) => item.blockId),
+        sentQuotes.map((item) => ({
+          text: item.text,
+          page: item.page,
+          blockId: item.blockId,
+          source: item.source,
+        })),
       )
 
       if (streamError) throw new Error(streamError)
@@ -714,6 +752,20 @@ export function ChatPanel({
           <article className="turn" key={t.id}>
             <div className="turn-q">{t.question}</div>
 
+            {t.quotes && t.quotes.length > 0 && (
+              <div className="turn-quotes">
+                {t.quotes.map((q) => (
+                  <blockquote className="turn-quote" key={q.id} title={q.text}>
+                    <span className="turn-quote-text">{q.text}</span>
+                    <span className="turn-quote-where">
+                      {q.source === 'zh' ? '译文' : q.source === 'pdf' ? 'PDF' : '原文'}
+                      {q.page ? ` · P${q.page}` : ''}
+                    </span>
+                  </blockquote>
+                ))}
+              </div>
+            )}
+
             {t.attachments && t.attachments.length > 0 && (
               <div className="turn-attachments">
                 {t.attachments.map((file) => (
@@ -817,6 +869,41 @@ export function ChatPanel({
       </div>
 
       <div className="composer">
+        {quotes.length > 0 && (
+          <div className="chat-quotes">
+            <div className="chat-quotes-head">
+              <span>引用 · {quotes.length}</span>
+              <button
+                type="button"
+                className="chat-appendix-clear"
+                onClick={() => onClearQuotes?.()}
+              >
+                清空
+              </button>
+            </div>
+            <div className="chat-quotes-list">
+              {quotes.map((q) => (
+                <div className="quote-item" key={q.id}>
+                  <blockquote className="quote-text" title={q.text}>
+                    {q.text}
+                  </blockquote>
+                  <span className="quote-where">
+                    {q.source === 'zh' ? '译文' : q.source === 'pdf' ? 'PDF' : '原文'}
+                    {q.page ? ` · P${q.page}` : ''}
+                  </span>
+                  <button
+                    type="button"
+                    className="quote-remove"
+                    title="移除这条引用"
+                    onClick={() => onRemoveQuote?.(q.id)}
+                  >
+                    <IconClose />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         {contextItems.length > 0 && (
           <div className="chat-appendix">
             <div className="chat-appendix-head">
@@ -903,6 +990,7 @@ export function ChatPanel({
         )}
         <div className="composer-box">
           <textarea
+            ref={inputRef}
             rows={1}
             value={input}
             placeholder={

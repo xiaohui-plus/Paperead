@@ -1699,6 +1699,15 @@ async def make_lineage(paper_id: str, req: GuideReq | None = None) -> dict:
         _lineaging.discard(paper_id)
 
 
+class AskQuoteIn(BaseModel):
+    """阅读页划词「提问」带过来的引用片段。"""
+
+    text: str = ""
+    page: int | None = None
+    block_id: str | None = None
+    source: str = ""
+
+
 class AskReq(BaseModel):
     question: str
     config: LLMConfigIn | None = None
@@ -1707,6 +1716,8 @@ class AskReq(BaseModel):
     attachments: list[str] = Field(default_factory=list)
     # 阅读页点图表/公式旁的小圆圈加入「附录」的块 id
     block_ids: list[str] = Field(default_factory=list)
+    # 阅读页划词后「提问」选中的原文/译文/PDF 片段
+    quotes: list[AskQuoteIn] = Field(default_factory=list)
 
 
 @dataclass
@@ -1965,6 +1976,26 @@ def _block_context(paper_id: str, block_ids: list[str]) -> str:
     )
 
 
+def _quote_context(quotes: list[AskQuoteIn]) -> str:
+    """把阅读页划词「提问」选中的片段拼成问答材料。"""
+    parts: list[str] = []
+    for quote in quotes[:6]:
+        text = (quote.text or "").strip()
+        if not text:
+            continue
+        where = f" · 第 {quote.page} 页" if quote.page else ""
+        kind = "译文" if quote.source == "zh" else "原文"
+        if quote.source == "pdf":
+            kind = "原版 PDF"
+        parts.append(f"### 用户选中的{kind}片段{where}\n> {text}")
+    if not parts:
+        return ""
+    return (
+        "以下是用户在阅读页划词后想要提问的片段，请优先结合它们回答：\n\n"
+        + "\n\n".join(parts)
+    )
+
+
 async def _prepare_ask_events(
     paper_id: str,
     req: AskReq,
@@ -2148,6 +2179,9 @@ async def _prepare_ask_events(
     block_block = _block_context(paper_id, req.block_ids)
     if block_block:
         context = f"{context}\n\n{block_block}" if context else block_block
+    quote_block = _quote_context(req.quotes)
+    if quote_block:
+        context = f"{quote_block}\n\n{context}" if context else quote_block
 
     sources = []
     floor = top_score * 0.4
@@ -2312,6 +2346,9 @@ def _tutor_agent_system(paper_id: str, req: AskReq, memory: str = "") -> str:
     block_block = _block_context(paper_id, req.block_ids)
     if block_block:
         lines += ["", block_block]
+    quote_block = _quote_context(req.quotes)
+    if quote_block:
+        lines += ["", quote_block]
     if memory:
         lines += ["", "【背景记忆】（只用于调整讲法，不能当作论文事实）", memory]
     return "\n".join(lines)

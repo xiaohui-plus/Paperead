@@ -7,7 +7,7 @@ import {
   useState,
   type MouseEvent as ReactMouseEvent,
 } from 'react'
-import type { Block, ReaderContextItem, ViewMode } from '../types'
+import type { Block, ReaderContextItem, ReaderQuoteDraft, ViewMode } from '../types'
 import type { RenderBlock } from '../lib/blocks'
 import {
   getProvenance,
@@ -30,6 +30,7 @@ import { Katex } from './Katex'
 import { IconCheck, IconClose, IconCopy, IconPlus } from './icons'
 import { configBody, visionModel } from '../lib/settings'
 import { mapRangeToOther } from '../lib/align'
+import { mapInlineMathToTranslation } from '../lib/math'
 import { stripDotLeaders } from '../lib/text'
 
 interface Props {
@@ -45,6 +46,8 @@ interface Props {
   /** 已加入左侧问答附录的 block id */
   attachedIds?: Set<string>
   onAttachContext?: (item: ReaderContextItem) => void
+  /** 划词工具条点「提问」：把选中的这段文字作为引用带到左侧问答面板 */
+  onAskQuote?: (quote: ReaderQuoteDraft) => void
   /** 双击正文中的高亮/批注：切到左侧批注栏并定位到该条 */
   onOpenAnnotation?: (annotation: Annotation) => void
   /** 双击自动阅读重点：切到左侧「阅读重点」并定位 */
@@ -72,6 +75,7 @@ export function BlockView({
   highlights = [],
   attachedIds,
   onAttachContext,
+  onAskQuote,
 }: Props) {
   const b = rb.block
   const [copied, setCopied] = useState(false)
@@ -150,7 +154,7 @@ export function BlockView({
   )
 
   const onParagraphMouseUp = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (!annotationActions || !paperId) return
+    if ((!annotationActions && !onAskQuote) || !paperId) return
     // 点在高亮/引用按钮上时不进入划词流程
     const target = event.target as HTMLElement
     if (target.closest('[data-aid], .cite-mark')) return
@@ -347,6 +351,13 @@ export function BlockView({
   // 正文段落：英文原文在上，中文译文在下（术语 + 高亮 + 引用）
   // 没有译文时不显示骨架条——整篇未翻译时否则会全屏转圈
   const showZh = b.translatable && (Boolean(b.translated) || hasTranslation)
+  // 译文里的公式默认只是纯文本；按原文公式片段在译文中的位置映射回来，
+  // 用同一份 latex / 裁图渲染，中文里也能显示专业排版的公式。
+  const zhInlineMath = mapInlineMathToTranslation(
+    b.text,
+    stripDotLeaders(b.translated ?? ''),
+    b.inline_math,
+  )
   return (
     <div className="block" id={b.id} data-block-id={b.id}>
       <div className="para" onMouseUp={onParagraphMouseUp}>
@@ -373,6 +384,7 @@ export function BlockView({
               annotations={blockAnnotations}
               highlights={blockHighlights}
               terms={terms}
+              inlineMath={zhInlineMath}
               className="para-zh"
               onCite={openCite}
               onAnnotationClick={(annotation, rect) => setEditing({ annotation, rect })}
@@ -406,6 +418,21 @@ export function BlockView({
           rect={selection.rect}
           onPick={(color) => void applyHighlight(color, 'highlight')}
           onComment={(color) => void applyHighlight(color, 'comment')}
+          onAsk={
+            onAskQuote
+              ? () => {
+                  const current = selection
+                  setSelection(null)
+                  window.getSelection()?.removeAllRanges()
+                  onAskQuote({
+                    text: current.quote,
+                    page: b.page,
+                    blockId: b.id,
+                    source: current.source,
+                  })
+                }
+              : undefined
+          }
           onClose={() => {
             setSelection(null)
             window.getSelection()?.removeAllRanges()

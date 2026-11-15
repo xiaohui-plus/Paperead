@@ -26,9 +26,8 @@ PNG = base64.b64decode(
 
 @pytest.fixture(autouse=True)
 def _no_ambient_token(monkeypatch):
-    """本机可能有构建用的内置令牌，测试里必须隔离掉。"""
+    """本机可能有壳注入的反馈令牌，测试里必须隔离掉。"""
     monkeypatch.delenv("PAPEREAD_FEEDBACK_TOKEN", raising=False)
-    monkeypatch.setattr(feedback_api, "_token_assets", lambda: iter(()))
 
 
 def _make(tmp_path: Path, handler, token: str | None = None) -> TestClient:
@@ -63,7 +62,7 @@ def _ok_handler(seen: list[httpx.Request]):
                 201,
                 json={
                     "number": "IKVG5L",
-                    "html_url": "https://gitee.com/deng_xiaohui/paperead/issues/IKVG5L",
+                    "html_url": "https://gitee.com/deng_xiaohui/paperead_issue/issues/IKVG5L",
                 },
             )
         return httpx.Response(404, json={"message": "not found"})
@@ -78,6 +77,15 @@ def test_status_without_token(tmp_path: Path):
     assert payload["source"] == "none"
     assert payload["owner"] == "deng_xiaohui"
     assert payload["issue_page"].endswith("/issues")
+
+
+def test_env_token_is_reported_as_builtin(tmp_path: Path, monkeypatch):
+    """Rust 壳解密后注入环境变量，界面上要显示成「内置提交通道」。"""
+    monkeypatch.setenv("PAPEREAD_FEEDBACK_TOKEN", "e" * 32)
+    client = _make(tmp_path, _ok_handler([]))
+    payload = client.get("/api/feedback/status").json()
+    assert payload["configured"] is True
+    assert payload["source"] == "builtin"
 
 
 def test_submit_requires_token(tmp_path: Path):
@@ -106,12 +114,12 @@ def test_submit_uploads_images_and_creates_issue(tmp_path: Path):
     )
     assert response.status_code == 200, response.text
     payload = response.json()
-    assert payload["issue_url"] == "https://gitee.com/deng_xiaohui/paperead/issues/IKVG5L"
+    assert payload["issue_url"] == "https://gitee.com/deng_xiaohui/paperead_issue/issues/IKVG5L"
     assert payload["number"] == "IKVG5L"
     assert payload["images"] == 1
 
     upload, issue = seen[0], seen[1]
-    assert "/repos/deng_xiaohui/paperead/contents/feedback-attachments/" in upload.url.path
+    assert "/repos/deng_xiaohui/paperead_issue/contents/feedback-attachments/" in upload.url.path
     form = _form(upload)
     assert form["content"] == base64.b64encode(PNG).decode()
     assert form["branch"] == "master"
@@ -119,8 +127,8 @@ def test_submit_uploads_images_and_creates_issue(tmp_path: Path):
     issue_form = _form(issue)
     assert issue_form["title"] == "导出 PDF 页码错位"
     assert "第 3 页开始页码 +1。" in issue_form["body"]
-    assert "https://gitee.com/deng_xiaohui/paperead/raw/master/feedback-attachments/" in issue_form["body"]
-    assert issue_form["repo"] == "paperead"
+    assert "https://gitee.com/deng_xiaohui/paperead_issue/raw/master/feedback-attachments/" in issue_form["body"]
+    assert issue_form["repo"] == "paperead_issue"
 
 
 def test_title_is_required(tmp_path: Path):

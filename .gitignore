@@ -22,8 +22,10 @@ venv/
 # 环境
 .env
 
-# 问题反馈内置令牌：只在构建安装包时打进 sidecar，不进 git
+# 问题反馈令牌：明文不再打包；Rust 壳用构建时生成的加密凭据
 server/resources/gitee-feedback-token.txt
+src-tauri/resources/feedback-token.key
+src-tauri/resources/feedback-token.bin
 
 # 测试
 .pytest_cache/

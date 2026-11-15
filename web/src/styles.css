@@ -8100,6 +8100,15 @@ body.col-resizing * {
   color: var(--ink);
 }
 
+/* 划词工具条第三项：就这段文字提问（主蓝细线图标，无额外底色） */
+.hl-ask-btn {
+  color: var(--blue);
+}
+
+.hl-ask-btn:hover {
+  color: var(--blue-ink);
+}
+
 /* 按钮右下角的当前默认色点 */
 .hl-tool-current {
   position: absolute;
@@ -9386,6 +9395,123 @@ select.input.setting-select {
 
 .equation .eq-copy {
   right: 38px;
+}
+
+/* 问答「引用」：阅读页划词点「提问」带过来的片段 */
+.chat-quotes {
+  margin-bottom: 8px;
+}
+
+.chat-quotes-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.chat-quotes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 154px;
+  overflow-y: auto;
+}
+
+.quote-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--blue);
+  border-radius: 0 8px 8px 0;
+  background: var(--bg-soft);
+}
+
+.quote-text {
+  flex: 1;
+  margin: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.quote-where {
+  flex: none;
+  padding-top: 1px;
+  font-size: 10px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.quote-remove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--faint);
+  cursor: pointer;
+}
+
+.quote-remove svg {
+  width: 9px;
+  height: 9px;
+}
+
+.quote-remove:hover {
+  color: var(--blue);
+  background: var(--bg-hover);
+}
+
+/* 历史轮次里的引用片段 */
+.turn-quotes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0 8px;
+}
+
+.turn-quote {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  padding: 5px 8px;
+  border-left: 2px solid var(--blue-line);
+  border-radius: 0 6px 6px 0;
+  background: var(--bg-soft);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.turn-quote-text {
+  flex: 1;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.turn-quote-where {
+  flex: none;
+  font-size: 10px;
+  color: var(--faint);
 }
 
 /* 问答「附录」：随问题一起提交的图表/公式 */

@@ -51,6 +51,12 @@ export function MobileDock(props: Props) {
     if (props.focusHighlight) setOpen('key')
   }, [props.focusHighlight, narrow])
 
+  // 阅读页划词点「提问」：窄屏没有左侧栏，直接从下方展开「问答」
+  useEffect(() => {
+    if (!narrow) return
+    if (props.focusChat) setOpen('chat')
+  }, [props.focusChat, narrow])
+
   useEffect(() => {
     if (!open) return
     const onKey = (event: KeyboardEvent) => {

@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import type { Block, Paper, ReaderContextItem } from '../types'
+import type { Block, Paper, ReaderContextItem, ReaderQuote } from '../types'
 import type { KeyPoint } from '../lib/assistant'
 import type { ModelKind } from '../lib/settings'
 import type { Annotation, AnnotationColor, ReadingHighlight } from '../lib/library'
@@ -54,6 +54,14 @@ export interface PanelProps {
   contextItems?: ReaderContextItem[]
   onRemoveContext?: (id: string) => void
   onClearContext?: () => void
+  /** 阅读页划词「提问」带过来的引用片段 */
+  quotes?: ReaderQuote[]
+  onRemoveQuote?: (id: string) => void
+  onClearQuotes?: () => void
+  /** at 变化时问答输入框聚焦（划词提问后直接打字） */
+  quoteFocus?: { at: number } | null
+  /** 窄屏时由底部工具条接管：at 变化即展开底部「问答」面板 */
+  focusChat?: { at: number } | null
   /** 双击正文标注后要聚焦的批注条；at 变化时重新滚动并闪烁 */
   focusAnnotation?: { id: string; at: number } | null
   /** 双击自动阅读重点后要聚焦的条目 */
@@ -94,6 +102,10 @@ export function PanelBody({
   contextItems = [],
   onRemoveContext,
   onClearContext,
+  quotes = [],
+  onRemoveQuote,
+  onClearQuotes,
+  quoteFocus,
   focusAnnotation,
   focusHighlight,
 }: PanelProps & { tab: TabKey }) {
@@ -108,6 +120,10 @@ export function PanelBody({
         contextItems={contextItems}
         onRemoveContext={onRemoveContext}
         onClearContext={onClearContext}
+        quotes={quotes}
+        onRemoveQuote={onRemoveQuote}
+        onClearQuotes={onClearQuotes}
+        quoteFocusAt={quoteFocus?.at ?? 0}
       />
     )
   }

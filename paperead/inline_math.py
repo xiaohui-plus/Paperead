@@ -197,7 +197,11 @@ def build_inline_math(spans: list[dict], ranges: list[tuple[int, int, dict]]) ->
             if not text:
                 continue
             pos = _pos(span, base_size, baseline)
-            tex = _letter(span, text)
+            if _is_math(span.get("font") or ""):
+                tex = _letter(span, text)
+            else:
+                # 并入公式的正体词（front/down）按 \text 保留正体
+                tex = r"\text{" + text + "}"
             if not tex:
                 hard = True
                 break
@@ -238,6 +242,25 @@ def build_inline_math(spans: list[dict], ranges: list[tuple[int, int, dict]]) ->
     for index, item in enumerate(ranges):
         _, _, span = item
         if _is_math(span.get("font") or ""):
+            group.append(item)
+            continue
+        # 公式里的正体短词（x^front / x^down 的 front、down）用正文
+        # 字体排版，夹在两个数学 span 之间；不并入会把一条公式切成三段，
+        # 正文里就会出现残缺的 latex。
+        text = (span.get("text") or "").strip()
+        prev_math = bool(group) and _is_math(group[-1][2].get("font") or "")
+        next_math = (
+            index + 1 < len(ranges)
+            and _is_math(ranges[index + 1][2].get("font") or "")
+        )
+        if (
+            prev_math
+            and next_math
+            and text
+            and len(text) <= 12
+            and text.isascii()
+            and text.isalpha()
+        ):
             group.append(item)
             continue
         # 正文 span：数学片段结束（公式紧跟的逗号/句号留在正文里）

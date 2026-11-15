@@ -9,6 +9,7 @@ import { Document, Page, pdfjs } from 'react-pdf'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import 'react-pdf/dist/Page/TextLayer.css'
 import { mediaUrl } from '../lib/mobile'
+import type { ReaderQuoteDraft } from '../types'
 import type {
   Annotation,
   AnnotationColor,
@@ -38,6 +39,8 @@ interface Props {
   pdfUrl?: string | null
   annotations?: Annotation[]
   annotationActions?: AnnotationActions
+  /** 划词工具条点「提问」：把原版 PDF 里选中的文字带到左侧问答面板 */
+  onAskQuote?: (quote: ReaderQuoteDraft) => void
 }
 
 interface PdfSelection {
@@ -115,6 +118,7 @@ export function PdfPages({
   pdfUrl,
   annotations = [],
   annotationActions,
+  onAskQuote,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const jumped = useRef(false)
@@ -222,7 +226,7 @@ export function PdfPages({
   }, [useTextLayer, total, pdfReady])
 
   const onFrameMouseUp = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (!annotationActions) return
+    if (!annotationActions && !onAskQuote) return
     const frame = event.currentTarget
     window.setTimeout(() => {
       const sel = window.getSelection()
@@ -363,6 +367,20 @@ export function PdfPages({
           rect={selection.rect}
           onPick={(color) => void applyAnnotation(color, 'highlight')}
           onComment={(color) => void applyAnnotation(color, 'comment')}
+          onAsk={
+            onAskQuote
+              ? () => {
+                  const current = selection
+                  setSelection(null)
+                  window.getSelection()?.removeAllRanges()
+                  onAskQuote({
+                    text: current.quote,
+                    page: current.page,
+                    source: 'pdf',
+                  })
+                }
+              : undefined
+          }
           onClose={() => {
             setSelection(null)
             window.getSelection()?.removeAllRanges()

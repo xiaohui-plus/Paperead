@@ -14,12 +14,15 @@ from paperead.layout import (
     Line,
     _drop_noise,
     _join_text,
+    _line_from_dict,
     _merge_across_pages,
+    _merge_math_fragments,
     _merge_visual_rows,
     _normalize_text,
     _split_row_runs,
     parse_pdf,
 )
+from paperead.inline_math import build_inline_math, spans_with_offsets
 from paperead.textnorm import is_dot_leader_only, squeeze_cjk_spaces, strip_dot_leaders
 
 
@@ -200,3 +203,81 @@ def test_drop_noise_removes_dot_leader_blocks_and_keeps_titles():
     out = _drop_noise(blocks)
     assert [b.text for b in out] == ["5.2.2 Joint Multimodal Generation 20", "Body paragraph."]
     assert [b.id for b in out] == ["b0000", "b0001"]
+
+# ── 行内公式的集合符号与跨行碎片 ───────────────────────────────────────
+def _raw_span(text, font, size, x0, x1, y):
+    return {
+        "text": text,
+        "font": font,
+        "size": size,
+        "bbox": [x0, y - 8, x1, y + 2],
+        "origin": [x0, y],
+    }
+
+
+def test_cmex_brace_pieces_are_restored():
+    # CMEX10 把 { / } 画成 0x08 / 0x09；0x09 是制表符，不能先按空白过滤掉
+    raw = {
+        "bbox": [100, 400, 200, 415],
+        "dir": (1, 0),
+        "spans": [
+            _raw_span("x", "CMMIB10", 10, 100, 106, 410),
+            _raw_span("\x08", "CMEX10", 10, 108, 112, 409),
+            _raw_span("t", "CMMI7", 7, 112, 115, 413),
+            _raw_span("\x09", "CMEX10", 10, 116, 120, 409),
+        ],
+    }
+    ln = _line_from_dict(raw, 1)
+    assert ln is not None
+    assert ln.brace_piece
+    assert "{" in ln.text and "}" in ln.text
+    assert "\x08" not in ln.text and "\x09" not in ln.text
+
+
+def test_brace_piece_joins_formula_row_by_bbox():
+    # 大括号片段 bbox 跨两行、基线落在上一行；必须按 bbox 归到公式行，
+    # 否则 `{` 会跑到上一段正文末尾
+    body = _line("For visual imagination supervision ... observation", 108, 504, baseline=415.6)
+    formula = _line("xt ∈", 108, 127.5, baseline=426.5)
+    brace = Line(
+        text="{",
+        bbox=(130.2, 417.9, 136.1, 427.8),
+        page=1,
+        size=10.0,
+        baseline=418.5,
+        brace_piece=True,
+    )
+    rows = _merge_visual_rows([body, formula, brace], {})
+    row = next(r for r in rows if "{" in r.text)
+    assert row.baseline == 426.5
+
+
+def test_formula_keeps_prose_word_between_math_spans():
+    # x^front 的 front 用正文正体排版，夹在两个数学 span 之间，不能把公式切断
+    spans = [
+        _raw_span("x", "CMMIB10", 10, 100, 106, 410),
+        _raw_span("front", "NimbusRomNo9L-Regu", 7, 106, 130, 406),
+        _raw_span("t", "CMMI7", 7, 130, 133, 413),
+    ]
+    text, ranges = spans_with_offsets(spans)
+    out = build_inline_math(spans, ranges)
+    assert len(out) == 1
+    assert "front" in out[0].source
+
+
+def test_math_fragments_merge_and_fallback():
+    text = "xt front t"
+    frags = [
+        {
+            "start": 0, "end": 2, "latex": "x_{t}", "fallback": False,
+            "source": "xt", "bbox": [100, 400, 110, 410],
+        },
+        {
+            "start": 9, "end": 10, "latex": "t", "fallback": False,
+            "source": "t", "bbox": [130, 400, 136, 410],
+        },
+    ]
+    merged = _merge_math_fragments(text, frags)
+    assert len(merged) == 1
+    assert merged[0]["fallback"] is True
+    assert merged[0]["start"] == 0 and merged[0]["end"] == 10

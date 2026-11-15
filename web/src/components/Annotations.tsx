@@ -20,7 +20,7 @@ import { mediaUrl } from '../lib/mobile'
 import { lastAnnotationColor, rememberAnnotationColor } from '../lib/annotationPrefs'
 import { CITE_RE, hasCitation } from '../lib/citationMark'
 import { stripDotLeaders } from '../lib/text'
-import { IconComment, IconHighlighter } from './icons'
+import { IconChat, IconComment, IconHighlighter } from './icons'
 
 /** 自动重点的中文名，正文 tooltip 和「阅读重点」面板共用。 */
 export const HIGHLIGHT_LABELS: Record<HighlightCategory, string> = {
@@ -396,16 +396,19 @@ export function RichText({
   )
 }
 
-/** 划词后浮在选区上方的工具条：两个图标，点击用上次颜色，悬停展开调色板。 */
+/** 划词后浮在选区上方的工具条：两个标注图标 + 「提问」，点击用上次颜色，悬停展开调色板。 */
 export function SelectionToolbar({
   rect,
   onPick,
   onComment,
+  onAsk,
   onClose,
 }: {
   rect: DOMRect
   onPick: (color: AnnotationColor) => void
   onComment: (color: AnnotationColor) => void
+  /** 把选中的文字作为引用带到左侧问答面板 */
+  onAsk?: () => void
   onClose: () => void
 }) {
   useEffect(() => {
@@ -430,7 +433,7 @@ export function SelectionToolbar({
     }
   }
 
-  const width = 104
+  const width = onAsk ? 140 : 104
   const left = Math.min(
     window.innerWidth - width - 12,
     Math.max(12, rect.left + rect.width / 2 - width / 2),
@@ -457,6 +460,17 @@ export function SelectionToolbar({
         onUse={() => apply('comment', cmColor)}
         onChoose={(color) => apply('comment', color)}
       />
+      {onAsk && (
+        <button
+          type="button"
+          className="hl-tool-btn hl-ask-btn"
+          title="就选中的这段文字提问"
+          aria-label="就选中的这段文字提问"
+          onClick={onAsk}
+        >
+          <IconChat />
+        </button>
+      )}
     </div>
   )
 }

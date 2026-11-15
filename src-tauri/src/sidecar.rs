@@ -70,6 +70,10 @@ impl Sidecar {
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
+        // 反馈令牌在壳内解密后只经环境变量交给 sidecar，Python 侧不落明文。
+        if let Some(feedback_token) = super::feedback::builtin_token() {
+            command.env("PAPEREAD_FEEDBACK_TOKEN", feedback_token);
+        }
         if let Some((agent_port, agent_token)) = agent {
             command
                 .env("PAPEREAD_AGENT_PORT", agent_port.to_string())

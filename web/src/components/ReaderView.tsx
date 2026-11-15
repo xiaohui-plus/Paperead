@@ -10,7 +10,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
-import type { Block, Paper, ReaderContextItem, ViewMode } from '../types'
+import type { Block, Paper, ReaderContextItem, ReaderQuote, ReaderQuoteDraft, ViewMode } from '../types'
 import { loadPaper } from '../lib/api'
 import { outlineOf } from '../lib/blocks'
 import { keyPoints } from '../lib/assistant'
@@ -169,6 +169,10 @@ export function ReaderView({ paperId, onBack }: Props) {
     () => new Set(contextItems.map((item) => item.id)),
     [contextItems],
   )
+  // 划词点「提问」→ 引用片段带到左侧问答面板
+  const [quotes, setQuotes] = useState<ReaderQuote[]>([])
+  // at 变化时问答面板聚焦输入框（连续划词也能重新聚焦）
+  const [quoteFocus, setQuoteFocus] = useState<{ at: number } | null>(null)
   const [resizingPanel, setResizingPanel] = useState(false)
   const panelWidthRef = useRef(panelWidth)
   const dragRef = useRef<{
@@ -346,8 +350,44 @@ export function ReaderView({ paperId, onBack }: Props) {
     setContextItems((prev) => prev.filter((one) => one.id !== id))
   const clearContext = () => setContextItems([])
 
+  // ── 划词 → 问答引用 ───────────────────────────────────
+  const addQuote = useCallback(
+    (draft: ReaderQuoteDraft) => {
+      const text = draft.text.trim()
+      if (!text) return
+      // 同一块（或同一页）的同一段文字只引用一次，避免重复划词塞满面板
+      const id = `${draft.blockId ?? `p${draft.page ?? 0}`}:${draft.source}:${text}`
+      setQuotes((prev) =>
+        prev.some((one) => one.id === id)
+          ? prev
+          : [...prev, { ...draft, text, id }].slice(-6),
+      )
+      // 侧栏可能被折叠、或原版 PDF 正处于展开态（此时没有侧栏）：先恢复侧栏
+      setPanelCollapsed(false)
+      try {
+        localStorage.setItem(PANEL_COLLAPSED_KEY, '0')
+      } catch {
+        // 隐私模式写不了 localStorage：本次会话仍可展开
+      }
+      if (pdfExpanded) {
+        setPdfExpanded(false)
+        const url = new URL(window.location.href)
+        url.searchParams.delete('full')
+        window.history.replaceState({}, '', url)
+      }
+      setPanelTab('chat')
+      setQuoteFocus({ at: Date.now() })
+    },
+    [pdfExpanded],
+  )
+  const removeQuote = (id: string) =>
+    setQuotes((prev) => prev.filter((one) => one.id !== id))
+  const clearQuotes = () => setQuotes([])
+
   useEffect(() => {
     setContextItems([])
+    setQuotes([])
+    setQuoteFocus(null)
   }, [paperId])
 
   // ── 加载（解析没完成时自动重试） ───────────────────────
@@ -1167,6 +1207,10 @@ focusAnnotation={focusAnnotation}
               contextItems={contextItems}
               onRemoveContext={removeContext}
               onClearContext={clearContext}
+              quotes={quotes}
+              onRemoveQuote={removeQuote}
+              onClearQuotes={clearQuotes}
+              quoteFocus={quoteFocus}
             />
             <div
               className="panel-resizer"
@@ -1203,6 +1247,7 @@ focusAnnotation={focusAnnotation}
               pdfUrl={pdfHref}
               annotations={annotations}
               annotationActions={annotationActions}
+              onAskQuote={addQuote}
             />
           </Suspense>
         ) : (
@@ -1232,6 +1277,7 @@ focusAnnotation={focusAnnotation}
             highlights={highlights}
             contextIds={contextIds}
             onAttachContext={attachContext}
+            onAskQuote={addQuote}
             onOpenAnnotation={openAnnotation}
             onOpenHighlight={openHighlight}
           />
@@ -1260,6 +1306,11 @@ focusAnnotation={focusAnnotation}
           contextItems={contextItems}
           onRemoveContext={removeContext}
           onClearContext={clearContext}
+          quotes={quotes}
+          onRemoveQuote={removeQuote}
+          onClearQuotes={clearQuotes}
+          quoteFocus={quoteFocus}
+          focusChat={quoteFocus}
         />
       )}
 

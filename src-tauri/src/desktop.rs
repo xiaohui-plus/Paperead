@@ -5,6 +5,8 @@
 mod agent_sidecar;
 #[path = "api.rs"]
 mod api;
+#[path = "feedback.rs"]
+mod feedback;
 #[path = "paths.rs"]
 mod paths;
 #[path = "sidecar.rs"]

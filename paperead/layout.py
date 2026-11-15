@@ -68,12 +68,17 @@ _LIGATURES = str.maketrans({
     "\ufb00": "ff", "\ufb01": "fi", "\ufb02": "fl", "\ufb03": "ffi",
     "\ufb04": "ffl", "\ufb05": "ft", "\ufb06": "st",
     "\u00a0": " ", "\u2007": " ", "\u2009": " ", "\u202f": " ",
+    "\t": " ",
 })
+
+# PDF 里的 C0 控制字符（换行/回退等）不应进入正文。CMEX10 的大括号延伸
+# 片段用的是 0x08/0x09，须在 `_line_from_dict` 里先按字体映射，再走这里兜底。
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 
 def _normalize_text(text: str) -> str:
     """把排版连字换成等价字母、把特殊空格换成普通空格，其余字符原样保留。"""
-    return text.translate(_LIGATURES)
+    return _CONTROL_CHARS_RE.sub("", text.translate(_LIGATURES))
 # 章节标题（行首，允许前面有编号）
 _SECTION_RE = re.compile(
     r"^(?P<head>(?:\d+(?:\.\d+)*\.?\s+)?"
@@ -144,6 +149,9 @@ def _is_caption_text(text: str) -> bool:
     return first.isupper() or first.isdigit() or first in "（(“\"'["
 # 数学字体（Computer Modern 数学族）
 _MATH_FONTS = ("CMMI", "CMEX", "CMSY", "MSBM", "MTMI", "MTEX", "EUSM", "EUFM", "Symbol")
+# CMEX10 把大括号画成 0x08/0x09 的延伸部件；不映射就会在正文里变成
+# 控制字符，集合语义（{x_t^front, x_t^down}）随之丢失。
+_CMEX_BRACES = {"\x08": "{", "\x09": "}"}
 
 # 页眉页脚判定：页面上下各 8% 区域
 _HEADER_RATIO = 0.075
@@ -166,6 +174,7 @@ class Line:
     total_chars: int = 0
     baseline: float = 0.0      # 文字基线 y（判断「是否同一行」远比 bbox 中心可靠）
     inline_math: list[dict] = field(default_factory=list)  # 正文里的行内公式片段
+    brace_piece: bool = False  # CMEX 大括号延伸片段（bbox 跨行，不能按基线归行）
 
     @property
     def x0(self) -> float:
@@ -325,7 +334,22 @@ def _line_from_dict(raw: dict, page_no: int) -> Line | None:
     direction = raw.get("dir") or (1, 0)
     if abs(float(direction[1])) > 0.15:
         return None
-    spans = [s for s in raw.get("spans") or [] if (s.get("text") or "").strip()]
+    # CMEX 的大括号片段：把 0x08/0x09 还原成 { / }，并标记为跨行片段，
+    # 供 `_merge_visual_rows` 按 bbox 重叠而不是基线归行。映射必须放在
+    # 「过滤空文本」之前：0x09 本身是制表符，strip 后会被当成空 span 丢掉。
+    raw_spans = raw.get("spans") or []
+    brace_piece = any(
+        (s.get("font") or "").startswith("CMEX")
+        and (s.get("text") or "") in _CMEX_BRACES
+        for s in raw_spans
+    )
+    spans: list[dict] = []
+    for span in raw_spans:
+        text = span.get("text") or ""
+        if (span.get("font") or "").startswith("CMEX") and text in _CMEX_BRACES:
+            span = {**span, "text": _CMEX_BRACES[text]}
+        if (span.get("text") or "").strip():
+            spans.append(span)
     if not spans:
         return None
     raw_text, ranges = spans_with_offsets(spans)
@@ -365,6 +389,7 @@ def _line_from_dict(raw: dict, page_no: int) -> Line | None:
         total_chars=total,
         baseline=float(origin[1]),
         inline_math=inline_math,
+        brace_piece=brace_piece,
     )
 
 
@@ -689,6 +714,50 @@ def _run_column(run: list[Line], col: int, gutter: float | None) -> int:
     return -1
 
 
+def _merge_math_fragments(text: str, inline_math: list[dict]) -> list[dict]:
+    """把视觉行合并后相邻的公式碎片拼回一段。
+
+    inline_math 是在单条 PyMuPDF line 内分组的；一条公式被拆到多条 line
+    （上下标、正体 front/down、CMEX 大括号片段）时，合并后仍是若干首尾
+    相接的碎片。这里按字符区间再合并一次并统一走裁图（fallback），避免
+    前端显示 `x_t ∈ xfront t` 这种残缺 latex。
+    """
+    if len(inline_math) < 2:
+        return inline_math
+    items = sorted(inline_math, key=lambda m: (int(m["start"]), int(m["end"])))
+    merged: list[dict] = []
+    for item in items:
+        cur = {**item}
+        if merged:
+            prev = merged[-1]
+            gap = int(cur["start"]) - int(prev["end"])
+            middle = text[int(prev["end"]): int(cur["start"])]
+            bridge = middle.strip()
+            # 只跨过空白、公式符号或公式里的正体短词（front / down）
+            if -1 <= gap <= 12 and (
+                not bridge
+                or (bridge.isalpha() and len(bridge) <= 12)
+                or not re.search(r"[A-Za-z]{2,}", bridge)
+            ):
+                bbox = prev.get("bbox") or cur.get("bbox")
+                if prev.get("bbox") and cur.get("bbox"):
+                    a, b = prev["bbox"], cur["bbox"]
+                    bbox = [
+                        min(a[0], b[0]), min(a[1], b[1]),
+                        max(a[2], b[2]), max(a[3], b[3]),
+                    ]
+                prev["start"] = min(int(prev["start"]), int(cur["start"]))
+                prev["end"] = max(int(prev["end"]), int(cur["end"]))
+                prev["fallback"] = True
+                prev["latex"] = ""
+                prev["source"] = text[int(prev["start"]): int(prev["end"])]
+                if bbox:
+                    prev["bbox"] = bbox
+                continue
+        merged.append(cur)
+    return merged
+
+
 def _merge_visual_rows(
     lines: list[Line], gutters: dict[int, float | None] | None = None
 ) -> list[Line]:
@@ -711,17 +780,45 @@ def _merge_visual_rows(
     for (page, col), group in groups.items():
         group.sort(key=lambda l: l.y0)
         gutter = (gutters or {}).get(page)
-        # 按「文字基线」聚类：上标/下标、高公式都不会把下一行误并进来
+        # 按「文字基线」聚类：上标/下标、高公式都不会把下一行误并进来。
+        # 容差要与 cluster 里已有一行比较（不能只比首行）：7pt 上标先建簇后，
+        # 10pt 主行会被 7pt 的容差挡在外面，公式行被拆成多段、上下标还会
+        # 单独变成一个 equation 块。
+        pieces = [ln for ln in group if ln.brace_piece]
+        normal = [ln for ln in group if not ln.brace_piece]
         clusters: list[list[Line]] = []
-        for ln in group:
+        for ln in normal:
+            best: tuple[float, list[Line]] | None = None
             for c in clusters:
-                ref = c[0]
-                # 容差取两行中较大的字号：上标/下标相对父字号偏移约 0.33em，
-                # 用较小字号算会让 10pt 正文里的 6pt 上标（偏移 3pt）刚好合不进来
-                tol = 0.45 * max(ln.size or 10.0, ref.size or 10.0)
-                if abs(ln.baseline - ref.baseline) <= tol:
-                    c.append(ln)
-                    break
+                tol = 0.45 * max(
+                    ln.size or 10.0,
+                    max((m.size or 10.0) for m in c),
+                )
+                diff = min(abs(ln.baseline - m.baseline) for m in c)
+                if diff <= tol and (best is None or diff < best[0]):
+                    best = (diff, c)
+            if best is not None:
+                best[1].append(ln)
+            else:
+                clusters.append([ln])
+
+        # CMEX 大括号延伸片段 bbox 跨两行，baseline 常落在上一行正文；按
+        # bbox 垂直重叠归到公式行，避免 `{`/`}` 被并进正文。
+        for ln in pieces:
+            best_key: float | None = None
+            best_cluster: list[Line] | None = None
+            for c in clusters:
+                top = min(m.bbox[1] for m in c)
+                bottom = max(m.bbox[3] for m in c)
+                overlap = min(bottom, ln.bbox[3]) - max(top, ln.bbox[1])
+                center_gap = abs(
+                    (ln.bbox[1] + ln.bbox[3]) / 2 - (top + bottom) / 2
+                )
+                key = overlap if overlap > 0 else -center_gap
+                if best_key is None or key > best_key:
+                    best_key, best_cluster = key, c
+            if best_cluster is not None and best_key is not None and best_key > -8:
+                best_cluster.append(ln)
             else:
                 clusters.append([ln])
 
@@ -752,6 +849,7 @@ def _merge_visual_rows(
                     for item in inline_math
                     if item["start"] >= shift and item["end"] - shift <= len(value)
                 ]
+                inline_math = _merge_math_fragments(value, inline_math)
                 rows.append(
                     Line(
                         text=value,

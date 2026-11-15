@@ -686,6 +686,12 @@ export async function askPaperStream(
   signal?: AbortSignal,
   attachments: string[] = [],
   blockIds: string[] = [],
+  quotes: {
+    text: string
+    page?: number
+    blockId?: string
+    source?: string
+  }[] = [],
 ): Promise<void> {
   const res = await fetch(`/api/papers/${id}/ask/stream`, {
     method: 'POST',
@@ -696,6 +702,12 @@ export async function askPaperStream(
       web,
       attachments,
       block_ids: blockIds,
+      quotes: quotes.map((q) => ({
+        text: q.text,
+        page: q.page ?? null,
+        block_id: q.blockId ?? null,
+        source: q.source ?? '',
+      })),
       ...(clientId ? { client_id: clientId } : {}),
     }),
     signal,

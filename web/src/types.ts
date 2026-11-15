@@ -47,6 +47,22 @@ export interface Block {
   bboxes?: number[][]
 }
 
+/** 阅读页划词后点「提问」，作为引用带入左侧问答的片段。 */
+export interface ReaderQuote {
+  /** 去重键：同一块（或同一页）的同一段文字只保留一条 */
+  id: string
+  /** 选中的文字（原文 / 译文 / 原版 PDF 文本层） */
+  text: string
+  /** 1 起的页码 */
+  page?: number
+  /** 重排视图里的块 id；原版 PDF 没有块 */
+  blockId?: string
+  source: 'en' | 'zh' | 'pdf'
+}
+
+/** 划词提问时上报的引用草稿：id 由阅读页统一生成，用于去重与删除。 */
+export type ReaderQuoteDraft = Omit<ReaderQuote, 'id'>
+
 /** 点击图表/公式旁的小圆圈后，加入左侧问答「附录」的条目。 */
 export interface ReaderContextItem {
   /** 与 blockId 相同，用于去重 */

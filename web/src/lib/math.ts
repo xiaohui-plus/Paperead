@@ -1,3 +1,5 @@
+import type { InlineMath } from '../types'
+
 // 把含 LaTeX 的纯文本切成「文本段 / 公式段」，供页面用 KaTeX 渲染。
 // 输入是清洗后的纯字符串，因此只需处理分隔符。
 
@@ -155,4 +157,49 @@ export function normalizeMath(input: string): string {
     .join('\n')
 
   return text.replace(/\u0000(\d+)\u0000/g, (_full, index: string) => saved[Number(index)] ?? '')
+}
+/* ── 译文行内公式映射 ───────────────────────────────────── */
+
+/** 去掉空白，同时保留「压缩文本下标 → 原文本下标」的映射。 */
+function compactForMath(text: string): { norm: string; map: number[] } {
+  const chars: string[] = []
+  const map: number[] = []
+  for (let i = 0; i < text.length; i += 1) {
+    if (!/\s/.test(text[i])) {
+      chars.push(text[i])
+      map.push(i)
+    }
+  }
+  map.push(text.length)
+  return { norm: chars.join(''), map }
+}
+
+/**
+ * 模型的译文里通常会把公式原样保留（`xt ∈ { xfront t , xdown t }`），
+ * 但行内公式的 start/end 是相对英文原文的。这里按公式原文片段在译文里
+ * 顺序查找（忽略空白差异），找到后用同一份 latex / 裁图渲染中文里的公式。
+ */
+export function mapInlineMathToTranslation(
+  source: string,
+  translated: string,
+  inlineMath: InlineMath[] = [],
+): InlineMath[] {
+  if (!translated || !inlineMath.length) return []
+  const target = compactForMath(translated)
+  const result: InlineMath[] = []
+  let from = 0
+
+  for (const item of [...inlineMath].sort((a, b) => a.start - b.start)) {
+    const raw = (item.source || source.slice(item.start, item.end) || '').trim()
+    const needle = compactForMath(raw).norm
+    if (!needle) continue
+    const found = target.norm.indexOf(needle, from)
+    if (found < 0) continue
+    const start = target.map[found]
+    const end = target.map[found + needle.length]
+    if (end <= start) continue
+    result.push({ ...item, start, end, source: translated.slice(start, end) })
+    from = found + needle.length
+  }
+  return result
 }

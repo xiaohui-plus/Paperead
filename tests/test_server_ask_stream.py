@@ -255,6 +255,40 @@ def test_ask_stream_includes_web_sources_and_allows_common_sense(monkeypatch, tm
     assert "https://e.com/a" in user_prompt
 
 
+def test_ask_stream_includes_user_quote(monkeypatch, tmp_path):
+    """阅读页划词「提问」的引用片段必须进入提示词材料。"""
+    main = _load_main(monkeypatch, tmp_path)
+    _use_fake_paper(main, monkeypatch)
+
+    backend = CapturingBackend(["这句话讲的是成对结构编码。"])
+    llm_mod.set_backend(backend)
+    try:
+        with TestClient(main.app) as client:
+            res = client.post(
+                "/api/papers/p1/ask/stream",
+                json={
+                    "question": "这句话在说什么",
+                    "web": False,
+                    "quotes": [
+                        {
+                            "text": "It uses shortest path distance",
+                            "page": 1,
+                            "block_id": "b2",
+                            "source": "en",
+                        }
+                    ],
+                },
+            )
+    finally:
+        llm_mod.set_backend(None)
+
+    assert res.status_code == 200
+    user_prompt = backend.seen[0][-1]["content"]
+    assert "用户选中的原文片段" in user_prompt
+    assert "It uses shortest path distance" in user_prompt
+    assert "第 1 页" in user_prompt
+
+
 def test_ask_stream_reports_web_attempt_without_results(monkeypatch, tmp_path):
     """联网开关打开但没搜到结果时，也要把 attempted/count 透传给前端。"""
     main = _load_main(monkeypatch, tmp_path)
