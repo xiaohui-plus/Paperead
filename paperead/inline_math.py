@@ -16,6 +16,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from .textnorm import keep_space_between
+
 # 数学字体（含正体 CMR：正文公式里的括号、数字、SPD/log 等）
 MATH_FONTS = (
     "CMMI", "CMR", "CMSY", "CMEX", "MSBM", "MTMI", "MTEX", "EUSM", "EUFM", "Symbol",
@@ -263,6 +265,7 @@ def spans_with_offsets(spans: list[dict]) -> tuple[str, list[tuple[int, int, dic
                 gap > max(0.18 * size, 1.0)
                 and not parts[-1].endswith((" ", "-", "/", "\u00ad"))
                 and not text.startswith(" ")
+                and keep_space_between(parts[-1], text)
             ):
                 parts.append(" ")
                 cursor += 1

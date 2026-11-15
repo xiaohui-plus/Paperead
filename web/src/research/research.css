@@ -183,11 +183,8 @@
   max-width: 260px;
 }
 
-.research-composer-hint {
-  margin-left: auto;
-  font-size: 11.5px;
-  color: var(--faint);
-}
+
+/* 开始聊天框里的工作文件夹选择器 */
 
 /* 开始聊天框里的工作文件夹选择器 */
 .research-composer-scope {
@@ -217,7 +214,7 @@
 }
 
 .workspace-picker-button:hover:not(:disabled) {
-  border-color: var(--accent, #2563eb);
+  border-color: var(--accent, #0F3C74);
 }
 
 .workspace-picker-button:disabled {
@@ -238,8 +235,8 @@
 .workspace-picker-button em {
   padding: 0 6px;
   border-radius: 999px;
-  background: rgba(37, 99, 235, 0.12);
-  color: var(--accent, #2563eb);
+  background: rgba(15, 60, 116, 0.12);
+  color: var(--accent, #0F3C74);
   font-size: 10px;
   font-style: normal;
 }
@@ -325,7 +322,7 @@
 
 .workspace-item svg:last-child {
   flex: none;
-  color: var(--accent, #2563eb);
+  color: var(--accent, #0F3C74);
 }
 
 .workspace-menu-error {
@@ -348,7 +345,7 @@
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: var(--accent, #2563eb);
+  color: var(--accent, #0F3C74);
   font-size: 12.5px;
   text-align: left;
   cursor: pointer;
@@ -1091,8 +1088,8 @@
 }
 
 .project-composer.is-dragging {
-  border-color: var(--accent, #2563eb);
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+  border-color: var(--accent, #0F3C74);
+  box-shadow: 0 0 0 3px rgba(15, 60, 116, 0.12);
 }
 
 .composer-tools {
@@ -1469,7 +1466,7 @@
 
 .pdf-preview-scroll .react-pdf__Page {
   background: #fff;
-  box-shadow: 0 1px 10px rgba(15, 30, 60, 0.14);
+  box-shadow: 0 1px 10px rgba(10, 43, 84, 0.14);
 }
 
 .pdf-preview-hint {
@@ -1499,7 +1496,7 @@
 
 .ppt-preview-host .pptx-preview-slide-wrapper {
   border-radius: 3px;
-  box-shadow: 0 2px 12px rgba(15, 30, 60, 0.14);
+  box-shadow: 0 2px 12px rgba(10, 43, 84, 0.14);
 }
 
 .ppt-preview .project-preview-note {
@@ -1531,7 +1528,7 @@
 
 .docx-preview .docx-wrapper > section.docx {
   margin: 0 auto 16px;
-  box-shadow: 0 2px 12px rgba(15, 30, 60, 0.14);
+  box-shadow: 0 2px 12px rgba(10, 43, 84, 0.14);
 }
 
 .docx-preview .project-preview-note {
@@ -3010,8 +3007,8 @@
 }
 
 .rc-box.is-dragging {
-  border-color: var(--blue, #2563eb);
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+  border-color: var(--blue, #0F3C74);
+  box-shadow: 0 0 0 3px rgba(15, 60, 116, 0.12);
 }
 
 .rc textarea {
@@ -3281,14 +3278,14 @@
   padding: 0;
   border: 0;
   border-radius: 50%;
-  background: #5b8def;
+  background: #2F5580;
   color: #fff;
   cursor: pointer;
   transition: background 0.15s ease, opacity 0.15s ease;
 }
 
 .rc-send:hover {
-  background: #4a7de4;
+  background: #2F5580;
 }
 
 .rc-send:disabled {

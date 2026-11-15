@@ -1,5 +1,6 @@
 import type { ReactElement, ReactNode } from 'react'
 import {
+  BrandMark,
   IconBook,
   IconList,
   IconSearch,
@@ -40,7 +41,7 @@ export function Sidebar({
   return (
     <aside className="library-side">
       <div className="library-brand">
-        <span className="brand-mark">P</span>
+        <BrandMark />
         <span className="brand-name">Paperead</span>
       </div>
 

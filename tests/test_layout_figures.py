@@ -318,3 +318,175 @@ def test_figure_without_caption_gets_fallback_title(tmp_path):
     figs = [b for b in parsed.blocks if b.kind == "figure"]
     assert len(figs) == 1
     assert figs[0].caption == "第 1 页图"
+
+def test_table_detection_shrinks_off_adjacent_figure(tmp_path, monkeypatch):
+    """find_tables 把图注/子图标题也当成表格行时，表格不能把整张图吞掉。
+
+    对应问题：NLGT 论文第 6 页的 Table 2 识别框一直延伸到 Figure 2 的子图
+    标题，图区被判成「与表格重叠」直接跳过，Figure 2 既没进图表栏，又被裁
+    进表格图里。
+    """
+    import paperead.layout as layout
+
+    def draw(page):
+        for y in [54, 81, 96, 110, 124, 138, 152, 166, 181, 195, 210]:
+            page.draw_line((56, y), (556, y), color=(0, 0, 0), width=0.8)
+        for i, name in enumerate(["GCN", "GraphSAGE", "GAT", "GraphGPS", "HEAL", "NLGT"]):
+            page.insert_text((62, 74 + i * 14.2), name, fontsize=7)
+            page.insert_text((150 + i * 40, 74 + i * 14.2), "82.1", fontsize=7)
+        page.insert_text((54, 220), "Table 2: Accuracy(%) comparison on benchmark datasets.",
+                         fontsize=9)
+
+        pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 60, 50), False)
+        pix.clear_with(120)
+        for x in [55, 181, 307, 433]:
+            page.insert_image(pymupdf.Rect(x, 254, x + 123, 361), pixmap=pix)
+        page.insert_text((74, 372), "(a) Adjacency Matrix of Sparse Sub-graph", fontsize=8)
+        page.insert_text((203, 372), "(b) Adjacency Matrix-based Attention", fontsize=8)
+        page.insert_text((325, 372), "(c) Fully-connected Attention Without Mask", fontsize=8)
+        page.insert_text((436, 372), "(d) Neighborhood-based Masked Attention in NLGT", fontsize=8)
+        page.insert_text(
+            (152, 402),
+            "Figure 2: Visualization of Different Attention Mechanisms for Sparse Graphs",
+            fontsize=9,
+        )
+        page.insert_text(
+            (54, 440),
+            "Attention Mechanisms. We further investigate whether the neighborhood-based "
+            "attention allows the model to focus selectively on different nodes.",
+            fontsize=10,
+        )
+
+    pdf = _text_pdf(tmp_path / "swallowed.pdf", [draw])
+
+    def fake_tables(doc):
+        # 模拟 find_tables：表框一路吞到 Figure 2 的子图标题
+        return {1: [(pymupdf.Rect(56, 54, 556, 386), (
+            "<table><tr><td>GCN</td><td>82.1</td></tr>"
+            "<tr><td>GAT</td><td>83.0</td></tr>"
+            "<tr><td>NLGT</td><td>84.0</td></tr></table>"
+        ), 4)]}
+
+    monkeypatch.setattr(layout, "_find_page_tables", fake_tables)
+    parsed = parse_pdf(pdf, paper_id="swallowed", figure_dir=tmp_path / "figs")
+
+    figs = [b for b in parsed.blocks if b.kind == "figure"]
+    assert len(figs) == 1
+    assert figs[0].caption.startswith("Figure 2")
+
+    tabs = [b for b in parsed.blocks if b.kind == "table"]
+    assert len(tabs) == 1
+    # 表框要收在子图上沿，图区不能再被表格裁图吃掉
+    assert tabs[0].bbox[3] < 260
+
+
+def test_table_without_adjacent_figure_is_not_shrunk(tmp_path, monkeypatch):
+    """没有图注/图区的页面，表框保持原样，避免误伤表格内的示意图。"""
+    import paperead.layout as layout
+
+    def draw(page):
+        for y in [80, 110, 140, 170]:
+            page.draw_line((56, y), (556, y), color=(0, 0, 0), width=0.8)
+        page.insert_text((62, 100), "GCN", fontsize=9)
+        page.insert_text((150, 100), "82.1", fontsize=9)
+        page.insert_text((54, 190), "Table 1: Results.", fontsize=9)
+        pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 60, 50), False)
+        pix.clear_with(200)
+        page.insert_image(pymupdf.Rect(300, 300, 500, 460), pixmap=pix)
+
+    pdf = _text_pdf(tmp_path / "notcap.pdf", [draw])
+    original = pymupdf.Rect(56, 80, 556, 170)
+
+    def fake_tables(doc):
+        return {1: [(pymupdf.Rect(original), (
+            "<table><tr><td>GCN</td><td>82.1</td></tr>"
+            "<tr><td>GAT</td><td>83.0</td></tr>"
+            "<tr><td>NLGT</td><td>84.0</td></tr></table>"
+        ), 4)]}
+
+    monkeypatch.setattr(layout, "_find_page_tables", fake_tables)
+    parsed = parse_pdf(pdf, paper_id="notcap", figure_dir=tmp_path / "figs")
+    tabs = [b for b in parsed.blocks if b.kind == "table"]
+    assert len(tabs) == 1
+    assert tabs[0].bbox[3] <= 170 + 30
+    figs = [b for b in parsed.blocks if b.kind == "figure"]
+    assert len(figs) == 1
+
+
+def test_swallow_check_ignores_narrow_long_table_cells():
+    """表内长单元格只有一列宽，不能按「长段落」把整页大表判成正文。"""
+    from paperead.layout import Block, _table_swallows_page
+
+    rect = pymupdf.Rect(60, 50, 540, 700)
+    blocks = [
+        Block(
+            id=f"s{i}", order=0, page=1, kind="para",
+            text="short cell entry", bbox=(70, 60 + i * 12, 300, 70 + i * 12),
+        )
+        for i in range(20)
+    ]
+    blocks += [
+        Block(id="a", order=0, page=1, kind="para",
+              text="reference list " * 25, bbox=(70, 400, 260, 420)),
+        Block(id="b", order=0, page=1, kind="para",
+              text="benchmark list " * 25, bbox=(280, 400, 480, 420)),
+        Block(id="outside", order=0, page=1, kind="para",
+              text="body paragraph " * 40, bbox=(60, 720, 540, 740)),
+    ]
+    assert _table_swallows_page(1, rect, blocks) is False
+
+
+def test_swallow_check_still_rejects_wide_body_paragraphs():
+    """整栏宽的长段落仍要判成正文，防止 find_tables 把正文误当表格。"""
+    from paperead.layout import Block, _table_swallows_page
+
+    rect = pymupdf.Rect(60, 50, 540, 700)
+    blocks = [
+        Block(id=f"s{i}", order=0, page=1, kind="para",
+              text="short line", bbox=(70, 60 + i * 12, 300, 70 + i * 12))
+        for i in range(5)
+    ]
+    blocks += [
+        Block(id="p1", order=0, page=1, kind="para",
+              text="body paragraph " * 40, bbox=(60, 300, 540, 500)),
+        Block(id="p2", order=0, page=1, kind="para",
+              text="another paragraph " * 40, bbox=(60, 520, 540, 560)),
+    ]
+    assert _table_swallows_page(1, rect, blocks) is True
+
+
+def test_figure_rect_is_trimmed_off_body_text():
+    """图区被整圈边框扩到页顶时，要收回到正文段落之外。"""
+    from paperead.layout import Block, _trim_figure_rect_off_body
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    rect = pymupdf.Rect(50, 60, 560, 430)
+    body = Block(
+        id="body", order=0, page=1, kind="para", size=10.0,
+        text="section body " * 60, bbox=(90, 95, 520, 170),
+    )
+    out = _trim_figure_rect_off_body(page, rect, [body], 1, 10.0)
+    doc.close()
+    assert out.y0 >= 170
+    assert out.y1 == pytest.approx(430)
+
+
+def test_rect_with_adjacent_figure_caption_is_figure_region():
+    """顶部大块图形 + 紧邻 Figure 图注，不能当成上一页表格的续表。"""
+    from paperead.layout import Block, _rect_is_figure_region
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    page.draw_rect(
+        pymupdf.Rect(100, 100, 500, 400), color=(0, 0, 0), fill=(0.95, 0.95, 0.95)
+    )
+    for i in range(4):
+        page.draw_line((110, 140 + i * 60), (490, 140 + i * 60), color=(0, 0, 0))
+    cap = Block(
+        id="c", order=0, page=1, kind="caption",
+        text="Figure 1: demo", bbox=(100, 410, 500, 420),
+    )
+    hit = _rect_is_figure_region(page, pymupdf.Rect(90, 90, 510, 400), [cap], 1)
+    doc.close()
+    assert hit is True

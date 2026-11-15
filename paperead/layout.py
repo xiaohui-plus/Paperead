@@ -28,6 +28,7 @@ import pymupdf.table as _pymupdf_table
 
 from .inline_math import MATH_FONTS as _INLINE_MATH_FONTS
 from .inline_math import build_inline_math, spans_with_offsets
+from .textnorm import keep_space_between, squeeze_cjk_spaces
 
 
 def _force_accurate_table_bboxes() -> bool:
@@ -305,6 +306,7 @@ def _join_spans(spans: list[dict]) -> str:
                 gap > max(0.18 * size, 1.0)
                 and not last.endswith((" ", "-", "/", "\u00ad"))
                 and not t.startswith(" ")
+                and keep_space_between(last, t)
             ):
                 parts.append(" ")
         parts.append(t)
@@ -321,6 +323,9 @@ def _line_from_dict(raw: dict, page_no: int) -> Line | None:
     if not spans:
         return None
     raw_text, ranges = spans_with_offsets(spans)
+    raw_text, offsets = squeeze_cjk_spaces(raw_text)
+    if offsets != list(range(len(raw_text) + 1)):
+        ranges = [(offsets[start], offsets[end], span) for start, end, span in ranges]
     text = _normalize_text(raw_text)
     if not text.strip():
         return None
@@ -848,6 +853,8 @@ def _append_line_text(prev: str, nxt: str) -> tuple[str, int]:
         return prev[:-1] + nxt, len(prev) - 1   # inter-\nnational → international
     if prev[-1:] in "-‐‑" and nxt[:1].isupper():
         return prev + nxt, len(prev)            # 保留连字符（如 3D-CNN）
+    if not keep_space_between(prev, nxt):
+        return prev + nxt, len(prev)            # 中文换行不补空格
     return prev + " " + nxt, len(prev) + 1
 
 
@@ -1644,7 +1651,10 @@ def _merge_caption_continuations(blocks: list[Block]) -> list[Block]:
             )
         if len(parts) > 1:
             parts.sort(key=lambda item: item[0])
-            b.text = " ".join(t.strip() for _, t in parts if t.strip())
+            joined = ""
+            for _, t in parts:
+                joined, _ = _append_line_text(joined, t)
+            b.text = joined.strip()
 
     i = 0
     while i < len(blocks):
@@ -1774,6 +1784,59 @@ def _find_page_tables(doc: pymupdf.Document) -> dict[int, list[tuple[pymupdf.Rec
 _TABLE_CROP_GAP = 24.0
 
 
+def _shrink_table_rect_off_figures(
+    page: pymupdf.Page,
+    rect: pymupdf.Rect,
+    blocks: list[Block],
+    page_no: int,
+) -> pymupdf.Rect:
+    """表框若把相邻图区吞进来，收缩到表格本体。
+
+    find_tables 常把表格下方紧贴的图注/子图标题当成表格行（稀疏图论文的
+    Figure 2 就是这样被整块并入 Table 2），于是 ``_extract_figures`` 会把
+    图区当成「与表格重叠」直接跳过，整张图既没进图表栏、又被裁进表格图。
+    这里以「独立位图区域 + 紧邻的非表格图注」为锚，把图区从表框纵向剔除。
+    """
+    fig_caps = [
+        pymupdf.Rect(b.bbox) for b in blocks
+        if b.page == page_no and b.kind == "caption" and not _is_table_caption(b.text)
+    ]
+    if not fig_caps:
+        return rect
+    try:
+        infos = [pymupdf.Rect(info["bbox"]) for info in page.get_image_info()]
+    except Exception:
+        return rect
+    regions = _merge_figure_regions(
+        [r for r in infos if r.width * r.height > 500 and r.height > 10],
+        gap_x=30.0,
+        gap_y=30.0,
+    )
+    out = pymupdf.Rect(rect)
+    for r in regions:
+        if r.width * r.height <= 8000 or r.height <= 40:
+            continue
+        inter = r & out
+        if inter.is_empty or inter.height < r.height * 0.8:
+            continue
+        if r.height < out.height * 0.2:
+            continue
+        if not any(
+            -80 <= c.y0 - r.y1 <= 200 or -30 <= r.y0 - c.y1 <= 150
+            for c in fig_caps
+        ):
+            continue
+        # 图在下半部就截掉表底，在上半部就抬表顶；不把表切成两段
+        if (r.y0 + r.y1) / 2 >= (out.y0 + out.y1) / 2:
+            if r.y0 - out.y0 > out.height * 0.15:
+                out.y1 = min(out.y1, r.y0 - 6)
+        elif out.y1 - r.y1 > out.height * 0.15:
+            out.y0 = max(out.y0, r.y1 + 6)
+    if out.is_empty or out.height < 18 or out.width < 60:
+        return rect
+    return out
+
+
 def _table_crop_rect(page: pymupdf.Page, rect: pymupdf.Rect, margin: float = 4.0) -> pymupdf.Rect:
     """把表格识别框扩到「整张表」：包含整栏宽度和贴边的横线/表头。
 
@@ -1873,10 +1936,81 @@ def _table_swallows_page(page_no: int, rect: pymupdf.Rect, blocks: list[Block]) 
         1 for b in inside
         if len(b.text.strip()) < 160 and (b.bbox[3] - b.bbox[1]) < 45
     )
-    long_paras = sum(1 for b in inside if len(b.text.strip()) >= 200)
+    # 表格单元格里也可能有长文字（多篇引用挤在一个格子里）；正文段落
+    # 会横跨整栏，单元格长文本只有一列宽。只按长度判正文会把整页大表
+    # 误杀（Table 14 的两个长单元格曾让它判定成「正文被当表」）。
+    wide = rect.width * 0.65
+    long_paras = sum(
+        1 for b in inside
+        if len(b.text.strip()) >= 200 and (b.bbox[2] - b.bbox[0]) >= wide
+    )
     if short >= 3 and long_paras <= 1:
         return False
     return True
+
+
+def _rect_has_figure_caption(
+    rect: pymupdf.Rect,
+    blocks: list[Block],
+    page_no: int,
+) -> bool:
+    """表框内（或紧邻上下方）是否有非表格图注。"""
+    for b in blocks:
+        if b.page != page_no or b.kind != "caption" or _is_table_caption(b.text):
+            continue
+        cy = (b.bbox[1] + b.bbox[3]) / 2
+        if rect.y0 - 2 <= cy <= rect.y1 + 2:
+            return True
+    return False
+
+
+def _rect_is_figure_region(
+    page: pymupdf.Page,
+    rect: pymupdf.Rect,
+    blocks: list[Block],
+    page_no: int,
+) -> bool:
+    """判断表框其实是图区，而不是上一页表格的续表。
+
+    跨页续表只看「本页顶部有大块表区」不够：图文卡片从页顶开始时会被
+    误当续表，整张图随后被「与表格重叠」丢掉（Beyond Accuracy 的
+    Figure 1 就是这样消失的）。判据要求同时满足：框旁有非表格图注，
+    且框内被成块图形（矢量簇/位图）覆盖大半。真正的表格页即使紧邻
+    图注，框内也不会被一个独立图形簇占满。
+    """
+    fig_caps = [
+        pymupdf.Rect(b.bbox) for b in blocks
+        if b.page == page_no and b.kind == "caption" and not _is_table_caption(b.text)
+    ]
+    near = [
+        c for c in fig_caps
+        if (min(rect.x1, c.x1) - max(rect.x0, c.x0)) > min(rect.width, c.width) * 0.3
+        and (
+            -30 <= c.y0 - rect.y1 <= 90
+            or -30 <= rect.y0 - c.y1 <= 90
+            or rect.y0 <= (c.y0 + c.y1) / 2 <= rect.y1
+        )
+    ]
+    if not near:
+        return False
+    try:
+        clusters = [pymupdf.Rect(r) for r in page.cluster_drawings()]
+    except Exception:
+        clusters = []
+    try:
+        images = [pymupdf.Rect(info["bbox"]) for info in page.get_image_info()]
+    except Exception:
+        images = []
+    box_area = rect.width * rect.height
+    for r in [*clusters, *images]:
+        if r.width * r.height <= 4000 or r.height <= 40:
+            continue
+        inter = r & rect
+        if inter.is_empty:
+            continue
+        if inter.width * inter.height >= box_area * 0.4:
+            return True
+    return False
 
 
 def _extract_tables_structured(
@@ -1904,6 +2038,7 @@ def _extract_tables_structured(
         for k, (rect, html, _cols) in enumerate(detected[page_no]):
             if _looks_like_text_table(html, _cols):
                 continue
+            rect = _shrink_table_rect_off_figures(page, rect, blocks, page_no)
             cap: Block | None = None
             best_d = 1e9
             for c in captions:
@@ -1915,9 +2050,15 @@ def _extract_tables_structured(
 
             continued = False
             if cap is None and last_cap is not None:
-                # 跨页续表：本页顶部就是表格，且上一页有表题 → 沿用上一页表题
+                # 跨页续表：本页顶部就是表格，且上一页有表题 → 沿用上一页表题。
+                # 框里若含 Figure 图注，说明是本页自己的图，不是续表。
                 lp, last = last_cap
-                if page_no - lp <= 1 and rect.y0 <= page.rect.height * 0.30:
+                if (
+                    page_no - lp <= 1
+                    and rect.y0 <= page.rect.height * 0.30
+                    and not _rect_has_figure_caption(rect, blocks, page_no)
+                    and not _rect_is_figure_region(page, rect, blocks, page_no)
+                ):
                     cap, continued = last, True
             if cap is None:
                 continue
@@ -2048,6 +2189,7 @@ def _extract_tables_by_caption(
             max(blocks[k].bbox[3] for k in picked) + 3,
         )
         rect = _include_caption(_table_crop_rect(page, raw), b.bbox, page)
+        rect = _shrink_table_rect_off_figures(page, rect, blocks, b.page)
         if _table_swallows_page(b.page, rect, blocks):
             continue
         img = _crop(
@@ -2388,10 +2530,46 @@ def _figure_crop_rect(page: pymupdf.Page, rect: pymupdf.Rect) -> pymupdf.Rect:
     )
 
 
+def _trim_figure_rect_off_body(
+    page: pymupdf.Page,
+    rect: pymupdf.Rect,
+    blocks: list[Block],
+    page_no: int,
+    body_size: float = 0.0,
+) -> pymupdf.Rect:
+    """图区把页面上方/下方的成段正文框进来时，收缩到正文之外。
+
+    矢量图的背景框/外框常向上延到页顶，`_figure_crop_rect` 会把整圈边框
+    并进来，连页顶的章节正文一起裁进图片（Figure 4 的图区曾盖住 3.2 节
+    正文）。只按「正文字号 + 成段长度 + 整栏宽」收缩，图内小字标注不受影响。
+    """
+    out = pymupdf.Rect(rect)
+    for b in blocks:
+        if b.page != page_no or not _is_body_block(b):
+            continue
+        if body_size > 0 and 0 < b.size < body_size * 0.9:
+            continue
+        if len(b.text.strip()) < 200:
+            continue
+        if (b.bbox[2] - b.bbox[0]) < page.rect.width * 0.5:
+            continue
+        br = pymupdf.Rect(b.bbox)
+        if _cover_ratio(br, out) <= 0.5:
+            continue
+        if (br.y0 + br.y1) / 2 < (out.y0 + out.y1) / 2:
+            out.y0 = max(out.y0, br.y1 + 2)
+        else:
+            out.y1 = min(out.y1, br.y0 - 2)
+    if out.height < 40 or out.width < 60:
+        return rect
+    return out
+
+
 def _extract_figures(
     doc: pymupdf.Document,
     blocks: list[Block],
     out_dir: Path,
+    body_size: float = 0.0,
 ) -> list[Block]:
     """把每页图片区域裁成 PNG，并按「图注」配对插入阅读顺序。"""
     insert_before: dict[str, list[Block]] = {}
@@ -2426,6 +2604,7 @@ def _extract_figures(
             )
         used: set[str] = set()
         for k, r in enumerate(rects):
+            r = _trim_figure_rect_off_body(page, r, blocks, page_no, body_size)
             # 表格已经有独立切片，图片识别不能再把同一块区域当插图重复放一次
             if any(_overlap_ratio(r, t) > 0.25 for t in table_rects):
                 continue
@@ -2696,25 +2875,6 @@ def _extract_vector_text_figures(
         if len(texts) < 4:
             continue
         disclaim = lambda b: _is_small_float_text(b, body_size)  # noqa: E731
-        long = sum(
-            1 for b in texts
-            if _is_body_block(b) and not disclaim(b) and len(b.text.strip()) > 220
-        )
-        if long > 6:
-            continue
-
-        # 「正文」的判据必须和 collect_side 一致：8.5pt 对 10pt 正文的图内
-        # 长标注不算正文，否则它会同时进入 body_rects，导致图区一覆盖它
-        # 就被「图不能压正文」否掉（RingFormer 的 Figure 3 就是这样漏的）。
-        def is_body(b: Block) -> bool:
-            if not _is_body_block(b) or disclaim(b):
-                return False
-            return not (body_size > 0 and 0 < b.size < body_size * 0.9)
-
-        bodies = [b for b in texts if is_body(b)]
-        body_rects = [pymupdf.Rect(b.bbox) for b in bodies] + [
-            pymupdf.Rect(b.bbox) for _, b in items if b.kind == "table"
-        ]
         fig_rects = [
             pymupdf.Rect(b.bbox) for _, b in items if b.kind == "figure"
         ]
@@ -2733,6 +2893,67 @@ def _extract_vector_text_figures(
         )
         if not caps:
             continue
+
+        # 图注锚定的大块图形区域（矢量簇 + 位图）。图内文字可能和正文
+        # 同字号、同宽度（Beyond Accuracy 的 Figure 1 是 9pt 图文卡片），
+        # 单靠字号无法区分，只能承认「落在这块图区里的文字属于图」。
+        try:
+            clusters = [pymupdf.Rect(r) for r in page.cluster_drawings()]
+        except Exception:
+            clusters = []
+        try:
+            images = [pymupdf.Rect(info["bbox"]) for info in page.get_image_info()]
+        except Exception:
+            images = []
+        page_area = page.rect.width * page.rect.height
+        regions = [
+            r for r in _merge_figure_regions(
+                [
+                    r for r in [*clusters, *images]
+                    if r.width * r.height > 4000 and r.height > 40
+                ],
+                gap_x=40.0,
+                gap_y=40.0,
+            )
+            if r.width * r.height < page_area * 0.75
+        ]
+        anchors: list[pymupdf.Rect] = []
+        for r in regions:
+            for cap in caps:
+                cb = pymupdf.Rect(cap.bbox)
+                overlap_x = min(r.x1, cb.x1) - max(r.x0, cb.x0)
+                if overlap_x <= min(r.width, cb.width) * 0.3:
+                    continue
+                if -30 <= cb.y0 - r.y1 <= 90 or -30 <= r.y0 - cb.y1 <= 90:
+                    anchors.append(r | cb)
+                    break
+
+        def anchored(b: Block) -> bool:
+            if not anchors:
+                return False
+            br = pymupdf.Rect(b.bbox)
+            return any(_cover_ratio(br, ar) > 0.6 for ar in anchors)
+
+        long = sum(
+            1 for b in texts
+            if _is_body_block(b) and not disclaim(b) and not anchored(b)
+            and len(b.text.strip()) > 220
+        )
+        if long > 6:
+            continue
+
+        # 「正文」的判据必须和 collect_side 一致：8.5pt 对 10pt 正文的图内
+        # 长标注不算正文，否则它会同时进入 body_rects，导致图区一覆盖它
+        # 就被「图不能压正文」否掉（RingFormer 的 Figure 3 就是这样漏的）。
+        def is_body(b: Block) -> bool:
+            if not _is_body_block(b) or disclaim(b) or anchored(b):
+                return False
+            return not (body_size > 0 and 0 < b.size < body_size * 0.9)
+
+        bodies = [b for b in texts if is_body(b)]
+        body_rects = [pymupdf.Rect(b.bbox) for b in bodies] + [
+            pymupdf.Rect(b.bbox) for _, b in items if b.kind == "table"
+        ]
 
         def collect_side(cap: Block, step: int) -> list[Block]:
             """从图注向图的方向区域生长，收集图内标注，正文块作为边界不加入。
@@ -2776,13 +2997,13 @@ def _extract_vector_text_figures(
                     # 正文标题（字号与正文相当）是页面结构，不是图内标注；
                     # 图内标题字号通常明显小于正文，仍会被收进图区。
                     if b.kind in ("heading", "title"):
-                        if body_size <= 0 or b.size >= body_size * 0.95:
+                        if (body_size <= 0 or b.size >= body_size * 0.95) and not anchored(b):
                             continue
                     # 正文风格（正文字号 + 够长 + 够宽）是图的边界；
                     # 图内长标注（8.5pt 对 10pt 正文）字号略小，不能按
                     # 「≥0.95 倍正文」当正文，否则整张图会被下文挡住。
                     small = body_size > 0 and 0 < b.size < body_size * 0.9
-                    if not disclaim(b) and not small and (
+                    if not disclaim(b) and not small and not anchored(b) and (
                         _is_body_block(b)
                         or (
                             body_size > 0
@@ -2814,7 +3035,7 @@ def _extract_vector_text_figures(
             big = sum(
                 1 for b in fig_texts
                 if body_size > 0 and b.size >= body_size * 0.95
-                and len(b.text.strip()) > 55
+                and len(b.text.strip()) > 55 and not anchored(b)
             )
             if big > 1 or sum(len(b.text.strip()) for b in fig_texts) / len(fig_texts) > 150:
                 continue
@@ -3053,7 +3274,7 @@ def parse_pdf(
             if paper_id:
                 out = out / paper_id
             blocks = _extract_tables(doc, blocks, out / "tables")
-            blocks = _extract_figures(doc, blocks, out / "figures")
+            blocks = _extract_figures(doc, blocks, out / "figures", body_size)
             # 带文字标注的矢量图先按图注裁出图形区域，避免后面的整页图化
             # 把同一页的正文一起吞进图片
             blocks = _extract_vector_text_figures(doc, blocks, out / "figures", body_size)

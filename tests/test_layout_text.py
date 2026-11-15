@@ -19,6 +19,7 @@ from paperead.layout import (
     _split_row_runs,
     parse_pdf,
 )
+from paperead.textnorm import squeeze_cjk_spaces
 
 
 def _pdf(path, pages):
@@ -103,6 +104,23 @@ def test_ligatures_and_unicode_hyphen_are_normalized():
     assert _join_text("inter-", "national") == "international"
     assert _join_text("multi\u2010", "target") == "multitarget"
     assert _join_text("3D\u2010", "CNN") == "3D\u2010CNN"
+
+
+def test_cjk_lines_join_without_inserted_space():
+    # 中文换行是排版折行，不是词间空格
+    assert _join_text("中文句子在这一行结束", "下一行继续") == "中文句子在这一行结束下一行继续"
+    assert _join_text("句子结束。", "下一句开始") == "句子结束。下一句开始"
+    # 中英混排仍按西文规则留空格
+    assert _join_text("使用 Transformer", "模型完成推理") == "使用 Transformer 模型完成推理"
+
+
+def test_cjk_spaced_text_layer_is_squeezed():
+    text, mapping = squeeze_cjk_spaces("中 文 文 献 版 面 重 排")
+    assert text == "中文文献版面重排"
+    # 偏移映射必须指到清理后的同一位置，行内公式才不会错位
+    assert [text[mapping[i]] for i in (0, 2, 4, 6)] == ["中", "文", "文", "献"]
+    assert squeeze_cjk_spaces("使用 Transformer 模型")[0] == "使用 Transformer 模型"
+    assert squeeze_cjk_spaces("中文 and 英文")[0] == "中文 and 英文"
 
 
 def _line(text, x0, x1, baseline=100.0, size=10.0, page=1, col=0):

@@ -6,6 +6,7 @@ import {
   testMobileServer,
 } from '../lib/mobile'
 import { MobileDeviceSyncPanel } from './DeviceSync'
+import { BrandMark } from './icons'
 
 interface FormProps {
   base: string
@@ -51,7 +52,7 @@ export function MobileSetupScreen() {
     <div className="mobile-setup">
       <div className="mobile-setup-card">
         <div className="mobile-setup-brand">
-          <span className="brand-mark">P</span>
+          <BrandMark />
           <span className="brand-name">Paperead</span>
         </div>
 

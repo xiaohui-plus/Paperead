@@ -101,7 +101,7 @@ export function ResearchHome({
 }: Props) {
   const [target, setTarget] = useState<string>('auto')
   const [busy, setBusy] = useState(false)
-  const [filled, setFilled] = useState(false)
+
   const [seed, setSeed] = useState<{ key: number; text: string } | null>(null)
 
   const effectiveProject =
@@ -110,7 +110,7 @@ export function ResearchHome({
   /** 快捷卡片只把示例填进输入框，等用户改完再自己发送。 */
   const fillDraft = (text: string) => {
     setSeed({ key: Date.now(), text })
-    setFilled(true)
+
   }
 
   const run = async (text: string, title: string) => {
@@ -121,7 +121,7 @@ export function ResearchHome({
       tourBus.emit('research:action', { label: title })
       await onStart(value, title, effectiveProject, '')
       setSeed(null)
-      setFilled(false)
+
     } finally {
       setBusy(false)
     }
@@ -150,9 +150,7 @@ export function ResearchHome({
             onChange={setTarget}
             onCreate={onCreateProject}
           />
-          {filled && (
-            <span className="research-composer-hint">示例已填入，可修改后发送</span>
-          )}
+
         </div>
         <Composer
           kind={kind}
@@ -165,7 +163,7 @@ export function ResearchHome({
               ? '描述你想研究的问题，/ 调用指令，@ 引用文件或论文'
               : '描述综述主题与目标读者，/ 调用指令，@ 引用文件或论文'
           }
-          hint={filled ? '示例已填入，可修改后发送' : ''}
+
           onSend={(text) => void run(text, text.slice(0, 40))}
           onStop={() => undefined}
         />
