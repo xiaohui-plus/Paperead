@@ -6,7 +6,8 @@
 同一天用日期做种子，结果稳定；「换一批」只是在这条全天稳定的队列上向后切窗口，
 所以相邻两批内容不重叠。
 
-算法与参考项目（TypeScript 版）逐行对应，便于两个实现互相对照。
+当天候选池会以带时间戳的 JSON 落到数据目录，软件启动时后台预热：
+同一天已有缓存就不再访问外部接口，进程重启后「换一批」仍从同一批候选里轮换。
 """
 
 from __future__ import annotations
@@ -15,10 +16,12 @@ import asyncio
 import json
 import logging
 import math
-from datetime import datetime, timezone
+import os
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 from .http import CONTACT_EMAIL, FriendlyError, arxiv_fetch, fetch_text
-from .models import Paper
+from .models import Paper, paper_from_dict
 from .sources import (
     ARXIV_API,
     OPENALEX_API,
@@ -48,6 +51,11 @@ DAILY_BUCKETS: list[dict] = [
 ]
 
 DAILY_LIMIT = 12
+# 每天落盘并可「换一批」轮换的候选上限（约为一百篇，分成十批不重叠）。
+DAILY_POOL_LIMIT = 120
+# 缓存只保留最近一周，避免临时文件越积越多。
+DAILY_CACHE_KEEP_DAYS = 7
+DAILY_CACHE_VERSION = 1
 # 只取近 45 天的 OpenAlex 论文，保证推荐流仍「新鲜」，同时带上被引量。
 OPENALEX_POOL_DAYS = 45
 HEAT_GRAVITY = 1.5
@@ -67,7 +75,14 @@ def build_openalex_subfield_filter(subfields: list[int]) -> str:
 
 
 def to_date_key(moment: datetime) -> str:
-    return moment.astimezone(timezone.utc).strftime("%Y-%m-%d")
+    """按本机时区切日：用户说的「今天」与缓存命中都以本地日期为准。"""
+    if moment.tzinfo is None:
+        return moment.strftime("%Y-%m-%d")
+    return moment.astimezone().strftime("%Y-%m-%d")
+
+
+def _today_key() -> str:
+    return to_date_key(datetime.now(timezone.utc))
 
 
 def hash_seed(text: str) -> int:
@@ -203,16 +218,116 @@ async def _openalex_pool(subfields: list[int]) -> list[Paper]:
     return parse_openalex_works(payload)
 
 
-# 按天缓存：同一实例一天内最多向外拉取一次候选池。
+# 按天缓存：进程内一份，磁盘上一份带时间戳的 JSON。
+_cache_dir: Path | None = None
 _day_date = ""
 _day_papers: list[Paper] = []
+_day_fetched_at = ""
+_day_from_cache = False
+_pool_task: asyncio.Task | None = None
 
 
-async def _pool(date_key: str) -> list[Paper]:
-    global _day_date, _day_papers
-    if _day_date == date_key and _day_papers:
-        return _day_papers
+def configure_cache_dir(path: Path | str | None) -> None:
+    """设置每日推荐缓存的落盘目录；传 None 时只保留进程内缓存。"""
+    global _cache_dir
+    _cache_dir = Path(path) if path else None
+    reset_cache()
 
+
+def reset_cache() -> None:
+    """清空进程内缓存（配置切换、测试与强制刷新用），不删除磁盘文件。"""
+    global _day_date, _day_papers, _day_fetched_at, _day_from_cache, _pool_task
+    _day_date = ""
+    _day_papers = []
+    _day_fetched_at = ""
+    _day_from_cache = False
+    _pool_task = None
+
+
+def _read_day_cache(date_key: str) -> tuple[list[Paper], str] | None:
+    folder = _cache_dir
+    if folder is None:
+        return None
+    try:
+        files = sorted(folder.glob(f"{date_key}_*.json"))
+    except OSError:
+        return None
+    for path in reversed(files):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if payload.get("version") != DAILY_CACHE_VERSION or payload.get("date") != date_key:
+            continue
+        papers = [
+            paper_from_dict(item)
+            for item in payload.get("papers") or []
+            if isinstance(item, dict) and item.get("id")
+        ]
+        if not papers:
+            continue
+        return papers, str(payload.get("fetched_at") or "")
+    return None
+
+
+def _write_day_cache(date_key: str, papers: list[Paper], fetched_at: str) -> None:
+    folder = _cache_dir
+    if folder is None:
+        return
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%H%M%S")
+        path = folder / f"{date_key}_{stamp}.json"
+        payload = {
+            "version": DAILY_CACHE_VERSION,
+            "date": date_key,
+            "fetched_at": fetched_at,
+            "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "pool_size": len(papers),
+            "papers": [p.to_dict() for p in papers],
+        }
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+        _prune_cache(folder, date_key, path)
+    except Exception as exc:  # 缓存失败不能影响推荐本身
+        log.warning("每日推荐缓存写入失败：%s", exc)
+
+
+def _prune_cache(folder: Path, date_key: str, keep: Path) -> None:
+    cutoff = date.today() - timedelta(days=DAILY_CACHE_KEEP_DAYS)
+    for path in folder.glob("*.json"):
+        if path == keep:
+            continue
+        raw = path.name.split("_", 1)[0]
+        try:
+            day = date.fromisoformat(raw)
+        except ValueError:
+            continue
+        if raw == date_key or day < cutoff:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    for path in folder.glob("*.json.tmp"):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def _drop_day_cache(date_key: str) -> None:
+    folder = _cache_dir
+    if folder is None:
+        return
+    for path in folder.glob(f"{date_key}_*.json"):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+async def _fetch_pool() -> list[Paper]:
     tasks = [_arxiv_pool(b["cats"]) for b in DAILY_BUCKETS]
     tasks += [_openalex_pool(b["subfields"]) for b in DAILY_BUCKETS]
     settled = await asyncio.gather(*tasks, return_exceptions=True)
@@ -230,25 +345,85 @@ async def _pool(date_key: str) -> list[Paper]:
             merged.append(paper)
     if not merged:
         raise FriendlyError("推荐内容加载失败，请稍后重试。", True)
-
-    _day_date = date_key
-    _day_papers = merged
     return merged
+
+
+async def _load_pool(date_key: str) -> list[Paper]:
+    global _day_date, _day_papers, _day_fetched_at, _day_from_cache
+    cached = _read_day_cache(date_key)
+    if cached is not None:
+        papers, fetched_at = cached
+        _day_date, _day_papers = date_key, papers
+        _day_fetched_at = fetched_at
+        _day_from_cache = True
+        log.info("每日推荐使用当天缓存：%s（%d 篇）", date_key, len(papers))
+        return papers
+
+    papers = await _fetch_pool()
+    fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    _day_date, _day_papers = date_key, papers
+    _day_fetched_at = fetched_at
+    _day_from_cache = False
+    _write_day_cache(date_key, papers, fetched_at)
+    log.info("每日推荐已拉取：%s（%d 篇）", date_key, len(papers))
+    return papers
+
+
+async def _pool(date_key: str) -> list[Paper]:
+    """当天候选池：命中内存/磁盘缓存直接返回，否则合并并发请求只拉一次。"""
+    global _pool_task
+    if _day_date == date_key and _day_papers:
+        return _day_papers
+
+    loop = asyncio.get_running_loop()
+    task = _pool_task
+    if task is None or task.done() or task.get_loop() is not loop:
+        task = loop.create_task(_load_pool(date_key))
+        _pool_task = task
+    return await asyncio.shield(task)
+
+
+def _usable_queue(ranked: list[Paper]) -> list[Paper]:
+    """把候选截到约一百篇，并取 12 的整数倍，保证连续「换一批」不重叠。"""
+    capped = ranked[:DAILY_POOL_LIMIT]
+    if len(capped) <= DAILY_LIMIT:
+        return capped
+    whole = (len(capped) // DAILY_LIMIT) * DAILY_LIMIT
+    return capped[:whole]
 
 
 async def get_daily(round_index: int = 0) -> dict:
     now = datetime.now(timezone.utc)
-    date_key = to_date_key(now)
+    date_key = _today_key()
     pool = await _pool(date_key)
     # OpenAlex 偶尔把「在线优先」的出版日期写到未来一两年，这类条目会霸占首屏，
     # 推荐流只保留今天为止的内容（留 2 天容差）。
     fresh = [p for p in pool if not _is_future(p.published_at, now)]
     queue = fresh or pool
     ranked = rank_daily(queue, now, hash_seed(date_key), limit=len(queue))
+    ranked = _usable_queue(ranked)
     return {
         "papers": [p.to_dict() for p in daily_batch(ranked, round_index, DAILY_LIMIT)],
         "date": date_key,
-        "pool_size": len(queue),
+        "pool_size": len(ranked),
+        "fetched_at": _day_fetched_at if _day_date == date_key else "",
+        "from_cache": _day_from_cache if _day_date == date_key else False,
+        "error": None,
+    }
+
+
+async def prefetch_daily(force: bool = False) -> dict:
+    """后台预热当天推荐：已有当天缓存就直接复用，不再访问外部接口。"""
+    date_key = _today_key()
+    if force:
+        reset_cache()
+        _drop_day_cache(date_key)
+    pool = await _pool(date_key)
+    return {
+        "date": date_key,
+        "pool_size": len(pool),
+        "cached": _day_from_cache if _day_date == date_key else False,
+        "fetched_at": _day_fetched_at if _day_date == date_key else "",
         "error": None,
     }
 

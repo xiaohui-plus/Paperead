@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from paperead.scholar import daily
 from paperead.scholar.daily import (
@@ -113,3 +116,119 @@ def test_is_future_tolerance():
     assert not daily._is_future((NOW + timedelta(days=1)).isoformat(), NOW)
     assert not daily._is_future(None, NOW)
     assert not daily._is_future("garbage", NOW)
+
+@pytest.fixture()
+def daily_cache(tmp_path):
+    folder = tmp_path / "scholar_daily"
+    daily.configure_cache_dir(folder)
+    daily.reset_cache()
+    yield folder
+    daily.configure_cache_dir(None)
+    daily.reset_cache()
+
+
+def make_pool(count: int) -> list[Paper]:
+    return [make_paper(f"p{i}", hours_ago=i + 1) for i in range(count)]
+
+
+def test_prefetch_writes_timestamped_cache(daily_cache, monkeypatch):
+    calls = {"count": 0}
+
+    async def fake_fetch():
+        calls["count"] += 1
+        return make_pool(30)
+
+    monkeypatch.setattr(daily, "_fetch_pool", fake_fetch)
+    info = asyncio.run(daily.prefetch_daily())
+
+    assert info["cached"] is False
+    assert info["pool_size"] == 30
+    assert calls["count"] == 1
+
+    files = sorted(daily_cache.glob("*.json"))
+    assert len(files) == 1
+    assert files[0].name.startswith(f"{info['date']}_")
+    payload = json.loads(files[0].read_text(encoding="utf-8"))
+    assert payload["date"] == info["date"]
+    assert payload["fetched_at"]
+    assert payload["saved_at"]
+    assert len(payload["papers"]) == 30
+
+
+def test_same_day_reuses_cache_without_refetch(daily_cache, monkeypatch):
+    calls = {"count": 0}
+
+    async def fake_fetch():
+        calls["count"] += 1
+        return make_pool(30)
+
+    monkeypatch.setattr(daily, "_fetch_pool", fake_fetch)
+    first = asyncio.run(daily.prefetch_daily())
+    daily.reset_cache()
+    second = asyncio.run(daily.prefetch_daily())
+
+    assert first["cached"] is False
+    assert second["cached"] is True
+    assert second["fetched_at"] == first["fetched_at"]
+    assert calls["count"] == 1
+    assert len(list(daily_cache.glob("*.json"))) == 1
+
+
+def test_new_day_fetches_again(daily_cache, monkeypatch):
+    keys = iter(["2026-11-14", "2026-11-15"])
+    monkeypatch.setattr(daily, "_today_key", lambda: next(keys))
+    calls = {"count": 0}
+
+    async def fake_fetch():
+        calls["count"] += 1
+        return make_pool(20)
+
+    monkeypatch.setattr(daily, "_fetch_pool", fake_fetch)
+    first = asyncio.run(daily.prefetch_daily())
+    daily.reset_cache()
+    second = asyncio.run(daily.prefetch_daily())
+
+    assert first["date"] == "2026-11-14"
+    assert second["date"] == "2026-11-15"
+    assert first["cached"] is False and second["cached"] is False
+    assert calls["count"] == 2
+    assert len(list(daily_cache.glob("*.json"))) == 2
+
+
+def test_corrupt_cache_is_ignored(daily_cache, monkeypatch):
+    daily.reset_cache()
+    daily_cache.mkdir(parents=True, exist_ok=True)
+    date_key = daily._today_key()
+    (daily_cache / f"{date_key}_000000.json").write_text("not json", encoding="utf-8")
+    calls = {"count": 0}
+
+    async def fake_fetch():
+        calls["count"] += 1
+        return make_pool(16)
+
+    monkeypatch.setattr(daily, "_fetch_pool", fake_fetch)
+    info = asyncio.run(daily.prefetch_daily())
+
+    assert info["cached"] is False
+    assert calls["count"] == 1
+    files = list(daily_cache.glob("*.json"))
+    assert len(files) == 1
+    assert json.loads(files[0].read_text(encoding="utf-8"))["pool_size"] == 16
+
+
+def test_daily_rounds_rotate_within_cached_pool(monkeypatch):
+    daily.reset_cache()
+
+    async def fake_pool(_date_key):
+        return make_pool(120)
+
+    monkeypatch.setattr(daily, "_pool", fake_pool)
+    seen: list[str] = []
+    for round_index in range(10):
+        result = asyncio.run(daily.get_daily(round_index))
+        ids = [p["id"] for p in result["papers"]]
+        assert len(ids) == 12
+        assert result["pool_size"] == 120
+        seen.extend(ids)
+
+    assert len(seen) == len(set(seen)) == 120

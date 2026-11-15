@@ -8,4 +8,8 @@
     CreateShortcut "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe" "" "$INSTDIR\${MAINBINARYNAME}.exe" 0
     !insertmacro SetLnkAppUserModelId "$DESKTOP\${PRODUCTNAME}.lnk"
   ${EndIf}
+
+  ; 覆盖升级后强制刷新 Windows 图标缓存，
+  ; 避免桌面/开始菜单快捷方式仍显示安装前的旧图标（如系统默认文件图标）。
+  ExecWait '"$SYSDIR\ie4uinit.exe" -show'
 !macroend

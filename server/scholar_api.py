@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from paperead.scholar import search as scholar_search
 from paperead.scholar.cite import STYLE_KEYS, build_bibtex, build_ris, format_citation
-from paperead.scholar.daily import get_daily
+from paperead.scholar.daily import get_daily, prefetch_daily
 from paperead.scholar.http import FriendlyError
 from paperead.scholar.models import paper_from_dict
 from paperead.scholar.search import SearchInput
@@ -40,9 +40,9 @@ class ExportIn(BaseModel):
 
 
 def _today() -> str:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return datetime.now().strftime("%Y-%m-%d")
 
 
 async def import_paper(
@@ -210,6 +210,29 @@ def build_router(
                 "papers": [],
                 "date": _today(),
                 "pool_size": 0,
+                "error": "推荐内容加载失败，请稍后重试。",
+            }
+
+    @router.post("/daily/prefetch")
+    async def daily_prefetch() -> dict:
+        """软件启动时调用：后台确认/拉取当天候选池，同一天只拉一次。"""
+        try:
+            return await prefetch_daily()
+        except FriendlyError as exc:
+            return {
+                "date": _today(),
+                "pool_size": 0,
+                "cached": False,
+                "fetched_at": "",
+                "error": exc.message,
+            }
+        except Exception as exc:
+            log.exception("每日推荐预热失败：%s", exc)
+            return {
+                "date": _today(),
+                "pool_size": 0,
+                "cached": False,
+                "fetched_at": "",
                 "error": "推荐内容加载失败，请稍后重试。",
             }
 

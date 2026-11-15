@@ -74,6 +74,10 @@ from paperead.tutor.citations import (
 from paperead.tutor.lineage import LINEAGE_VERSION, build_lineage
 from paperead.tutor.provenance import enrich as enrich_provenance, ref_only as ref_only_provenance
 from paperead.tutor.references import Reference, parse as parse_references
+from paperead.scholar.daily import (
+    configure_cache_dir as configure_scholar_daily_cache,
+    prefetch_daily as prefetch_scholar_daily,
+)
 from paperead.translate import (
     build_glossary,
     quality_ok,
@@ -119,6 +123,7 @@ WEB_DIST = web_dist()
 # 上次迁移成功后，旧目录等这次启动（尚未打开 SQLite/PDF）再清理
 cleanup_previous_data_dir()
 DATA_DIR = ensure_data_dir(default_data_dir())
+configure_scholar_daily_cache(DATA_DIR / "cache" / "scholar_daily")
 PORT = int(env("PAPEREAD_PORT", "8010"))
 TOKEN = env("PAPEREAD_TOKEN", "")
 ORIGINS = allowed_origins(PORT)
@@ -4252,10 +4257,31 @@ def _setup_logging() -> None:
     )
 
 
+def _schedule_scholar_daily_prefetch() -> None:
+    """服务一启动就在后台确认当天推荐，用户打开检索页时直接命中。"""
+    if env("PAPEREAD_SCHOLAR_PREFETCH", "1") == "0":
+        return
+    asyncio.create_task(_warm_scholar_daily())
+
+
+async def _warm_scholar_daily() -> None:
+    try:
+        info = await prefetch_scholar_daily()
+        log.info(
+            "每日推荐预热完成：%s（%d 篇，%s）",
+            info.get("date"),
+            info.get("pool_size") or 0,
+            "命中当天缓存" if info.get("cached") else "已拉取",
+        )
+    except Exception as exc:
+        log.warning("每日推荐预热失败：%s", exc)
+
+
 def main() -> None:
     import uvicorn
 
     _setup_logging()
+    app.add_event_handler("startup", _schedule_scholar_daily_prefetch)
     host = bind_host()
     log.info(
         "Paperead %s 启动：http://%s:%d（数据：%s）",

@@ -9,6 +9,7 @@ import { ResearchShell } from './research/ResearchShell'
 import { ResearchHome } from './research/ResearchHome'
 import { ProjectPage } from './research/ProjectPage'
 import type { ProjectKind } from './lib/researchApi'
+import { prefetchDaily } from './lib/scholar'
 import { hasMobileServer, isMobileShell, loadOfflineMode } from './lib/mobile'
 
 /**
@@ -74,6 +75,11 @@ export default function App() {
     }
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
+  }, [])
+
+  useEffect(() => {
+    if (isMobileShell() && !hasMobileServer()) return
+    prefetchDaily().catch(() => undefined)
   }, [])
 
   // 站内页面（文献库/检索/研究/综述/项目）在窄屏取消 120% 缩放，阅读页保持原样。

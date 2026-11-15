@@ -119,6 +119,35 @@ def test_daily_passthrough(client, monkeypatch):
     assert body["papers"][0]["title"] == "Graph Networks"
 
 
+def test_daily_prefetch_passthrough(client, monkeypatch):
+    async def fake_prefetch(force=False):
+        return {
+            "date": "2026-11-08",
+            "pool_size": 120,
+            "cached": True,
+            "fetched_at": "2026-11-08T08:00:00+00:00",
+            "error": None,
+        }
+
+    monkeypatch.setattr(scholar_api, "prefetch_daily", fake_prefetch)
+    body = client.post("/api/scholar/daily/prefetch").json()
+    assert body["date"] == "2026-11-08"
+    assert body["pool_size"] == 120
+    assert body["cached"] is True
+    assert body["fetched_at"].startswith("2026-11-08T08:00:00")
+
+
+def test_daily_prefetch_returns_friendly_error(client, monkeypatch):
+    async def boom(force=False):
+        raise FriendlyError("网络连接失败，请检查网络后重试。", True)
+
+    monkeypatch.setattr(scholar_api, "prefetch_daily", boom)
+    body = client.post("/api/scholar/daily/prefetch").json()
+    assert body["pool_size"] == 0
+    assert body["cached"] is False
+    assert "网络" in body["error"]
+
+
 def test_paper_404(client, monkeypatch):
     async def none(_id):
         return None

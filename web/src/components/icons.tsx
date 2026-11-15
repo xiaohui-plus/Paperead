@@ -1,5 +1,7 @@
+import brandIcon from '../assets/brand-icon.svg'
+
 export function BrandMark() {
-  return <img className="brand-mark" src="/favicon.svg" alt="Paperead" />
+  return <img className="brand-mark" src={brandIcon} alt="Paperead" />
 }
 
 export function IconFolder() {

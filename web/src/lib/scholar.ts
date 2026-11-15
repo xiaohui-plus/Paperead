@@ -54,6 +54,16 @@ export interface DailyResponse {
   papers: ScholarPaper[]
   date: string
   pool_size: number
+  fetched_at?: string
+  from_cache?: boolean
+  error: string | null
+}
+
+export interface DailyPrefetch {
+  date: string
+  pool_size: number
+  cached: boolean
+  fetched_at: string
   error: string | null
 }
 
@@ -149,6 +159,11 @@ export function getScholarSources(): Promise<{ disabled: Partial<Record<ScholarS
 
 export function getDaily(round: number): Promise<DailyResponse> {
   return jsonFetch<DailyResponse>(`/api/scholar/daily?round=${round}`)
+}
+
+/** 应用启动时后台确认当天推荐：同一天已拉取过则直接命中本地缓存。 */
+export function prefetchDaily(): Promise<DailyPrefetch> {
+  return postJson<DailyPrefetch>('/api/scholar/daily/prefetch', {})
 }
 
 export function getScholarPaper(id: string): Promise<ScholarPaper> {
