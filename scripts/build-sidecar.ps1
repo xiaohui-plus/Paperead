@@ -35,3 +35,6 @@ $size = [math]::Round(((Get-ChildItem (Split-Path $exe) -Recurse -File | Measure
 Write-Host "OK: $exe ($size MB)"
 
 & (Join-Path $PSScriptRoot "stage-sidecar.ps1")
+# 打包完必须真的启动一次：0.2.14 的启动钩子用了新版 FastAPI 已移除的
+# app.add_event_handler，只跑单测发现不了，安装包发出去后 sidecar 直接崩。
+& (Join-Path $PSScriptRoot "smoke-sidecar.ps1")

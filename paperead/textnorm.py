@@ -42,6 +42,61 @@ def keep_space_between(left: str, right: str) -> bool:
     return not (is_cjk(left[-1]) and is_cjk(right[0]))
 
 
+# ── 目录引导符（dot leader）────────────────────────────────────────────
+# 目录页用一串点把标题和页码连起来。PyMuPDF 常把每个点拆成独立 span，
+# 版面重排后按字距补空格，就成了 ". . . . . . . ."；这段文本再被送去
+# 翻译时，模型会原样复制点线，阅读页就出现大片「原点」。
+# 只认 4 个以上（允许点之间夹空格）的连续点，正文里的省略号 "..." 与 "…"
+# 不受影响。
+_DOT_CHARS = ".．﹒·⋅•"
+_DOT_LEADER_RE = re.compile(r"(?:[ \t]*[.．﹒·⋅•]){4,}|…{2,}")
+_SPACE_RUN_RE = re.compile(r"[ \t]{2,}")
+_DOT_ONLY_CORE_RE = re.compile(r"[ \t\d.．﹒·⋅•\-–—_()[\]{}]")
+_DOT_CHAR_RE = re.compile(f"[{re.escape(_DOT_CHARS)}]")
+# 引导符之后若只剩页码（可带括号/连字符），说明它确实是目录条目
+_DOT_TAIL_RE = re.compile(r"[\s\d\-–—()\[\]{}]{0,8}")
+# 引导符之后紧跟的页码：目录条目最常见的形态「标题 . . . . 17」
+_DOT_PAGE_RE = re.compile(r"\s*\d{1,3}(?!\d)")
+
+
+def has_dot_leader(text: str) -> bool:
+    """文本里是否出现目录式点线引导符。"""
+    return bool(text) and _DOT_LEADER_RE.search(text) is not None
+
+
+def strip_dot_leaders(text: str) -> str:
+    """去掉目录条目的点线引导符，保留标题文字与页码。"""
+    if not text:
+        return text
+    total = len(text)
+
+    def repl(m: re.Match) -> str:
+        span = m.group(0)
+        tail = text[m.end():]
+        # 目录引导符的判据：后面紧跟页码、后面只剩页码，或在文本里占比很大。
+        # 长句子中间零星出现的 ". . . ." 更像数学省略号（\ldots），保留原样。
+        if (
+            _DOT_TAIL_RE.fullmatch(tail)
+            or _DOT_PAGE_RE.match(tail)
+            or len(span) / total >= 0.25
+        ):
+            return " "
+        return span
+
+    out = _DOT_LEADER_RE.sub(repl, text)
+    return _SPACE_RUN_RE.sub(" ", out).strip()
+
+
+def is_dot_leader_only(text: str) -> bool:
+    """整段是否只有点线（可能夹页码/括号），没有任何可读正文。"""
+    t = (text or "").strip()
+    if not t:
+        return True
+    if len(_DOT_CHAR_RE.findall(t)) < 4:
+        return False
+    return len(_DOT_ONLY_CORE_RE.sub("", t)) <= 2
+
+
 def squeeze_cjk_spaces(text: str) -> tuple[str, list[int]]:
     """删除 CJK 之间多余的空白。
 

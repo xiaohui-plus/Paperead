@@ -311,13 +311,9 @@ def build_router(
     router = APIRouter(prefix="/api/research", tags=["research"])
     pump = _AgentEventPump(store)
 
-    def reconcile_sessions() -> None:
-        """进程重启后把卡在 running 的会话标回 idle，避免一直显示在运行。"""
-        for session in store.list_all_sessions():
-            if session.get("status") == "running":
-                store.update_session(str(session["id"]), status="idle")
-
-    router.add_event_handler("startup", reconcile_sessions)
+    # 进程重启后把卡在 running 的会话标回 idle，由 server.main 的 lifespan
+    # 统一处理：不要在 APIRouter 上注册 startup 事件，Starlette 的事件 API
+    # 一旦移除，sidecar 会在导入阶段就 AttributeError。
 
     def _local_only(request: Request) -> None:
         """文件夹浏览只对本机窗口开放，避免局域网设备读取电脑文件。"""

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "paperead"
-version = "0.2.14"
+version = "0.2.15"
 description = "学术论文 PDF 版面重排 + 英中逐段翻译（双栏、图表、公式）"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,7 +17,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 server = [
-    "fastapi>=0.110",
+    # 上限是构建 sidecar 验证过的范围：新版 FastAPI 移除了 app.add_event_handler
+    # 一类旧 API，会让打包后的 sidecar 启动即崩。升级前先跑 smoke-sidecar.ps1。
+    "fastapi>=0.110,<0.163",
     "uvicorn>=0.29",
     "httpx>=0.27",
     "python-multipart>=0.0.9",

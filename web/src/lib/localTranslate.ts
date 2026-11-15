@@ -7,24 +7,25 @@
 import type { Block, Paper } from '../types'
 import { langLabel } from './translation'
 import { streamLocalChat, type LocalLlmConfig } from './localLlm'
+import { isDotLeaderOnly, stripDotLeaders } from './text'
 
 const SYSTEM = (target: string) =>
   `你是学术论文翻译专家，负责把英文学术论文翻译成${target}。要求：
 1. 只输出译文正文，不要任何解释、前言、引号或 Markdown 代码块；
 2. 学术书面语，忠实、准确、通顺，不增删内容，不概括；
-3. 保持原文的段落、编号、列表结构；
+3. 保持原文的段落、编号、列表结构；目录条目只译标题文字，不要输出点线引导符（如 . . . . .）或目录页码；
 4. 术语表未覆盖的专有名词保留英文原名。`
 
 function buildPrompt(block: Block, target: string): string {
   const parts: string[] = []
   if (block.section) parts.push(`【当前章节】${block.section}`)
-  parts.push(`【待翻译段落】\n${block.text}`)
+  parts.push(`【待翻译段落】\n${stripDotLeaders(block.text)}`)
   parts.push(`请只输出这一段的${target}译文。`)
   return parts.join('\n\n')
 }
 
 function clean(text: string): string {
-  return text.replace(/^```[a-zA-Z]*\s*|\s*```$/g, '').trim()
+  return stripDotLeaders(text.replace(/^```[a-zA-Z]*\s*|\s*```$/g, '').trim())
 }
 
 async function pool<T>(
@@ -71,6 +72,8 @@ export async function translatePagesLocal(options: LocalTranslateOptions): Promi
         // 图注/表注也要翻：历史论文的 caption 块 translatable 仍是 false
         && (block.translatable || block.kind === 'caption')
         && block.text.trim()
+        // 目录页残留的纯点线块没有可译内容，送模型只会被原样复制
+        && !isDotLeaderOnly(block.text)
         && !block.translated,
     )
     if (!blocks.length) continue

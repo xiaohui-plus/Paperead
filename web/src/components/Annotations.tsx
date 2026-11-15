@@ -19,6 +19,7 @@ import katex from 'katex'
 import { mediaUrl } from '../lib/mobile'
 import { lastAnnotationColor, rememberAnnotationColor } from '../lib/annotationPrefs'
 import { CITE_RE, hasCitation } from '../lib/citationMark'
+import { stripDotLeaders } from '../lib/text'
 import { IconComment, IconHighlighter } from './icons'
 
 /** 自动重点的中文名，正文 tooltip 和「阅读重点」面板共用。 */
@@ -200,7 +201,7 @@ interface RichProps {
 
 /** 正文段落：把引用编号、用户高亮、自动重点、术语标进同一段文本。 */
 export function RichText({
-  text,
+  text: rawText,
   source,
   annotations,
   highlights = [],
@@ -212,6 +213,10 @@ export function RichText({
   onAnnotationOpen,
   onHighlightOpen,
 }: RichProps) {
+  // 历史 blocks.json 的目录条目里残留点线引导符；行内公式按字符偏移渲染，
+  // 只有没有公式时才能安全裁剪文本。
+  const text =
+    source === 'zh' || inlineMath.length === 0 ? stripDotLeaders(rawText) : rawText
   const formulas = inlineMath
     .filter((m) => (m.latex || m.image_path) && m.start >= 0 && m.end > m.start)
     .sort((a, b) => a.start - b.start)

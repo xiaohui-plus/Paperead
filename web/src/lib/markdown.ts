@@ -1,4 +1,5 @@
 import type { Block, Paper } from '../types'
+import { stripDotLeaders } from './text'
 
 /** 极简清洗：去掉 script / 事件属性 / javascript 协议。表格来自本机解析器，风险低但不应裸用。 */
 export function sanitizeTableHtml(html: string): string {
@@ -11,10 +12,15 @@ export function sanitizeTableHtml(html: string): string {
 
 function blockToMarkdown(b: Block): string {
   switch (b.kind) {
-    case 'heading':
-      return `\n${'#'.repeat(Math.min(3, Math.max(1, b.level)))} ${b.translated || b.text}\n`
-    case 'para':
-      return `${b.translated || b.text}\n\n> ${b.text}\n`
+    case 'heading': {
+      const text = stripDotLeaders(b.translated || b.text)
+      return text ? `\n${'#'.repeat(Math.min(3, Math.max(1, b.level)))} ${text}\n` : ''
+    }
+    case 'para': {
+      const text = stripDotLeaders(b.translated || b.text)
+      if (!text) return ''
+      return `${text}\n\n> ${stripDotLeaders(b.text)}\n`
+    }
     case 'equation':
       return b.image_path ? `\n![equation](${b.image_path})\n` : `\n\`\`\`\n${b.text}\n\`\`\`\n`
     case 'figure':

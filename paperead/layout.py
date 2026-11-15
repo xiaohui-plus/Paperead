@@ -28,7 +28,13 @@ import pymupdf.table as _pymupdf_table
 
 from .inline_math import MATH_FONTS as _INLINE_MATH_FONTS
 from .inline_math import build_inline_math, spans_with_offsets
-from .textnorm import keep_space_between, squeeze_cjk_spaces
+from .textnorm import (
+    has_dot_leader,
+    is_dot_leader_only,
+    keep_space_between,
+    squeeze_cjk_spaces,
+    strip_dot_leaders,
+)
 
 
 def _force_accurate_table_bboxes() -> bool:
@@ -1502,7 +1508,12 @@ def _attach_equation_numbers(blocks: list[Block], doc: pymupdf.Document) -> list
 
 
 def _drop_noise(blocks: list[Block]) -> list[Block]:
-    """丢弃页码、孤立标点、纯符号等碎片。"""
+    """丢弃页码、孤立标点、纯符号等碎片。
+
+    目录页的引导符点线（`. . . . . . 17`）也在这里处理：整段只有点线的块直接
+    丢掉，标题后面拖点线的块剥掉点线、只留标题与页码。否则这些点线会原样
+    进入翻译，模型再复制一遍，阅读页就会出现整屏原点。
+    """
     out = []
     for b in blocks:
         t = b.text.strip()
@@ -1512,6 +1523,16 @@ def _drop_noise(blocks: list[Block]) -> list[Block]:
             continue
         if re.fullmatch(r"[\d\s\.\-–—]+", t):
             continue
+        if is_dot_leader_only(t):
+            continue
+        if b.kind not in ("equation", "figure", "table") and has_dot_leader(t):
+            cleaned = strip_dot_leaders(t)
+            if not cleaned or is_dot_leader_only(cleaned):
+                continue
+            if cleaned != b.text:
+                b.text = cleaned
+                # 文本被裁剪过，行内公式的字符偏移已失效，清掉避免错位渲染
+                b.inline_math = []
 
         out.append(b)
     for i, b in enumerate(out):

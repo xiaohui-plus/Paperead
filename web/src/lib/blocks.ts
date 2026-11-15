@@ -1,4 +1,5 @@
 import type { Block } from '../types'
+import { isDotLeaderOnly } from './text'
 
 export interface RenderBlock {
   block: Block
@@ -60,6 +61,8 @@ export function prepareBlocks(blocks: Block[]): RenderBlock[] {
   const out: RenderBlock[] = []
   for (const b of blocks) {
     if (skip.has(b.id)) continue
+    // 目录页残留的纯点线块没有任何可读内容，整块不渲染（含未翻译与已翻译两种情况）
+    if (isDotLeaderOnly(b.text) && isDotLeaderOnly(b.translated ?? '')) continue
     if (b.kind === 'caption' && usedCaption.has(b.id)) continue
     if (b.kind === 'figure' || b.kind === 'table') {
       const cap = paired.get(b.id)
@@ -78,7 +81,9 @@ export function prepareBlocks(blocks: Block[]): RenderBlock[] {
 
 /** 目录：一级 + 二级标题 */
 export function outlineOf(blocks: Block[]) {
-  return blocks.filter((b) => b.kind === 'heading' && b.level <= 2)
+  return blocks.filter(
+    (b) => b.kind === 'heading' && b.level <= 2 && !isDotLeaderOnly(b.text),
+  )
 }
 
 export function isFlowBlock(b: Block): boolean {

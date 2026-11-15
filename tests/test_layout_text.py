@@ -12,6 +12,7 @@ import pymupdf
 from paperead.layout import (
     Block,
     Line,
+    _drop_noise,
     _join_text,
     _merge_across_pages,
     _merge_visual_rows,
@@ -19,7 +20,7 @@ from paperead.layout import (
     _split_row_runs,
     parse_pdf,
 )
-from paperead.textnorm import squeeze_cjk_spaces
+from paperead.textnorm import is_dot_leader_only, squeeze_cjk_spaces, strip_dot_leaders
 
 
 def _pdf(path, pages):
@@ -170,3 +171,32 @@ def test_merged_visual_row_keeps_column_after_gutter_split():
     rows = _merge_visual_rows(row, {1: 300.0})
     assert len(rows) == 2
     assert sorted(r.col for r in rows) == [0, 1]
+
+# ── 目录点线引导符 ─────────────────────────────────────────────────────
+def test_dot_leaders_are_stripped_from_toc_entries():
+    # PDF 抽出来的点线常被按字距补成 ". . . . ."，清理后标题与页码要保留
+    assert (
+        strip_dot_leaders("5.2.2 Joint Multimodal Generation . . . . . 20")
+        == "5.2.2 Joint Multimodal Generation 20"
+    )
+    assert strip_dot_leaders("A.1 Evaluation tasks....17") == "A.1 Evaluation tasks 17"
+    assert strip_dot_leaders("S1 Docking protocols…… 12") == "S1 Docking protocols 12"
+    # 正文里的省略号是标点，不能被当成引导符删掉
+    assert strip_dot_leaders("wait... what?") == "wait... what?"
+
+
+def test_dot_leader_only_block_is_detected():
+    assert is_dot_leader_only(". . . . . . . . . . . .")
+    assert is_dot_leader_only("• . . . . . . .")
+    assert not is_dot_leader_only("5.2.2 Joint Multimodal Generation 20")
+
+
+def test_drop_noise_removes_dot_leader_blocks_and_keeps_titles():
+    blocks = [
+        Block("b0", 0, 1, "para", ". . . . . . . . . . . .", (0, 0, 1, 1)),
+        Block("b1", 1, 1, "heading", "5.2.2 Joint Multimodal Generation . . . . . 20", (0, 0, 1, 1)),
+        Block("b2", 2, 1, "para", "Body paragraph.", (0, 0, 1, 1)),
+    ]
+    out = _drop_noise(blocks)
+    assert [b.text for b in out] == ["5.2.2 Joint Multimodal Generation 20", "Body paragraph."]
+    assert [b.id for b in out] == ["b0000", "b0001"]

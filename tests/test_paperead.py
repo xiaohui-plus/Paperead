@@ -18,7 +18,7 @@ from paperead.layout import (
     _table_crop_rect,
     _table_swallows_page,
 )
-from paperead.translate import protect, restore
+from paperead.translate import _is_translatable, protect, restore
 
 
 # ── span 拼接 ──────────────────────────────────────────────────────────
@@ -156,6 +156,14 @@ def test_protect_keeps_gene_symbol():
     masked, pieces = protect("OsDREB1A is induced by drought.")
     assert "OsDREB1A" not in masked
     assert restore(masked, pieces) == "OsDREB1A is induced by drought."
+
+
+def test_is_translatable_rejects_dot_leader_block():
+    # 纯点线的目录块不送翻译，否则模型会把点线原样复制一遍
+    assert not _is_translatable(". . . . . . . . . . . .")
+    assert not _is_translatable("• . . . . . . . 17")
+    # 标题本体的目录条目仍然翻译（点线先被剥掉，再按正文占比判断）
+    assert _is_translatable("5.2.2 Joint Multimodal Generation . . . . . 20")
 
 
 # ── 图注续行合并 ───────────────────────────────────────────────────────

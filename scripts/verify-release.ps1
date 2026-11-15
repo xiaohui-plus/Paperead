@@ -79,6 +79,19 @@ if (Test-Path $sums) {
 & (Join-Path $root ".venv-build\Scripts\python.exe") -m pytest -q
 if ($LASTEXITCODE -ne 0) { $errors += "pytest 失败" }
 
+# 校验已构建的 sidecar 能真正启动（health/首页/上传解析）。单测不调用 main()，
+# 启动期 API 不兼容只会在用户端暴露（0.2.14 sidecar 启动即 AttributeError）。
+$sidecarExe = Join-Path $root "dist-sidecar\paperead-server\paperead-server.exe"
+if (Test-Path $sidecarExe) {
+    try {
+        & (Join-Path $PSScriptRoot "smoke-sidecar.ps1")
+    } catch {
+        $errors += "sidecar 启动冒烟失败：$($_.Exception.Message)"
+    }
+} else {
+    $errors += "缺少 sidecar 产物：$sidecarExe"
+}
+
 if ($errors.Count -gt 0) {
     $errors | ForEach-Object { Write-Host "FAIL: $_" }
     exit 1

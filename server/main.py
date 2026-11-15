@@ -25,6 +25,7 @@ import re
 import socket
 import time
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
@@ -79,11 +80,14 @@ from paperead.scholar.daily import (
     prefetch_daily as prefetch_scholar_daily,
 )
 from paperead.translate import (
+    _is_translatable,
     build_glossary,
     quality_ok,
     translate_block,
     translate_paper,
 )
+from server.feedback_api import API_BASE as FEEDBACK_API_BASE
+from server.feedback_api import build_feedback_router
 from server.llm_proxy import build_llm_proxy_router
 from server.onboarding import OnboardingStore, build_onboarding_router
 from server.store import (
@@ -152,7 +156,33 @@ def _has_user_data() -> bool:
     )
 
 
-app = FastAPI(title="Paperead", version=__version__)
+# Windows 注册表里 .svg 的 Content Type 可能被第三方软件写成 image/svg，
+# 浏览器对 <img> 的 SVG 严格校验 MIME，会显示成破图占位。强制注册标准类型。
+mimetypes.add_type("image/svg+xml", ".svg")
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """进程启动钩子。
+
+    必须用 lifespan，而不是 `app.add_event_handler`：后者在较新的 FastAPI
+    里已经从 FastAPI 实例上移除（0.2.14 打包后 sidecar 启动即
+    `AttributeError: 'FastAPI' object has no attribute 'add_event_handler'`）。
+    lifespan 是官方稳定入口，不随 Starlette 事件 API 的增删而失效。
+    """
+    _schedule_scholar_daily_prefetch()
+    # 进程重启后把卡在 running 的研究会话标回 idle，避免界面一直显示在运行。
+    # 原来挂在研究路由的 startup 事件上，同样依赖 Starlette 的事件 API，
+    # 这里一并收进 lifespan。
+    try:
+        for session in research_store.list_all_sessions():
+            if session.get("status") == "running":
+                research_store.update_session(str(session["id"]), status="idle")
+    except Exception as exc:
+        log.warning("恢复研究会话状态失败：%s", exc)
+    yield
+
+
+app = FastAPI(title="Paperead", version=__version__, lifespan=_lifespan)
 
 # 安装包不带 pandoc：桌面版首次启动在后台下载一次，之后离线可用。
 # 设 PAPEREAD_PANDOC_AUTODOWNLOAD=0 可关闭，测试和开发环境默认不下载。
@@ -176,6 +206,13 @@ app.include_router(toolchain_router)
 app.include_router(build_onboarding_router(onboarding_store, _has_user_data))
 app.include_router(build_scholaread_router(store, _schedule_parse))
 app.include_router(build_sync_router(store, DATA_DIR))
+# 问题反馈：截图走仓库内容接口，Issue 走 /repos/{owner}/issues。
+app.include_router(
+    build_feedback_router(
+        DATA_DIR,
+        api_base=env("PAPEREAD_FEEDBACK_API", FEEDBACK_API_BASE),
+    )
+)
 
 # 研究 agent 的工具接口：本机调用，自带 token，不走 /api 的 cookie 鉴权。
 app.include_router(
@@ -3211,6 +3248,9 @@ async def translate_stream(paper_id: str, req: TranslateReq) -> StreamingRespons
                     # 否则图表栏的 captionZh 永远为空。
                     and (b.get("translatable") or b.get("kind") == "caption")
                     and (b.get("text") or "").strip()
+                    # 流式接口直接调 translate_block，不会走 translate_paper 的
+                    # 内部过滤；目录点线/公式碎片必须在这里挡住。
+                    and _is_translatable(b.get("text") or "")
                     and not b.get("translated")
                 ]
                 if not targets:
@@ -4281,7 +4321,7 @@ def main() -> None:
     import uvicorn
 
     _setup_logging()
-    app.add_event_handler("startup", _schedule_scholar_daily_prefetch)
+
     host = bind_host()
     log.info(
         "Paperead %s 启动：http://%s:%d（数据：%s）",

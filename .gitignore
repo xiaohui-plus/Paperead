@@ -22,6 +22,9 @@ venv/
 # 环境
 .env
 
+# 问题反馈内置令牌：只在构建安装包时打进 sidecar，不进 git
+server/resources/gitee-feedback-token.txt
+
 # 测试
 .pytest_cache/
 pytest-of-*/

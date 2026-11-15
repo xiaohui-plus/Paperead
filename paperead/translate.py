@@ -26,6 +26,7 @@ from typing import Awaitable, Callable, Iterable
 
 from .layout import Block
 from .llm import active_model, chat as llm_chat
+from .textnorm import has_dot_leader, is_dot_leader_only, strip_dot_leaders
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +193,8 @@ def _system_prompt(target_name: str) -> str:
         f"你是学术论文翻译专家，负责把英文学术论文翻译成{target_name}。要求：\n"
         "1. 只输出译文正文，不要任何解释、前言、引号或 Markdown 代码块；\n"
         "2. 学术书面语，忠实、准确、通顺，不增删内容，不概括；\n"
-        "3. 保持原文的段落、编号、列表结构；\n"
+        "3. 保持原文的段落、编号、列表结构；目录条目只译标题文字，"
+        "不要输出点线引导符（如 . . . . .）或目录页码；\n"
         "4. 占位符 ⟦P0⟧ ⟦P1⟧ 必须原样保留，不要翻译、不要改动；\n"
         "5. 严格遵循给定术语表；术语表未覆盖的专有名词保留英文原名。"
     )
@@ -231,7 +233,10 @@ async def translate_block(
     target_name: str = "中文",
 ) -> str:
     """翻译单个块。返回译文（失败抛异常，由上层重试或降级）。"""
-    masked, pieces = protect(block.text)
+    # 历史论文的 blocks.json 里仍留着目录点线：先去掉再送模型，
+    # 否则提示词再约束也没用——模型看到什么就照抄什么。
+    source = strip_dot_leaders(block.text) or block.text
+    masked, pieces = protect(source)
     prompt = _build_prompt(
         masked, glossary or {}, block.section, prev_tail, next_head, target_name
     )
@@ -249,7 +254,7 @@ async def translate_block(
     out = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", out.strip()).strip()
     if not out:
         raise RuntimeError("模型返回空译文")
-    return restore(out, pieces)
+    return restore(strip_dot_leaders(out), pieces)
 
 
 def quality_ok(
@@ -283,13 +288,18 @@ def quality_ok(
 
 
 def _is_translatable(text: str) -> bool:
-    """过滤残留的公式碎片：英文字母占比过低的块不送翻译。
+    """过滤残留的公式碎片与目录点线：没有足够正文内容的块不送翻译。
 
     版面解析后仍可能有零散的公式片段（如 `1 + min(dx, dy) + (d/2)[(d/2)`）被
-    当成段落，送给模型只会得到胡言乱语。
+    当成段落，送给模型只会得到胡言乱语；目录页的引导符点线块同理——模型只会
+    把点线原样复制一遍。判据在剥掉点线之后再看字母占比，避免把真正的目录
+    标题误杀。
     """
-    letters = sum(1 for ch in text if ch.isascii() and ch.isalpha())
-    return letters / max(len(text), 1) > 0.5
+    cleaned = strip_dot_leaders(text)
+    if not cleaned.strip() or is_dot_leader_only(cleaned):
+        return False
+    letters = sum(1 for ch in cleaned if ch.isascii() and ch.isalpha())
+    return letters / max(len(cleaned), 1) > 0.5
 
 
 async def translate_paper(

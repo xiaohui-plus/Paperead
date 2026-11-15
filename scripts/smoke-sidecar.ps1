@@ -8,7 +8,11 @@ $listener.Start()
 $port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
 $listener.Stop()
 
-$data = Join-Path $env:TEMP ("paperead-smoke-" + [guid]::NewGuid().ToString("N"))
+# 系统 %TEMP% 在部分机器上不可写（杀软/权限），冒烟数据固定放项目内 .tmp，
+# 不再依赖调用方预先设置 TEMP。
+$tmp = Join-Path $root ".tmp"
+New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+$data = Join-Path $tmp ("paperead-smoke-" + [guid]::NewGuid().ToString("N"))
 $token = "smoke-token"
 New-Item -ItemType Directory -Force -Path $data | Out-Null
 
