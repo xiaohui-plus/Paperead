@@ -3,7 +3,7 @@
 > 日期：2026-11-08  
 > 运行时契约：`agent/node_modules/@deepseek-ai/*`（`0.1.0-rc.6`，以其中的 `.d.ts` 为准）  
 > 语义参考：`F:\Agent\dsh-ref-rc7`（GitHub `dsh-v0.1.0-rc.7`，commit `99f6f02`）  
-> 上游文档：[DSH 接入完整方案](../../docs/superpowers/specs/2026-11-08-dsh-integration-solution.md)
+> 上游文档：已归档清理（原 `docs/superpowers/specs/2026-11-08-dsh-integration-solution.md`）
 
 这份笔记只记录**我们依赖的接口**、**不能碰的内部实现**和**已经踩到的坑**。不追求覆盖 DSH 全貌。
 

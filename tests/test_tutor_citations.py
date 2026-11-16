@@ -302,6 +302,28 @@ def test_resolve_does_not_reuse_one_reference_for_distinct_markers():
     assert out[0]["ref"]["index"] == 1
 
 
+def test_resolve_expands_numeric_group_into_distinct_refs():
+    refs = [
+        make_ref(index=3, raw="[3] Alpha, A. 2020. First title of the group."),
+        make_ref(index=4, raw="[4] Beta, B. 2020. Second title of the group."),
+        make_ref(index=5, raw="[5] Gamma, C. 2020. Third title of the group."),
+    ]
+    cites = find("Prior work [3, 4, 5] agrees.")
+    out = resolve(cites, refs)
+    # 一处标记里的每个编号都要单独落条，不能被「同一 marker 去重」吞掉
+    assert [item["ref"]["index"] for item in out] == [3, 4, 5]
+    assert [item["marker"] for item in out] == ["[3]", "[4]", "[5]"]
+
+
+def test_resolve_keeps_paren_style_for_grouped_numbers():
+    refs = [
+        make_ref(index=1, raw="[1] Alpha, A. 2020. First title of the group."),
+        make_ref(index=2, raw="[2] Beta, B. 2020. Second title of the group."),
+    ]
+    out = resolve(find_paren_numeric("As shown (1,2)."), refs)
+    assert [item["marker"] for item in out] == ["(1)", "(2)"]
+
+
 def test_resolve_drops_unmatched_markers():
     refs = [make_ref(index=1, raw="Smith, J. 2019. Title", year=2019, authors=["Smith"])]
     cites = [make_cite(marker="Doe 2021", surname="Doe", year=2021, authors=["Doe"])]

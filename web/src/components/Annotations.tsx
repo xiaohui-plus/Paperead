@@ -411,14 +411,36 @@ export function RichText({
 }
 
 /**
- * 阅读页整体按 120% 缩放（`html { zoom }`）。`position: fixed` 的 left/top 用
- * 布局坐标就能和选区的 getBoundingClientRect 对齐，但视口可布局宽高、鼠标位移
- * 都要按缩放比换算，否则贴边时会溢出、拖动时又跟不上指针。
+ * 阅读页整体按 120% 缩放（`html { zoom }`）。
+ *
+ * `getBoundingClientRect()` 返回的是缩放后的视觉坐标，而 `position: fixed` 的
+ * left/top 是布局坐标（渲染时还会乘一次 zoom）。两者直接混用会让浮层按缩放比
+ * 向右下漂：1.2 缩放下选区中心偏 132px 是常态，越靠右下偏得越多。
  */
-function uiZoom(): number {
+export function uiZoom(): number {
   if (typeof window === 'undefined') return 1
   const value = Number(getComputedStyle(document.documentElement).zoom)
   return Number.isFinite(value) && value > 0 ? value : 1
+}
+
+/** 视觉坐标（getBoundingClientRect）→ 布局坐标，供 fixed 浮层定位使用。 */
+export function layoutRect(rect: DOMRect, zoom = uiZoom()): DOMRect {
+  if (zoom === 1) return rect
+  const left = rect.left / zoom
+  const top = rect.top / zoom
+  const width = rect.width / zoom
+  const height = rect.height / zoom
+  return {
+    x: left,
+    y: top,
+    left,
+    top,
+    width,
+    height,
+    right: left + width,
+    bottom: top + height,
+    toJSON: () => ({ x: left, y: top, left, top, width, height, right: left + width, bottom: top + height }),
+  } as DOMRect
 }
 
 function clampPosition(value: number, min: number, max: number): number {
@@ -565,29 +587,36 @@ export function SelectionToolbar({
   })
   const width = toolbarWidth
   const zoom = uiZoom()
+  // 选区 rect 是视觉坐标，先换算回布局坐标，否则 fixed 浮层会按 zoom 偏向右下
+  const anchorRect = layoutRect(rect, zoom)
 
   const pad = VIEWPORT_PAD / zoom
 
-  // fixed 元素的 left/top 会被 html zoom 等比放大，尺寸也一起放大；
-  // 用布局坐标居中即可，但贴边判断与间距要换算回布局像素。
   const baseLeft = clampPosition(
-    rect.left + rect.width / 2 - width / 2,
+    anchorRect.left + anchorRect.width / 2 - width / 2,
     pad,
     window.innerWidth / zoom - width - pad,
   )
-  const below = rect.bottom + FLOAT_GAP / zoom
+  const below = anchorRect.bottom + FLOAT_GAP / zoom
   const maxTop = window.innerHeight / zoom - TOOLBAR_HEIGHT - pad
   const baseTop =
     below <= maxTop
       ? below
       : clampPosition(
-          rect.top - TOOLBAR_HEIGHT - FLOAT_GAP / zoom,
+          anchorRect.top - TOOLBAR_HEIGHT - FLOAT_GAP / zoom,
           pad,
           maxTop,
         )
 
   const [dragPos, setDragPos] = useState<{ left: number; top: number } | null>(null)
   const [dragging, setDragging] = useState(false)
+  // 同一段落里连续划词时组件不会卸载：上一次拖到别处的位置必须跟着新选区失效，
+  // 否则新工具条仍停在上次的右下角，看起来像「每次都飘到很远的地方」。
+  const rectKey = `${rect.left}:${rect.top}:${rect.width}:${rect.height}`
+  useEffect(() => {
+    setDragPos(null)
+    setDragging(false)
+  }, [rectKey])
   const dragRef = useRef<{
     pointerId: number
     startX: number
@@ -742,7 +771,7 @@ function TranslateCard({
 }) {
   const [copied, setCopied] = useState(false)
   const zoom = uiZoom()
-  const width = Math.min(328, window.innerWidth - VIEWPORT_PAD * 2)
+  const width = Math.min(328, window.innerWidth / zoom - (VIEWPORT_PAD * 2) / zoom)
   const pad = VIEWPORT_PAD / zoom
   const left = clampPosition(
     anchor.left + (anchor.width - width) / 2,
@@ -902,15 +931,16 @@ export function AnnotationPopover({
   }, [onClose])
 
   const zoom = uiZoom()
-  const width = Math.min(300, window.innerWidth - VIEWPORT_PAD * 2)
+  const anchorRect = layoutRect(rect, zoom)
+  const width = Math.min(300, window.innerWidth / zoom - (VIEWPORT_PAD * 2) / zoom)
   const pad = VIEWPORT_PAD / zoom
   const left = clampPosition(
-    rect.left + rect.width / 2 - width / 2,
+    anchorRect.left + anchorRect.width / 2 - width / 2,
     pad,
     window.innerWidth / zoom - width - pad,
   )
   const top = clampPosition(
-    rect.bottom + 8 / zoom,
+    anchorRect.bottom + 8 / zoom,
     pad,
     window.innerHeight / zoom - 220 - pad,
   )

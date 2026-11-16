@@ -250,6 +250,10 @@ def resolve(cites: list[Citation], references: list[Reference]) -> list[dict]:
 
     for c in cites:
         key = marker_key(c.marker)
+        # `[3, 4, 5]` 这种一处标记对应多条文献：去重键必须带上具体编号，
+        # 否则第 2 个起的编号会被当成「同一标记重复出现」丢掉，只剩第一篇。
+        if c.index is not None:
+            key = f"{key}#{c.index}"
         idx = known.get(key)
         if idx is None:
             idx = match_index(c, references, used)
@@ -261,5 +265,9 @@ def resolve(cites: list[Citation], references: list[Reference]) -> list[dict]:
             continue
         seen.add(key)
         used.add(ref.index)
-        out.append({"marker": c.marker, "ref": ref.to_dict()})
+        # 展开后的每个编号只展示自己的那一项，弹层里不会整组重复七次
+        marker = c.marker
+        if c.index is not None:
+            marker = f"({c.index})" if c.marker.startswith("(") else f"[{c.index}]"
+        out.append({"marker": marker, "ref": ref.to_dict()})
     return out

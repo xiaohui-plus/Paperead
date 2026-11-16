@@ -39,7 +39,7 @@ html {
     "Helvetica Neue", Arial, sans-serif;
   --mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
   --read-scale: 1;
-  /* 阅读正文正文字体：设置 → 常规 → 阅读字体可切换 */
+  /* 阅读正文正文字体：设置 → 阅读界面 → 正文字体可切换 */
   --reader-font: var(--serif);
   /* 阅读页原文/译文字号倍率，设置里可分别调整 */
   --en-font-scale: 1;
@@ -7986,7 +7986,9 @@ body.col-resizing * {
 }
 
 .hl {
-  padding: 0.5px 0;
+  /* 上下不留 padding：跨行时 clone 的背景会各外扩半像素，行与行相接处
+     叠成一条更深的横带，看起来就是两层框 */
+  padding: 0;
   border-radius: 2px;
   color: inherit;
   cursor: pointer;

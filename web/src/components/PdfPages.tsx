@@ -122,13 +122,22 @@ function PdfAnnotationLayer({
 }) {
   const items = annotations.filter((item) => item.page === page && item.rects?.length)
   if (!items.length) return null
+  // 同页同类型同颜色的标注合并成一簇：重复划同一段文字时，两条半透明矩形
+  // 完全重合会叠成一条更深的框（肉眼就是「上下两层框」），合并后只画一次。
+  const groups = new Map<string, { kind: string; color: string; rects: PdfRect[] }>()
+  for (const item of items) {
+    const key = `${item.kind}:${item.color}`
+    const group = groups.get(key) ?? { kind: item.kind, color: item.color, rects: [] }
+    group.rects.push(...mergeLineRects(item.rects ?? []))
+    groups.set(key, group)
+  }
   return (
     <div className="pdf-annot-layer" aria-hidden>
-      {items.flatMap((item) =>
-        mergeLineRects(item.rects ?? []).map((rect, index) => (
+      {[...groups.entries()].flatMap(([key, group]) =>
+        mergeOverlaps(group.rects).map((rect, index) => (
           <span
-            key={`${item.id}-${index}`}
-            className={`pdf-annot pdf-annot-${item.kind} pdf-annot-${item.color}`}
+            key={`${key}-${index}`}
+            className={`pdf-annot pdf-annot-${group.kind} pdf-annot-${group.color}`}
             style={{
               left: `${rect.x * 100}%`,
               top: `${rect.y * 100}%`,
@@ -140,6 +149,36 @@ function PdfAnnotationLayer({
       )}
     </div>
   )
+}
+
+/**
+ * 把同色跨标注的重叠矩形并成一段。
+ *
+ * 只合并真正相交（同一行且横向有交集）的框，中间留白不填色，因此不会把
+ * 同一行里两处分开的荧光笔连成一条；完全重合的重复标注只保留一个。
+ */
+function mergeOverlaps(rects: PdfRect[]): PdfRect[] {
+  const out: PdfRect[] = []
+  for (const rect of rects) {
+    let merged = false
+    for (const line of out) {
+      const sameLine = Math.abs(line.y - rect.y) <= Math.max(line.h, rect.h) * 0.45
+      const overlapsX = rect.x < line.x + line.w - RECT_EPS && rect.x + rect.w > line.x + RECT_EPS
+      if (!sameLine || !overlapsX) continue
+      const left = Math.min(line.x, rect.x)
+      const right = Math.min(1, Math.max(line.x + line.w, rect.x + rect.w))
+      const top = Math.min(line.y, rect.y)
+      const bottom = Math.min(1, Math.max(line.y + line.h, rect.y + rect.h))
+      line.x = left
+      line.y = top
+      line.w = Math.max(0, right - left)
+      line.h = Math.max(0, bottom - top)
+      merged = true
+      break
+    }
+    if (!merged) out.push({ ...rect })
+  }
+  return out
 }
 
 // 服务端按这个宽度渲染，前端只做等比缩放；再大对公式也没有额外增益。

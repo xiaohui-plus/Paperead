@@ -67,6 +67,7 @@ import {
 } from './icons'
 import {
   TRANSLATION_LANGS,
+  langLabel,
   loadTargetLang,
   saveTargetLang,
 } from '../lib/translation'
@@ -771,7 +772,7 @@ export function SettingsDialog({
     tab === 'models'
       ? '回答模型负责问答与翻译，识图模型负责论文里的图片识别；两者可以分开配置，修改会自动保存在本机。'
       : tab === 'reading'
-        ? '调整原文/译文字号与默认视图；改动会立即作用到当前打开的论文。'
+        ? '调整正文字体、原文/译文字号与默认视图；改动会立即作用到当前打开的论文。'
         : tab === 'scholar'
           ? '这里配置 Semantic Scholar 与 CORE 的检索密钥；密钥只保存在本机，不会上传到服务器。'
           : tab === 'review'
@@ -780,7 +781,7 @@ export function SettingsDialog({
               ? 'Zotero、学术阅读与手机的文件同步都收在这里；打开同步窗口后可以先查看目标里的论文，再选择拉取或推送。'
               : tab === 'feedback'
                 ? '遇到问题或有建议可以直接提交；截图支持 Ctrl+V 粘贴，内容会同步到 Gitee Issue。'
-                : '应用更新、阅读字体与目标译文语种、离线库、服务器连接与写作工具等设置都收在这里。'
+                : '应用更新、目标译文语种与自动翻译、离线库、服务器连接与写作工具等设置都收在这里。'
 
   return (
     <div
@@ -1657,12 +1658,50 @@ const READING_MODES: { value: ViewMode; label: string }[] = [
   { value: 'en', label: '仅原文' },
 ]
 
+interface ReadingPreviewSample {
+  sourceLabel: string
+  source: string
+  targetLabel: string
+  target: string
+}
+
 /**
- * 设置 → 常规：阅读字体与目标译文语种。
+ * 字体与字号预览按目标译文语种切换：默认演示「英语 → 目标语言」；
+ * 目标语种为 English 时反向演示「中文 → English」，避免两行都是英语。
+ */
+function readingPreviewSample(langKey: string): ReadingPreviewSample {
+  const targetLabel = langLabel(langKey)
+  if (langKey === 'en') {
+    return {
+      sourceLabel: '中文',
+      source: '原文段落会与译文逐段对照显示。',
+      targetLabel,
+      target: 'The translation is shown beside the source paragraph.',
+    }
+  }
+  const targets: Record<string, string> = {
+    'zh-Hans': '中文译文会与原文按同一段落对照显示。',
+    'zh-Hant': '中文譯文會與原文按同一段落對照顯示。',
+    ja: '翻訳は原文と同じ段落に並べて表示されます。',
+    ko: '번역문은 원문과 같은 단락에 나란히 표시됩니다.',
+    fr: "La traduction s'affiche en regard du paragraphe original.",
+    de: 'Die Übersetzung wird neben dem Originalabsatz angezeigt.',
+    es: 'La traducción se muestra junto al párrafo original.',
+    ru: 'Перевод отображается рядом с исходным абзацем.',
+  }
+  return {
+    sourceLabel: 'English',
+    source: 'The quick brown fox jumps over the lazy dog.',
+    targetLabel,
+    target: targets[langKey] ?? targets['zh-Hans'],
+  }
+}
+
+/**
+ * 设置 → 常规：目标译文语种与自动翻译。
  * 原文语种与目标语种一致时，阅读页不会自动启动翻译。
  */
 function ReadingGeneralPanel() {
-  const [readerFont, setReaderFont] = useState(loadReaderFont)
   const [lang, setLang] = useState(loadTargetLang)
   const [autoTranslate, setAutoTranslate] = useState(loadAutoTranslate)
 
@@ -1670,40 +1709,11 @@ function ReadingGeneralPanel() {
     <section className="reading-card">
       <header className="reading-card-head">
         <div>
-          <h3>阅读与翻译</h3>
-          <p>正文字体只作用于重排阅读视图；原文与目标译文语种一致时不会自动翻译。</p>
+          <h3>翻译</h3>
+          <p>外文论文翻译成这里选择的语言；原文与目标译文语种一致时不会自动翻译。</p>
         </div>
         <span className="reading-badge">即时生效</span>
       </header>
-
-      <div className="reading-row">
-        <div className="reading-row-label">
-          <b>正文字体</b>
-          <span>原版 PDF 的字体由文件本身决定，这里只改重排正文与译文。</span>
-        </div>
-        <select
-          id="reader-font"
-          className="input reading-select"
-          value={readerFont}
-          onChange={(event) => {
-            setReaderFont(event.target.value)
-            saveReaderFont(event.target.value)
-          }}
-        >
-          {READER_FONTS.map((font) => (
-            <option key={font.key} value={font.key}>
-              {font.label}
-            </option>
-          ))}
-        </select>
-      </div>
-      <div className="reading-preview">
-        <span className="reading-preview-label">字体预览</span>
-        <span className="reading-preview-en">
-          The quick brown fox jumps over the lazy dog.
-        </span>
-        <span className="reading-preview-zh">中文译文与英文原文共用这套字体。</span>
-      </div>
 
       <div className="reading-row">
         <div className="reading-row-label">
@@ -1758,11 +1768,21 @@ function ReadingGeneralPanel() {
   )
 }
 
-/** 设置 → 阅读界面：原文/译文字号、默认阅读模式与自动阅读重点。 */
+/** 设置 → 阅读界面：正文字体、原文/译文字号、默认阅读模式与自动阅读重点。 */
 function ReadingPanel() {
+  const [readerFont, setReaderFont] = useState(loadReaderFont)
+  const [previewLang, setPreviewLang] = useState(loadTargetLang)
   const [fonts, setFonts] = useState<ReadingFonts>(loadReadingFonts)
   const [mode, setMode] = useState<ViewMode>(loadDefaultReadingMode)
   const [enabled, setEnabled] = useState(loadAutoHighlights)
+
+  useEffect(() => {
+    const sync = () => setPreviewLang(loadTargetLang())
+    window.addEventListener('paperead:translation-changed', sync)
+    return () => window.removeEventListener('paperead:translation-changed', sync)
+  }, [])
+
+  const sample = readingPreviewSample(previewLang)
 
   const changeFonts = (patch: Partial<ReadingFonts>) => {
     const next = { ...fonts, ...patch }
@@ -1775,6 +1795,44 @@ function ReadingPanel() {
       <section className="reading-card">
         <header className="reading-card-head">
           <div>
+            <h3>正文字体</h3>
+            <p>只作用于重排正文与译文；原版 PDF 的字体由文件本身决定。</p>
+          </div>
+          <span className="reading-badge">即时生效</span>
+        </header>
+        <div className="reading-row">
+          <div className="reading-row-label">
+            <b>字体</b>
+            <span>常见中英文字体都可用；下方示例会跟随目标译文语种切换。</span>
+          </div>
+          <select
+            id="reader-font"
+            className="input reading-select"
+            value={readerFont}
+            onChange={(event) => {
+              setReaderFont(event.target.value)
+              saveReaderFont(event.target.value)
+            }}
+          >
+            {READER_FONTS.map((font) => (
+              <option key={font.key} value={font.key}>
+                {font.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="reading-preview">
+          <span className="reading-preview-label">
+            字体预览 · {sample.sourceLabel} / {sample.targetLabel}
+          </span>
+          <span className="reading-preview-en">{sample.source}</span>
+          <span className="reading-preview-zh">{sample.target}</span>
+        </div>
+      </section>
+
+      <section className="reading-card">
+        <header className="reading-card-head">
+          <div>
             <h3>正文字号</h3>
             <p>原文和译文分别缩放；顶栏的「+ / −」会在此基础上继续缩放整页。</p>
           </div>
@@ -1782,29 +1840,31 @@ function ReadingPanel() {
         </header>
         <FontSizeStepper
           title="原文字号"
-          hint="影响双栏对照里的英文段落。"
+          hint="影响双栏对照里的原文段落。"
           value={fonts.en}
           onChange={(value) => changeFonts({ en: value })}
         />
         <FontSizeStepper
           title="译文字号"
-          hint="影响中文译文段落，以及纯译文模式下的正文。"
+          hint="影响译文段落，以及纯译文模式下的正文。"
           value={fonts.zh}
           onChange={(value) => changeFonts({ zh: value })}
         />
         <div className="reading-preview">
-          <span className="reading-preview-label">字号预览</span>
+          <span className="reading-preview-label">
+            字号预览 · {sample.sourceLabel} / {sample.targetLabel}
+          </span>
           <span
             className="reading-preview-en"
             style={{ fontSize: `${15 * fonts.en}px` }}
           >
-            The quick brown fox jumps over the lazy dog.
+            {sample.source}
           </span>
           <span
             className="reading-preview-zh"
             style={{ fontSize: `${15 * fonts.zh}px` }}
           >
-            中文译文会按同一段落对照显示。
+            {sample.target}
           </span>
         </div>
       </section>

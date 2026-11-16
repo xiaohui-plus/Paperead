@@ -12,6 +12,7 @@ import pymupdf
 from paperead.layout import (
     Block,
     Line,
+    _build_blocks,
     _drop_noise,
     _join_text,
     _line_from_dict,
@@ -281,3 +282,88 @@ def test_math_fragments_merge_and_fallback():
     assert len(merged) == 1
     assert merged[0]["fallback"] is True
     assert merged[0]["start"] == 0 and merged[0]["end"] == 10
+
+# ── 首页窄摘要不应被同页更宽的行切成一行一段 ───────────────────────────
+def _body_line(text, x0, x1, y0, size=10.0, page=1, col=0):
+    return Line(
+        text=text,
+        bbox=(x0, y0 - 8, x1, y0 + 2),
+        page=page,
+        size=size,
+        col=col,
+        baseline=y0,
+    )
+
+
+def _abstract_lines():
+    lines = [
+        "Vision language navigation is very challenging for unmanned aerial vehicles since",
+        "small errors in 3D motion prediction can lead to navigation errors and collisions.",
+        "Unable to fathom execution outcomes in 3D environments, methods struggle to",
+        "predict accurate navigation waypoints from language instructions. We introduce",
+        "a framework that imagines the visual representation of the intended next movement",
+        "and then uses the predicted prototypes as context for generating the final action.",
+        "Data and code are available at the project page.",
+    ]
+    return [
+        _body_line(text, 143.5, 469.8 if i < 6 else 438.8, 266.0 + i * 11)
+        for i, text in enumerate(lines)
+    ]
+
+
+def test_narrow_abstract_is_not_split_by_wider_page_lines():
+    # 首页标题/页脚比摘要宽，整页边界会被撑到 60..552；局部宽度估计不应受影响
+    wide = _body_line(
+        "A wide front matter line that spans the entire page width", 60, 552, 60, size=16
+    )
+    heading = _body_line("1 Introduction", 143.5, 260, 266.0 + 7 * 11, size=14)
+    blocks = _build_blocks([wide, *_abstract_lines(), heading], 10.0)
+
+    abstract = [b for b in blocks if "Vision language navigation" in b.text]
+    assert len(abstract) == 1
+    assert "Data and code are available" in abstract[0].text
+    assert "final action" in abstract[0].text
+
+
+def test_real_paragraph_break_survives_short_last_line():
+    # 上一段末行确实短、下一段首字母大写：仍应分成两块，不能被过度合并
+    first = [
+        _body_line(
+            "First paragraph line one is full width and carries enough words to fill the column",
+            143.5, 469.8, 100,
+        ),
+        _body_line(
+            "second line is also full width and continues the discussion of the proposed method",
+            143.5, 469.8, 111,
+        ),
+        _body_line("the paragraph ends here.", 143.5, 350.0, 122),
+    ]
+    second = [
+        _body_line(
+            "Second paragraph starts with a capital letter and is not a continuation at all",
+            143.5, 469.8, 133,
+        ),
+        _body_line(
+            "another full width line in the second paragraph for the geometry check of layout",
+            143.5, 469.8, 144,
+        ),
+    ]
+    blocks = _build_blocks([*first, *second], 10.0)
+    assert len(blocks) == 2
+    assert "the paragraph ends here." in blocks[0].text
+    assert blocks[1].text.startswith("Second paragraph")
+
+def test_detected_table_rows_stay_separate_blocks():
+    # 表格行行距紧、每行都写满表宽，若按正文合并，兜底切表就拿不到多行短块
+    lines = [
+        _body_line("DATASET # GRAPHS AVG. # NODES AVG. # EDGES AVG. # RINGS", 143.5, 469.8, 100),
+        _body_line("CEPDB 2.3M HOPV 350 PFD 1055 NFA 654 PD 277", 143.5, 469.8, 111),
+        _body_line("by inter-level message passing module on GI.", 143.5, 469.8, 122),
+    ]
+    tables = {1: [pymupdf.Rect(140, 95, 475, 118)]}
+    blocks = _build_blocks(lines, 10.0, tables)
+    assert [b.text for b in blocks] == [
+        "DATASET # GRAPHS AVG. # NODES AVG. # EDGES AVG. # RINGS",
+        "CEPDB 2.3M HOPV 350 PFD 1055 NFA 654 PD 277",
+        "by inter-level message passing module on GI.",
+    ]

@@ -23,6 +23,8 @@ import {
   RichText,
   SelectionToolbar,
   hasCitation,
+  layoutRect,
+  uiZoom,
   type AnnotationActions,
 } from './Annotations'
 import { matchMarkers, markerMatches } from '../lib/citationMark'
@@ -502,20 +504,24 @@ const CITE_SCROLL_CLOSE = 180
 const CITE_WIDTH = 380
 
 function citePosition(rect: DOMRect, height = 180) {
-  const vw = window.innerWidth
-  const vh = window.innerHeight
-  const width = Math.min(CITE_WIDTH, vw - CITE_VIEW_GAP * 2)
+  // 与划词工具条同一套坐标口径：选区 rect 是视觉坐标，fixed 浮层用布局坐标
+  const zoom = uiZoom()
+  const anchor = layoutRect(rect, zoom)
+  const vw = window.innerWidth / zoom
+  const vh = window.innerHeight / zoom
+  const width = Math.min(CITE_WIDTH, vw - (CITE_VIEW_GAP * 2) / zoom)
   // 手机端顶栏和底部工具条都是固定的，浮层躲开它们，别挡住/被挡住
   const compact = window.matchMedia('(max-width: 860px)').matches
-  const topPad = compact ? 84 : CITE_VIEW_GAP
-  const bottomPad = compact ? 74 : CITE_VIEW_GAP
+  const topPad = (compact ? 84 : CITE_VIEW_GAP) / zoom
+  const bottomPad = (compact ? 74 : CITE_VIEW_GAP) / zoom
+  const edge = CITE_VIEW_GAP / zoom
   const left = Math.max(
-    CITE_VIEW_GAP,
-    Math.min(vw - width - CITE_VIEW_GAP, rect.left + rect.width / 2 - width / 2),
+    edge,
+    Math.min(vw - width - edge, anchor.left + anchor.width / 2 - width / 2),
   )
-  const gap = 8
-  const below = rect.bottom + gap
-  const above = rect.top - height - gap
+  const gap = 8 / zoom
+  const below = anchor.bottom + gap
+  const above = anchor.top - height - gap
   // 优先放在引用下方；下方放不下、上方又更宽敞时翻到上方
   const top = below + height <= vh - bottomPad || above < topPad ? below : above
   return {

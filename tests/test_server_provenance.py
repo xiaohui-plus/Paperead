@@ -234,6 +234,32 @@ def test_provenance_mixes_resolved_and_unresolved(monkeypatch, tmp_path):
     assert body["unresolved"] == ["[9]"]
 
 
+def test_provenance_expands_grouped_numbers(monkeypatch, tmp_path):
+    # 一处 `[1, 2]` 标记对应两篇文献：两条都要返回，供前端逐条展示
+    para = {**PARA, "text": "Both [1, 2] matter here."}
+    main, client = boot(monkeypatch, tmp_path, blocks=[para, dict(REF), dict(REF2)])
+    calls: list[tuple[int, str]] = []
+    monkeypatch.setattr(main, "enrich_provenance", fake_enrich(calls))
+
+    with client:
+        body = client.get(url(), headers=headers()).json()
+    assert [c["marker"] for c in body["citations"]] == ["[1]", "[2]"]
+    assert [c["ref"]["index"] for c in body["citations"]] == [1, 2]
+    assert body["unresolved"] == []
+
+
+def test_provenance_reports_only_missing_number_from_group(monkeypatch, tmp_path):
+    para = {**PARA, "text": "Both [1, 42] matter here."}
+    main, client = boot(monkeypatch, tmp_path, blocks=[para, dict(REF)])
+    monkeypatch.setattr(main, "enrich_provenance", fake_enrich([]))
+
+    with client:
+        body = client.get(url(), headers=headers()).json()
+    assert [c["marker"] for c in body["citations"]] == ["[1]"]
+    # 只有缺条的那个编号进 unresolved，已解析的 1 不应连带被标记
+    assert body["unresolved"] == ["[42]"]
+
+
 # ── 摘要预算与上限 ────────────────────────────────────
 
 

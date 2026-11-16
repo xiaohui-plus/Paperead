@@ -176,6 +176,7 @@ class Line:
     inline_math: list[dict] = field(default_factory=list)  # 正文里的行内公式片段
     brace_piece: bool = False  # CMEX 大括号延伸片段（bbox 跨行，不能按基线归行）
 
+
     @property
     def x0(self) -> float:
         return self.bbox[0]
@@ -866,6 +867,7 @@ def _merge_visual_rows(
                         total_chars=total,
                         baseline=main.baseline,
                         inline_math=inline_math,
+
                     )
                 )
     return [r for r in rows if r.text.strip()]
@@ -1083,10 +1085,63 @@ def _split_eq_number(text: str) -> tuple[str, str]:
     return text, ""
 
 
-def _build_blocks(ordered: list[Line], body_size: float) -> list[Block]:
+def _local_edges(ordered: list[Line]) -> dict[int, tuple[float, float]]:
+    """按「同页同栏、上下相邻几行」估计局部栏边界。
+
+    整页取 min(x0)/max(x1) 会被首页标题、页脚、双栏正文里更宽的行撑大：
+    单栏摘要的实际右边界约 469pt，而整页右边界是 505pt，8% 写满容差刚好
+    被超过，于是摘要每一行都被判成「段落末行」而一行一块。左边界同理会被
+    更靠左的行撑小，使摘要每行都被误判成首行缩进。这里用邻近行的中位数
+    估计，既保留「末行短」的识别能力，又不受页面其他区域干扰。
+    """
+    groups: dict[tuple[int, int], list[Line]] = {}
+    for ln in ordered:
+        if ln.is_margin:
+            continue
+        groups.setdefault((ln.page, ln.col), []).append(ln)
+
+    out: dict[int, tuple[float, float]] = {}
+    for ls in groups.values():
+        ls.sort(key=lambda l: l.y0)
+        for i, ln in enumerate(ls):
+            win = ls[max(0, i - 2): min(len(ls), i + 3)]
+            xs = sorted(w.x1 for w in win)
+            # 右边界取 75 分位而不是中位数：表格里的短行/表内标题紧邻
+            # 正文长行时，中位数会被连续几个短行拉到同类宽度，导致短行
+            # 不再被识别成「段落末行」而与正文粘在一起；75 分位保留长行
+            # 的参考作用。首页整段摘要的窗口全为同宽行，结果不受影响。
+            right = xs[int(round(0.75 * (len(xs) - 1)))]
+            out[id(ln)] = (
+                median([w.x0 for w in win]),
+                right,
+            )
+    return out
+
+
+def _build_blocks(
+    ordered: list[Line],
+    body_size: float,
+    table_rects: dict[int, list[pymupdf.Rect]] | None = None,
+) -> list[Block]:
     blocks: list[Block] = []
     cur: dict | None = None
     line_h = median([ln.height for ln in ordered]) if ordered else 12.0
+
+    def in_table(ln: Line) -> bool:
+        """行中心是否落在已检测到的表格区域。
+
+        表格行在版面上是一行行短文本、行距紧、数字密集，按正文规则会被
+        合并成一整块；`_collect_table_rows` 就再也拿不到「多行短块」，
+        Table 1 这类无框表会整张漏掉。表格区内的行一律逐行成块。
+        """
+        if not table_rects:
+            return False
+        cx = (ln.bbox[0] + ln.bbox[2]) / 2
+        cy = (ln.bbox[1] + ln.bbox[3]) / 2
+        for rect in table_rects.get(ln.page, []):
+            if rect.x0 <= cx <= rect.x1 and rect.y0 <= cy <= rect.y1:
+                return True
+        return False
 
     # 每页、每栏的左右边界，用于判断「行是否写满」与「是否首行缩进」。
     # 不能跨页取全局边界：首页通栏标题/摘要会把左栏的 right 撑到页面右边，
@@ -1100,6 +1155,10 @@ def _build_blocks(ordered: list[Line], body_size: float) -> list[Block]:
                     min(ln.x0 for ln in ls),
                     max(ln.x1 for ln in ls),
                 )
+
+    # 整页边界只作兜底；段落合并用附近几行的宽度判断「是否写满 / 缩进」，
+    # 避免首页摘要这类窄栏被标题、页脚或双栏正文的宽度误伤。
+    local = _local_edges(ordered)
 
     def flush():
         nonlocal cur
@@ -1139,12 +1198,16 @@ def _build_blocks(ordered: list[Line], body_size: float) -> list[Block]:
             if start_pos < 0 or end_pos > len(value) or end_pos <= start_pos:
                 continue
             inline_math.append({**item, "start": start_pos, "end": end_pos})
+        ref_left, ref_right = local.get(id(ln), (ln.x0, ln.x1))
         return {
             "text": value,
             "page": ln.page, "kind": "para", "bbox": ln.bbox, "level": 0,
             "size": ln.size, "bold": ln.bold, "col": ln.col, "mixed": False,
             "bboxes": [[ln.page, ln.bbox[0], ln.bbox[1], ln.bbox[2], ln.bbox[3]]],
             "last_y1": ln.y1, "last_x0": ln.x0, "last_x1": ln.x1,
+            "ref_left": ref_left, "ref_right": ref_right,
+            "in_table": in_table(ln),
+
             "inline_math": inline_math,
         }
 
@@ -1232,13 +1295,41 @@ def _build_blocks(ordered: list[Line], body_size: float) -> list[Block]:
             cur = start(ln)
             continue
 
-        # 上一行是否写满，要用「上一行自己所在栏」的边界判断；
-        # 跨栏/跨页时如果拿新栏的右边界比，会误判成段落结束。
-        prev_left, prev_right = edges.get(
-            (cur["page"], cur["col"]), (cur["last_x0"], cur["last_x1"])
-        )
+        # 表格区/大间距碎片逐行成块：既不让表格行彼此合并，也不让
+        # 表格行并进正文段落；否则兜底切表拿不到「多行短块」。
+        # 小字号短行（表格数据、脚注）同样逐行成块，避免整张表粘成一段。
+        def small_row(text: str, size: float) -> bool:
+            """小字号短行：表格数据行 / 大写字表头。
+
+            不能只按字号判断——参考文献也用小字号，逐行断开会让每条文献
+            碎成好几块。用「短 + 数字或全大写词密集 + 不含年份」限定到表格。
+            """
+            t = text.strip()
+            if not (body_size > 0 and 0 < size < body_size * 0.9) or not t or len(t) > 120:
+                return False
+            if re.match(r"^\s*(?:\[\d{1,3}\]|\d{1,3}\.\s)", t):
+                return False
+            if re.search(r"\b(?:19|20)\d{2}[a-z]?\b", t):
+                return False
+            digits = sum(1 for ch in t if ch.isdigit())
+            caps = len(re.findall(r"\b[A-Z]{2,}\b", t))
+            return digits >= 2 or caps >= 2
+
+        if (
+            in_table(ln)
+            or cur["in_table"]
+            or small_row(ln.text, ln.size)
+            or small_row(cur["text"], cur["size"])
+        ):
+            flush()
+            cur = start(ln)
+            continue
+
+        # 上一行是否写满，要用「上一行附近几行」的宽度判断，而不是整页
+        # 该栏的极值；否则首页窄摘要会被标题/页脚撑出的右边界误判成没写满。
+        prev_left, prev_right = cur["ref_left"], cur["ref_right"]
         prev_short = cur["last_x1"] < prev_right - 0.08 * max(prev_right - prev_left, 1.0)
-        left, right = edges.get((ln.page, ln.col), (ln.x0, ln.x1))
+        left, right = local.get(id(ln), edges.get((ln.page, ln.col), (ln.x0, ln.x1)))
         # 首行缩进：既要相对栏左边界缩进，又要相对上一行缩进（否则整段每行都会被误判）
         indented = (
             ln.x0 - left > 0.8 * ln.size
@@ -1273,6 +1364,10 @@ def _build_blocks(ordered: list[Line], body_size: float) -> list[Block]:
             or not same_style
             or prev_short
             or indented
+            # 图注比正文短，局部宽度下末行容易被判成「写满」而把紧随的
+            # 作者脚注、版权行吞进 caption。只有明确的续行证据才允许合并，
+            # 图注以句号结尾或下一行以 ∗ / ‡ / 数字开头时一律断开。
+            or (_is_caption_text(cur["text"]) and not _continues_paragraph(cur["text"], ln.text))
             # 同栏里上一行「写满」时，紧接的表注会被当成正文续行并进
             # 表格末行，`Table 2:` 随之失去锚点，整张表识别不出来。
             or _is_caption_text(ln.text)
@@ -1304,6 +1399,8 @@ def _build_blocks(ordered: list[Line], body_size: float) -> list[Block]:
             cur["last_y1"] = ln.y1
             cur["last_x0"] = ln.x0
             cur["last_x1"] = ln.x1
+            if id(ln) in local:
+                cur["ref_left"], cur["ref_right"] = local[id(ln)]
             if ln.page == cur["page"]:
                 cur["col"] = ln.col
     flush_eq()
@@ -2136,9 +2233,11 @@ def _extract_tables_structured(
     doc: pymupdf.Document,
     blocks: list[Block],
     out_dir: Path,
+    detected: dict[int, list[tuple[pymupdf.Rect, str, int]]] | None = None,
 ) -> list[Block]:
     """优先用 find_tables 的结果：结构化 HTML + 裁剪图双份，并清掉表格区域的散碎文本。"""
-    detected = _find_page_tables(doc)
+    if detected is None:
+        detected = _find_page_tables(doc)
     if not detected:
         return blocks
 
@@ -2420,9 +2519,10 @@ def _extract_tables(
     doc: pymupdf.Document,
     blocks: list[Block],
     out_dir: Path,
+    detected: dict[int, list[tuple[pymupdf.Rect, str, int]]] | None = None,
 ) -> list[Block]:
     """表格抽取：先做结构化识别，再对漏网的表走裁图兜底。"""
-    blocks = _extract_tables_structured(doc, blocks, out_dir)
+    blocks = _extract_tables_structured(doc, blocks, out_dir, detected)
     return _extract_tables_by_caption(doc, blocks, out_dir)
 
 
@@ -3379,7 +3479,20 @@ def parse_pdf(
         ordered = _reading_order(rows, 0.0 if has_gutter else None)
 
         body_size = _guess_body_size(ordered)
-        blocks = _build_blocks(ordered, body_size)
+        # 表格区域要先于段落重组拿到：表格行一旦被合并成大段，
+        # 兜底切表就拿不到「多行短块」，整张表会漏识别。
+        detected = _find_page_tables(doc)
+        table_rects: dict[int, list[pymupdf.Rect]] = {}
+        for page_no, items in detected.items():
+            page = doc[page_no - 1]
+            page_area = page.rect.width * page.rect.height
+            rects = [
+                rect for rect, _html, _cols in items
+                if rect.width * rect.height <= page_area * 0.6
+            ]
+            if rects:
+                table_rects[page_no] = rects
+        blocks = _build_blocks(ordered, body_size, table_rects)
         _classify(blocks, body_size, doc[0].rect.height)
         blocks = _attach_equation_numbers(blocks, doc)
         blocks = _merge_affiliations(blocks)
@@ -3392,7 +3505,7 @@ def parse_pdf(
             out = Path(figure_dir)
             if paper_id:
                 out = out / paper_id
-            blocks = _extract_tables(doc, blocks, out / "tables")
+            blocks = _extract_tables(doc, blocks, out / "tables", detected)
             blocks = _extract_figures(doc, blocks, out / "figures", body_size)
             # 带文字标注的矢量图先按图注裁出图形区域，避免后面的整页图化
             # 把同一页的正文一起吞进图片

@@ -1232,7 +1232,7 @@ async def make_guide(paper_id: str, req: GuideReq | None = None) -> dict:
 
 
 # 出处缓存版本：结构或匹配逻辑变化时递增，旧文件自动失效。
-PROV_CACHE_VERSION = 2
+PROV_CACHE_VERSION = 3
 # 一段正文的引用上限：正常论文远小于这个数，只防异常数据把响应撑爆。
 PROV_MAX = 80
 # 只为前几条抓摘要（外部接口慢），其余条目直接给标题 + DOI/arXiv 链接。
@@ -1304,11 +1304,22 @@ async def block_provenance(paper_id: str, block_id: str) -> dict:
     resolved = all_resolved[:PROV_MAX]
 
     resolved_markers = {citation_marker_key(item["marker"]) for item in all_resolved}
+    resolved_indexes = {item["ref"]["index"] for item in all_resolved}
     unresolved: list[str] = []
     for c in cites:
-        if citation_marker_key(c.marker) in resolved_markers or c.marker in unresolved:
+        # 数字引用按编号逐条判断：`[3, 4, 5]` 里只有 4 缺条时，
+        # 不该把整组都当未解析，也不该因为整组文本出现过就全部放过。
+        if c.index is not None:
+            if c.index in resolved_indexes:
+                continue
+            marker = f"({c.index})" if c.marker.startswith("(") else f"[{c.index}]"
+        else:
+            if citation_marker_key(c.marker) in resolved_markers:
+                continue
+            marker = c.marker
+        if marker in unresolved:
             continue
-        unresolved.append(c.marker)
+        unresolved.append(marker)
 
     if not resolved:
         return {
