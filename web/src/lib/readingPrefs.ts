@@ -1,6 +1,6 @@
 /**
- * 阅读界面偏好：自动阅读重点、原文/译文字号、默认阅读模式。
- * 只保存在本机；字号通过 CSS 变量即时作用到阅读页正文。
+ * 阅读界面偏好：阅读字体、自动阅读重点、原文/译文字号、默认阅读模式。
+ * 只保存在本机；字体与字号通过 CSS 变量即时作用到阅读页正文。
  */
 import type { ViewMode } from '../types'
 
@@ -9,6 +9,7 @@ const AUTO_TRANSLATE_KEY = 'paperead.autoTranslate'
 /** 按论文记住用户手动切换过的自动翻译；未记录时按论文语种给默认值 */
 const PAPER_AUTO_TRANSLATE_KEY = 'paperead.autoTranslate.byPaper'
 const FONTS_KEY = 'paperead.readingFonts'
+const READER_FONT_KEY = 'paperead.readerFont'
 const MODE_KEY = 'paperead.readingMode'
 
 export interface ReadingFonts {
@@ -17,6 +18,64 @@ export interface ReadingFonts {
   /** 译文字号倍率 */
   zh: number
 }
+
+export interface ReaderFontOption {
+  key: string
+  label: string
+  /** 完整的 font-family 栈：先列本机常见字体，最后回退到通用字族 */
+  stack: string
+}
+
+/** 常见中英文字体；名称按 Windows / macOS / Linux 依次回退。 */
+export const READER_FONTS: ReaderFontOption[] = [
+  {
+    key: 'serif',
+    label: '宋体 / 思源宋体（衬线）',
+    stack: '"Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", "SimSun", "宋体", Georgia, serif',
+  },
+  {
+    key: 'sans',
+    label: '微软雅黑 / 思源黑体（无衬线）',
+    stack: '"Microsoft YaHei", "微软雅黑", "PingFang SC", "Source Han Sans SC", "Noto Sans CJK SC", "Segoe UI", Arial, sans-serif',
+  },
+  {
+    key: 'kai',
+    label: '楷体',
+    stack: '"KaiTi", "楷体", "Kaiti SC", STKaiti, "AR PL UKai CN", serif',
+  },
+  {
+    key: 'fangsong',
+    label: '仿宋',
+    stack: '"FangSong", "仿宋", "FangSong_GB2312", STFangsong, serif',
+  },
+  {
+    key: 'heiti',
+    label: '黑体',
+    stack: '"SimHei", "黑体", "Heiti SC", STHeiti, "Source Han Sans SC", sans-serif',
+  },
+  {
+    key: 'dengxian',
+    label: '等线',
+    stack: '"DengXian", "等线", "Microsoft YaHei", sans-serif',
+  },
+  {
+    key: 'georgia',
+    label: 'Georgia（英文报刊）',
+    stack: 'Georgia, "Times New Roman", "Songti SC", "宋体", serif',
+  },
+  {
+    key: 'times',
+    label: 'Times New Roman',
+    stack: '"Times New Roman", Times, "SimSun", "宋体", serif',
+  },
+  {
+    key: 'arial',
+    label: 'Arial / Helvetica',
+    stack: 'Arial, Helvetica, "Microsoft YaHei", "微软雅黑", sans-serif',
+  },
+]
+
+export const DEFAULT_READER_FONT = 'serif'
 
 export const FONT_MIN = 0.85
 export const FONT_MAX = 1.35
@@ -129,6 +188,41 @@ export function saveReadingFonts(fonts: ReadingFonts): void {
   applyReadingFonts(next)
   window.dispatchEvent(
     new CustomEvent('paperead:reading-fonts-changed', { detail: next }),
+  )
+}
+
+export function loadReaderFont(): string {
+  try {
+    const saved = localStorage.getItem(READER_FONT_KEY)
+    if (saved && READER_FONTS.some((font) => font.key === saved)) return saved
+  } catch {
+    // 隐私模式读不到 localStorage：用默认字体
+  }
+  return DEFAULT_READER_FONT
+}
+
+export function readerFontLabel(key: string): string {
+  return READER_FONTS.find((font) => font.key === key)?.label ?? READER_FONTS[0].label
+}
+
+/** 把正文字体栈写到根元素；阅读页原文/译文字号不变，只换字形。 */
+export function applyReaderFont(key: string = loadReaderFont()): void {
+  const font = READER_FONTS.find((item) => item.key === key) ?? READER_FONTS[0]
+  document.documentElement.style.setProperty('--reader-font', font.stack)
+}
+
+export function saveReaderFont(key: string): void {
+  const next = READER_FONTS.some((font) => font.key === key)
+    ? key
+    : DEFAULT_READER_FONT
+  try {
+    localStorage.setItem(READER_FONT_KEY, next)
+  } catch {
+    // 写不了就只在本次会话生效
+  }
+  applyReaderFont(next)
+  window.dispatchEvent(
+    new CustomEvent('paperead:reader-font-changed', { detail: next }),
   )
 }
 

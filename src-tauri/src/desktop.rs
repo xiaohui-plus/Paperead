@@ -462,6 +462,10 @@ fn updater_for(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String>
     app.updater_builder()
         .endpoints(vec![url])
         .map_err(|error| format!("更新检查不可用：{error}"))?
+        // 安装包约 90MB：Tauri updater 默认 30 秒超时，慢网或系统代理下
+        // 下载必然中断（表现为「无法检查更新 / 自动更新失败」）。
+        // 给下载留 10 分钟；检查清单只有几 KB，网络正常时仍是秒回。
+        .timeout(std::time::Duration::from_secs(600))
         .build()
         .map_err(|error| format!("更新检查不可用：{error}"))
 }

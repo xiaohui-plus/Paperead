@@ -17,6 +17,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,11 +38,16 @@ SQLITE_SUFFIXES = {".db", ".sqlite", ".sqlite3"}
 
 # 单次读写块大小与并发度：大块减少系统调用，多线程让大量小文件（页图、
 # 解析产物）不再逐个排队；机械盘上并发过高会加重寻道，上限控制在 8。
-COPY_CHUNK = 4 * 1024 * 1024
+COPY_CHUNK = 8 * 1024 * 1024
 COPY_WORKERS = max(1, min(8, (os.cpu_count() or 4)))
+# 大文件（PDF/模型/数据库）走系统复制引擎并单独控制并发：同盘或外接盘上
+# 多个大文件并行会互相抢磁头，2 路足够，再大反而降速。
+LARGE_FILE = 8 * 1024 * 1024
+LARGE_WORKERS = 2
 
 _ACTIVE_PHASES = {"starting", "scanning", "copying", "finalizing"}
-_JOB_RETENTION = 10 * 60
+# 任务完成/失败后在内存里多留一段时间：用户切去阅读页再切回来还能看到结果。
+_JOB_RETENTION = 60 * 60
 
 
 def _is_sqlite(path: Path) -> bool:
@@ -52,28 +58,175 @@ def _skip(name: str) -> bool:
     return name in SKIP_NAMES or name.endswith(SKIP_SUFFIXES)
 
 
-def _copy_sqlite(source: Path, target: Path) -> None:
-    """用 SQLite 在线备份复制，保证数据库文件自洽。"""
+def _copy_sqlite(
+    source: Path,
+    target: Path,
+    progress: "RelocationProgress | None" = None,
+    size: int = 0,
+) -> None:
+    """用 SQLite 在线备份复制，保证数据库文件自洽。
+
+    分批备份并回报进度：大库（几百 MB）一次备份时界面会长时间不动，
+    按页数折算成字节后进度条可以平滑推进。
+    """
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
         target.unlink()
     src = sqlite3.connect(f"file:{source.as_posix()}?mode=ro", uri=True, timeout=10)
+    added = 0
+
+    def on_backup(_status: int, remaining: int, total: int) -> None:
+        nonlocal added
+        if progress is None or total <= 0 or size <= 0:
+            return
+        done = int(size * max(0.0, 1.0 - remaining / total))
+        if done > added:
+            progress.add_bytes(done - added)
+            added = done
+
     try:
         dst = sqlite3.connect(str(target), timeout=10)
         try:
-            src.backup(dst)
+            # 每 2048 页一批：比默认 100 页快，又比一次性备份能回报进度；
+            # sleep=0 避免每批之间人为等待。
+            src.backup(
+                dst,
+                pages=2048,
+                sleep=0,
+                progress=on_backup if progress is not None else None,
+            )
         finally:
             dst.close()
+        if progress is not None and size > added:
+            progress.add_bytes(size - added)
+    except sqlite3.Error:
+        # 回退成普通文件复制前，把已经计入的进度退回，避免重复累加
+        if progress is not None and added:
+            progress.add_bytes(-added)
+        raise
     finally:
         src.close()
+
+
+_WINDOWS_PROGRESS_TYPE = None
+
+
+def _windows_progress_type():
+    """LPPROGRESS_ROUTINE 的 ctypes 签名；只在 Windows 上初始化一次。"""
+    global _WINDOWS_PROGRESS_TYPE
+    if _WINDOWS_PROGRESS_TYPE is None:
+        import ctypes
+        from ctypes import wintypes
+
+        _WINDOWS_PROGRESS_TYPE = ctypes.WINFUNCTYPE(
+            wintypes.DWORD,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            ctypes.c_longlong,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+            wintypes.HANDLE,
+            ctypes.c_void_p,
+        )
+    return _WINDOWS_PROGRESS_TYPE
+
+
+def _copy_file_native(
+    source: Path,
+    target: Path,
+    progress: "RelocationProgress | None" = None,
+) -> bool:
+    """Windows 上用 CopyFileExW 走系统复制引擎。
+
+    比 Python 的 read/write 循环少了逐块跨语言调度，外接盘和跨盘复制通常
+    更快；失败（如目标文件系统不支持）时返回 False，由调用方回退到普通复制。
+    复制过程中按系统回调实时累加字节，大文件不会等整份复制完才推进进度。
+    """
+    if os.name != "nt":
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    copy_file_ex = kernel32.CopyFileExW
+    callback_type = _windows_progress_type()
+    copy_file_ex.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        callback_type,
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.BOOL),
+        wintypes.DWORD,
+    ]
+    copy_file_ex.restype = wintypes.BOOL
+
+    state = {"done": 0}
+
+    def on_progress(
+        _total,
+        transferred,
+        _stream_size,
+        _stream_transferred,
+        _stream_no,
+        _reason,
+        _src,
+        _dst,
+        _data,
+    ):
+        current = int(transferred)
+        delta = current - state["done"]
+        if delta > 0:
+            state["done"] = current
+            if progress is not None:
+                progress.add_bytes(delta)
+        return 0  # PROGRESS_CONTINUE
+
+    # 不传进度时完全不加回调：系统复制最少的跨语言开销。
+    # 大文件需要逐块进度，由调用方改用 Python 分块复制。
+    callback = callback_type(on_progress) if progress is not None else callback_type()
+    try:
+        ok = copy_file_ex(str(source), str(target), callback, None, None, 0)
+        if ok:
+            return True
+        error = ctypes.get_last_error()
+    except OSError:
+        error = ctypes.get_last_error()
+
+    # 失败时把已计入的进度退回，避免回退重拷后百分比超过 100
+    if progress is not None and state["done"]:
+        progress.add_bytes(-state["done"])
+    # 路径不存在/权限/不支持等可回退；磁盘满等真错误交给上层报失败
+    if error in (0, 2, 3, 5, 53, 123):
+        return False
+    raise OSError(error, "系统复制失败")
+
+
+def _copy_times(source: Path, target: Path) -> None:
+    """普通文件复制后只保留时间戳；权限位在 Windows 上无意义，copystat 更慢。"""
+    try:
+        stat = source.stat()
+        os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    except OSError:
+        pass
 
 
 def _copy_file(
     source: Path,
     target: Path,
     progress: "RelocationProgress | None" = None,
+    *,
+    native: bool = True,
+    size: int | None = None,
 ) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
+    # 小文件用系统复制（无回调，吞吐最高），完成时一次性记进度；
+    # 大文件改用下面的分块循环，保证复制途中进度条持续前进。
+    if native and _copy_file_native(source, target, None):
+        if progress is not None:
+            progress.add_bytes(size if size is not None else source.stat().st_size)
+        return
     with open(source, "rb") as src, open(target, "wb") as dst:
         while True:
             chunk = src.read(COPY_CHUNK)
@@ -82,10 +235,7 @@ def _copy_file(
             dst.write(chunk)
             if progress is not None:
                 progress.add_bytes(len(chunk))
-    try:
-        shutil.copystat(source, target)
-    except OSError:
-        pass
+    _copy_times(source, target)
 
 
 @dataclass
@@ -100,8 +250,15 @@ class _Plan:
         return len(self.files) + len(self.sqlite_files)
 
 
-def _scan(source: Path) -> _Plan:
+def _scan(
+    source: Path,
+    progress: "RelocationProgress | None" = None,
+) -> _Plan:
     plan = _Plan()
+    scanned_files = 0
+    scanned_bytes = 0
+    if progress is not None:
+        progress.begin_scan()
     for current, dirnames, filenames in os.walk(source):
         base = Path(current)
         rel_dir = base.relative_to(source)
@@ -125,6 +282,13 @@ def _scan(source: Path) -> _Plan:
             else:
                 plan.files.append((path, rel, size))
             plan.total_bytes += size
+            scanned_files += 1
+            scanned_bytes += size
+            # 文件很多或目录在网络盘上时，扫描本身也要让界面看到进展
+            if progress is not None and scanned_files % 64 == 0:
+                progress.scan_progress(scanned_files, scanned_bytes)
+    if progress is not None:
+        progress.scan_progress(scanned_files, scanned_bytes)
     return plan
 
 
@@ -140,25 +304,52 @@ class RelocationProgress:
         self.files_total = 0
         self.bytes_done = 0
         self.bytes_total = 0
+        self.files_scanned = 0
+        self.bytes_scanned = 0
         self.current = ""
         self.error = ""
         self.result: dict[str, Any] | None = None
         self.started_at = time.monotonic()
+        self.scan_started_at = self.started_at
+        self.copy_started_at = 0.0
         self.finished_at = 0.0
+        # 复制速度单独用高精度计时：monotonic 在 Windows 的粒度约 15ms，
+        # 小库复制会在同一刻度内完成，速度被算成 0。
+        self._copy_perf = 0.0
+        self._finish_perf = 0.0
+        # 最近两秒的采样用于实时速度；平均速度仍按复制阶段单独计时，
+        # 不把扫描/等待时间算进去（否则大库看起来只有几 MB/s）。
+        self._samples: deque[tuple[float, int]] = deque(maxlen=240)
 
     def set_phase(self, phase: str) -> None:
         with self._lock:
             self.phase = phase
+
+    def begin_scan(self) -> None:
+        with self._lock:
+            self.phase = "scanning"
+            self.scan_started_at = time.monotonic()
+
+    def scan_progress(self, files: int, total_bytes: int) -> None:
+        with self._lock:
+            self.files_scanned = max(self.files_scanned, files)
+            self.bytes_scanned = max(self.bytes_scanned, total_bytes)
 
     def begin(self, files_total: int, bytes_total: int) -> None:
         with self._lock:
             self.phase = "copying"
             self.files_total = files_total
             self.bytes_total = bytes_total
+            self.copy_started_at = time.monotonic()
+            self._copy_perf = time.perf_counter()
+            self._samples.clear()
+            self._samples.append((self.copy_started_at, 0))
 
     def add_bytes(self, size: int) -> None:
         with self._lock:
-            self.bytes_done += max(0, size)
+            # 系统复制失败回退时会传负值，把之前计入的部分退掉
+            self.bytes_done = max(0, self.bytes_done + size)
+            self._samples.append((time.monotonic(), self.bytes_done))
 
     def file_started(self, name: str) -> None:
         with self._lock:
@@ -176,6 +367,7 @@ class RelocationProgress:
             self.bytes_done = max(self.bytes_done, self.bytes_total)
             self.current = ""
             self.finished_at = time.monotonic()
+            self._finish_perf = time.perf_counter()
 
     def fail(self, message: str) -> None:
         with self._lock:
@@ -183,12 +375,32 @@ class RelocationProgress:
             self.error = message or "迁移失败"
             self.current = ""
             self.finished_at = time.monotonic()
+            self._finish_perf = time.perf_counter()
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
-            end = self.finished_at or time.monotonic()
-            elapsed = max(0.0, end - self.started_at)
-            speed = self.bytes_done / elapsed if elapsed > 0 else 0.0
+            now = self.finished_at or time.monotonic()
+            elapsed = max(0.0, now - self.started_at)
+            # 速度用 perf_counter 计时，避免小库复制落在同一毫秒刻度里算出 0
+            copy_now = self._finish_perf or time.perf_counter()
+            copy_elapsed = (
+                max(0.0, copy_now - self._copy_perf) if self._copy_perf else 0.0
+            )
+            speed = self.bytes_done / copy_elapsed if copy_elapsed > 0 else 0.0
+
+            instant = 0.0
+            if self.copy_started_at and len(self._samples) >= 2:
+                cutoff = now - 2.0
+                recent = [pair for pair in self._samples if pair[0] >= cutoff]
+                if len(recent) >= 2:
+                    span = recent[-1][0] - recent[0][0]
+                    if span > 0:
+                        instant = (recent[-1][1] - recent[0][1]) / span
+            if instant <= 0:
+                instant = speed
+
+            remaining = max(0, self.bytes_total - self.bytes_done)
+            eta = remaining / instant if instant > 0 else 0.0
             data: dict[str, Any] = {
                 "job_id": self.id,
                 "phase": self.phase,
@@ -197,10 +409,15 @@ class RelocationProgress:
                 "files_total": self.files_total,
                 "bytes_done": self.bytes_done,
                 "bytes_total": self.bytes_total,
+                "files_scanned": self.files_scanned,
+                "bytes_scanned": self.bytes_scanned,
                 "current": self.current,
                 "error": self.error,
                 "elapsed": round(elapsed, 1),
+                "copy_elapsed": round(copy_elapsed, 1),
                 "speed": round(speed, 1),
+                "instant_speed": round(max(0.0, instant), 1),
+                "eta": round(max(0.0, eta), 1),
             }
             if self.result is not None:
                 data["result"] = self.result
@@ -226,6 +443,16 @@ def get_job(job_id: str) -> dict[str, Any] | None:
     with _jobs_lock:
         job = _jobs.get(job_id)
     return job.snapshot() if job is not None else None
+
+
+def active_job() -> dict[str, Any] | None:
+    """当前正在跑的迁移任务，供前端切换界面后重新挂载时恢复进度。"""
+    with _jobs_lock:
+        jobs = list(_jobs.values())
+    for job in jobs:
+        if job.phase in _ACTIVE_PHASES:
+            return job.snapshot()
+    return None
 
 
 def start_relocate(
@@ -311,13 +538,11 @@ def _copy_plan(
             progress.file_started(rel.as_posix())
         child = target / rel
         try:
-            _copy_sqlite(source, child)
+            _copy_sqlite(source, child, progress, size)
         except sqlite3.Error:
             # 不是真正的 SQLite 文件（例如误命名的附件）：按普通文件复制
-
-            shutil.copy2(source, child)
+            _copy_file(source, child, progress, native=False, size=size)
         if progress is not None:
-            progress.add_bytes(size)
             progress.file_done()
         stats["files"] += 1
         stats["bytes"] += size
@@ -326,25 +551,46 @@ def _copy_plan(
         source, rel, size = item
         if progress is not None:
             progress.file_started(rel.as_posix())
-        _copy_file(source, target / rel, progress)
+        _copy_file(
+            source,
+            target / rel,
+            progress,
+            native=size < LARGE_FILE,
+            size=size,
+        )
         if progress is not None:
             progress.file_done()
         return size
 
-    if not plan.files:
-        return
-    workers = min(COPY_WORKERS, len(plan.files))
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="storage-copy") as pool:
-        futures = [pool.submit(copy_one, item) for item in plan.files]
-        try:
-            for future in as_completed(futures):
-                size = future.result()
+    def run_batch(items: list[tuple[Path, Path, int]], limit: int) -> None:
+        if not items:
+            return
+        workers = max(1, min(limit, len(items)))
+        if workers == 1:
+            for item in items:
                 stats["files"] += 1
-                stats["bytes"] += size
-        except Exception:
-            for future in futures:
-                future.cancel()
-            raise
+                stats["bytes"] += copy_one(item)
+            return
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="storage-copy"
+        ) as pool:
+            futures = [pool.submit(copy_one, item) for item in items]
+            try:
+                for future in as_completed(futures):
+                    size = future.result()
+                    stats["files"] += 1
+                    stats["bytes"] += size
+            except Exception:
+                for future in futures:
+                    future.cancel()
+                raise
+
+    # 大文件顺序读写更吃带宽，单独少量并发；大量小文件（页图、解析产物）
+    # 走多线程重叠元数据开销。分两批，避免两类 IO 互相打断。
+    large = [item for item in plan.files if item[2] >= LARGE_FILE]
+    small = [item for item in plan.files if item[2] < LARGE_FILE]
+    run_batch(large, LARGE_WORKERS)
+    run_batch(small, COPY_WORKERS)
 
 
 def relocate(
@@ -367,8 +613,8 @@ def relocate(
     _probe_writable(target)
 
     if progress is not None:
-        progress.set_phase("scanning")
-    plan = _scan(source)
+        progress.begin_scan()
+    plan = _scan(source, progress)
     if progress is not None:
         progress.begin(plan.total_files, plan.total_bytes)
 

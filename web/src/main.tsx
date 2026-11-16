@@ -2,6 +2,7 @@ import React, { lazy, Suspense } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
 import { ErrorBoundary } from './components/ErrorBoundary'
+import { StorageRelocationWatcher } from './components/StorageRelocationWatcher'
 import 'katex/dist/katex.min.css'
 import './styles.css'
 import './research/research.css'
@@ -17,7 +18,7 @@ import {
   restoreModelSettings,
   startAppSettingsBackup,
 } from './lib/settingsSync'
-import { applyReadingFonts } from './lib/readingPrefs'
+import { applyReaderFont, applyReadingFonts } from './lib/readingPrefs'
 
 const TourRoot = lazy(() =>
   import('./tour/TourRoot').then((module) => ({ default: module.TourRoot })),
@@ -40,6 +41,7 @@ if (mobile && hasMobileServer()) {
 
 migrateLegacyStorage()
 applyReadingFonts()
+applyReaderFont()
 
 async function boot() {
   if (!mobile) {
@@ -67,6 +69,7 @@ async function boot() {
     <React.StrictMode>
       <ErrorBoundary title="应用渲染失败" hint="刷新页面可以恢复；如果反复出现，请把这段错误信息反馈给我们。">
         <App />
+        <StorageRelocationWatcher />
         {isDesktopApp() && (
           <Suspense fallback={null}>
             <TourRoot />

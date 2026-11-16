@@ -26,6 +26,7 @@ import { appendLocalChat, loadLocalChat } from '../lib/offlineStore'
 import { tourBus } from '../tour/tourBus'
 import { Markdown, balanceMarkdown } from './Markdown'
 import { Katex } from './Katex'
+import { ChatNav } from './ChatNav'
 import { ReaderToolCard } from './ReaderToolCard'
 import {
   IconCheck,
@@ -219,6 +220,12 @@ export function ChatPanel({
     [settings],
   )
   const current = useMemo(() => readyModel(settings, 'answer'), [settings])
+
+  // 左侧纵向导航：一轮提问对应一个圆点，提问内容作为悬浮摘要
+  const navItems = useMemo(
+    () => turns.map((t) => ({ id: String(t.id), text: t.question })),
+    [turns],
+  )
 
   const patch = (id: number, fn: (t: Turn) => Turn) =>
     setTurns((prev) => prev.map((t) => (t.id === id ? fn(t) : t)))
@@ -715,7 +722,12 @@ export function ChatPanel({
         void addFiles(Array.from(event.dataTransfer.files))
       }}
     >
-      <div className="chat-list" ref={listRef} onScroll={onScroll}>
+      <div
+        className="chat-scroll-wrap"
+        data-nav={navItems.length > 3 ? 'on' : undefined}
+      >
+        <ChatNav items={navItems} scrollRef={listRef} />
+        <div className="chat-list" ref={listRef} onScroll={onScroll}>
         {!historyReady && turns.length === 0 && (
           <div className="turn-status">
             <span className="turn-dot" />
@@ -749,7 +761,7 @@ export function ChatPanel({
         )}
 
         {turns.map((t) => (
-          <article className="turn" key={t.id}>
+          <article className="turn" key={t.id} data-chat-nav-item={t.id}>
             <div className="turn-q">{t.question}</div>
 
             {t.quotes && t.quotes.length > 0 && (
@@ -866,6 +878,7 @@ export function ChatPanel({
             </div>
           </article>
         ))}
+        </div>
       </div>
 
       <div className="composer">

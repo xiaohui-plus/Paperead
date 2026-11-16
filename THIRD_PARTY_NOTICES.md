@@ -16,6 +16,10 @@ Paperead 以 AGPL-3.0 发布。桌面安装包内含以下第三方组件，特�
 | React / React DOM | 前端 | MIT | https://react.dev/ |
 | Vite | 前端构建 | MIT | https://vitejs.dev/ |
 | KaTeX | 公式渲染 | MIT | https://katex.org/ |
+| Material Icon Theme | 文件格式图标 | MIT | https://github.com/material-extensions/vscode-material-icon-theme |
+
+文件格式图标取自 Material Icon Theme 5.18.0，许可证原文见
+`web/src/assets/file-icons/LICENSE.txt`。
 
 ## AGPL 说明
 

@@ -8,6 +8,7 @@ import {
   IconPlus,
 } from '../components/icons'
 import { Markdown } from '../components/Markdown'
+import { FileTypeIcon } from '../components/fileTypeIcons'
 import {
   relativeTime,
   researchApi,
@@ -935,12 +936,15 @@ function ArtifactPreview({
   return (
     <div className="project-preview">
       <header className="project-preview-head">
-        <div>
-          <h2>{nameWithSuffix(artifact.title, artifact.path)}</h2>
-          <span>
-            {artifact.kind}
-            {artifact.path ? ` · ${artifact.path}` : ''}
-          </span>
+        <div className="project-preview-heading">
+          <FileTypeIcon name={nameWithSuffix(artifact.title, artifact.path)} />
+          <div>
+            <h2>{nameWithSuffix(artifact.title, artifact.path)}</h2>
+            <span>
+              {artifact.kind}
+              {artifact.path ? ` · ${artifact.path}` : ''}
+            </span>
+          </div>
         </div>
         <div className="project-preview-actions">
           <a

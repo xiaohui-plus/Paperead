@@ -154,7 +154,8 @@ export function BlockView({
   )
 
   const onParagraphMouseUp = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if ((!annotationActions && !onAskQuote) || !paperId) return
+    // 双击的第二下用于「跳到批注」，不再触发划词工具条
+    if (event.detail > 1 || !paperId) return
     // 点在高亮/引用按钮上时不进入划词流程
     const target = event.target as HTMLElement
     if (target.closest('[data-aid], .cite-mark')) return
@@ -416,6 +417,7 @@ export function BlockView({
       {selection && (
         <SelectionToolbar
           rect={selection.rect}
+          text={selection.quote}
           onPick={(color) => void applyHighlight(color, 'highlight')}
           onComment={(color) => void applyHighlight(color, 'comment')}
           onAsk={

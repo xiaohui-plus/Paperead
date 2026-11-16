@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { ChatNav } from '../components/ChatNav'
 import { IconChat } from '../components/icons'
 import type { ChatState } from '../lib/researchTypes'
 import { TurnBlock } from './TurnBlock'
@@ -84,6 +85,15 @@ export function Transcript({ chat, now, loading = false }: Props) {
   const scroller = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
   const rows = useMemo(() => buildRows(chat), [chat])
+  // 导航只认用户提问：一轮提问一个圆点，助手回答不参与
+  const navItems = useMemo(
+    () =>
+      chat.messages
+        .slice()
+        .sort((a, b) => a.at - b.at)
+        .map((message) => ({ id: message.id, text: message.text })),
+    [chat.messages],
+  )
 
   useEffect(() => {
     const element = scroller.current
@@ -120,22 +130,36 @@ export function Transcript({ chat, now, loading = false }: Props) {
   }
 
   return (
-    <div className="project-transcript-scroll" ref={scroller} onScroll={onScroll}>
-      <div className="project-transcript-body">
-        {rows.map((row) =>
-          row.kind === 'message' ? (
-            <div className="chat-message" key={row.id}>
-              <MessageBubble text={row.text} />
-            </div>
-          ) : (
-            <TurnBlock key={row.id} turn={row.turn} now={now} />
-          ),
-        )}
-        {chat.notices.map((notice) => (
-          <p className="chat-notice" data-level={notice.level} key={notice.id}>
-            {notice.text}
-          </p>
-        ))}
+    <div
+      className="project-transcript-wrap"
+      data-nav={navItems.length > 3 ? 'on' : undefined}
+    >
+      <ChatNav
+        items={navItems}
+        scrollRef={scroller}
+        contentSelector=".project-transcript-body"
+      />
+      <div className="project-transcript-scroll" ref={scroller} onScroll={onScroll}>
+        <div className="project-transcript-body">
+          {rows.map((row) =>
+            row.kind === 'message' ? (
+              <div
+                className="chat-message"
+                key={row.id}
+                data-chat-nav-item={row.id}
+              >
+                <MessageBubble text={row.text} />
+              </div>
+            ) : (
+              <TurnBlock key={row.id} turn={row.turn} now={now} />
+            ),
+          )}
+          {chat.notices.map((notice) => (
+            <p className="chat-notice" data-level={notice.level} key={notice.id}>
+              {notice.text}
+            </p>
+          ))}
+        </div>
       </div>
     </div>
   )

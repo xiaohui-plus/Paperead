@@ -1,10 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import {
-  IconFolder,
-  IconList,
-  IconPdf,
-  IconRefresh,
-} from '../components/icons'
+import { IconFolder, IconRefresh } from '../components/icons'
+import { FileTypeIcon } from '../components/fileTypeIcons'
 import {
   formatSize,
   researchApi,
@@ -33,10 +29,7 @@ function baseName(path: string): string {
 
 function iconFor(entry: FsEntry) {
   if (entry.isDir) return <IconFolder />
-  if (entry.mime === 'application/pdf' || /\.pdf$/i.test(entry.name)) {
-    return <IconPdf />
-  }
-  return <IconList />
+  return <FileTypeIcon name={entry.name} mime={entry.mime} />
 }
 
 /** 项目工作文件夹的 Jupyter 式浏览：上面是路径，下面是文件夹和文件。 */

@@ -165,6 +165,26 @@ export async function translatePaper(id: string, config: LLMConfigPayload): Prom
   })
 }
 
+export interface TextTranslation {
+  ok: boolean
+  translation: string
+  target_lang: string
+  target_name: string
+}
+
+/** 划词翻译：只翻选中的一小段文字，不写回论文。 */
+export async function translateText(
+  text: string,
+  config: LLMConfigPayload,
+  targetLang = 'zh-Hans',
+): Promise<TextTranslation> {
+  return jsonFetch<TextTranslation>('/api/translate/text', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, config, target_lang: targetLang }),
+  })
+}
+
 /** 逐条读取 SSE `data:` 事件；翻译与问答共用。 */
 async function readSSE<T>(res: Response, onEvent: (event: T) => void): Promise<void> {
   const reader = res.body?.getReader()
@@ -338,6 +358,8 @@ export interface StorageInfo {
   path: string
   configured: boolean
   configured_path: string
+  /** 新路径已保存、等待重启生效（迁移刚完成，不是路径失效） */
+  pending?: boolean
   fallback: boolean
   writable: boolean
 }
@@ -370,12 +392,21 @@ export interface StorageRelocateJob {
   files_total: number
   bytes_done: number
   bytes_total: number
+  /** 扫描阶段已统计的文件/字节，复制阶段沿用最后一次结果 */
+  files_scanned?: number
+  bytes_scanned?: number
   /** 正在复制的文件（相对文献库根目录的路径） */
   current: string
   error: string
   elapsed: number
-  /** 平均复制速度，字节/秒 */
+  /** 复制阶段耗时（不含扫描） */
+  copy_elapsed?: number
+  /** 复制阶段平均速度，字节/秒 */
   speed: number
+  /** 最近两秒的实时速度，字节/秒 */
+  instant_speed?: number
+  /** 预计剩余秒数 */
+  eta?: number
   result?: StorageRelocateResult
 }
 
@@ -399,6 +430,14 @@ export async function startRelocateStorage(
 
 export async function getRelocateStorageJob(jobId: string): Promise<StorageRelocateJob> {
   return jsonFetch(`/api/storage/relocate/${encodeURIComponent(jobId)}`)
+}
+
+/** 当前是否有正在进行的迁移；切换界面后重新挂载时用它恢复进度。 */
+export async function getActiveRelocateJob(): Promise<StorageRelocateJob | null> {
+  const data = await jsonFetch<{ job: StorageRelocateJob | null }>(
+    '/api/storage/relocate/active',
+  )
+  return data.job ?? null
 }
 
 // ── Zotero Web API 双向同步 ─────────────────────────────

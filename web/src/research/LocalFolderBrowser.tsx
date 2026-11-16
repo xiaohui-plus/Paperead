@@ -5,6 +5,7 @@ import {
   IconFolder,
   IconRefresh,
 } from '../components/icons'
+import { FileTypeIcon } from '../components/fileTypeIcons'
 import {
   formatSize,
   researchApi,
@@ -174,12 +175,12 @@ export function LocalFolderBrowser({
                   onClick={() => void load(item.path)}
                 >
                   <IconFolder />
-                  <span>{item.name}</span>
+                  <span className="folder-browser-name">{item.name}</span>
                 </button>
               ) : (
                 <div key={`${item.path}`} className="folder-browser-row is-file">
-                  <span className="folder-browser-file-dot" />
-                  <span>{item.name}</span>
+                  <FileTypeIcon name={item.name} mime={item.mime} />
+                  <span className="folder-browser-name">{item.name}</span>
                   <em>{formatSize(item.size)}</em>
                 </div>
               ),

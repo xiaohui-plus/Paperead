@@ -11,9 +11,6 @@ import {
   IconCopy,
   IconEdit,
   IconFolder,
-  IconImage,
-  IconList,
-  IconPdf,
   IconPlus,
   IconRefresh,
   IconScissors,
@@ -21,6 +18,7 @@ import {
   IconTrash,
   IconUpload,
 } from '../components/icons'
+import { FileTypeIcon } from '../components/fileTypeIcons'
 import type { ProjectFile } from '../lib/researchApi'
 
 interface Props {
@@ -49,11 +47,7 @@ type Clipboard = { ids: string[]; mode: 'cut' | 'copy' }
 function iconFor(item: ProjectFile) {
   if (item.kind === 'folder') return <IconFolder />
   if (item.kind === 'artifact') return <IconSpark />
-  if (item.mime === 'application/pdf' || item.name.toLowerCase().endsWith('.pdf')) {
-    return <IconPdf />
-  }
-  if (item.mime.startsWith('image/')) return <IconImage />
-  return <IconList />
+  return <FileTypeIcon name={item.name || item.path} mime={item.mime} />
 }
 
 function isPdf(item: ProjectFile): boolean {

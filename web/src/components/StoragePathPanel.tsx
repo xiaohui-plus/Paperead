@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import {
+  getActiveRelocateJob,
   getRelocateStorageJob,
   getStorageInfo,
   RELOCATE_ACTIVE_PHASES,
@@ -9,6 +9,12 @@ import {
   type StorageInfo,
   type StorageRelocateJob,
 } from '../lib/library'
+import {
+  clearRelocateJobId,
+  loadRelocateJobId,
+  RELOCATE_FAILED_EVENT,
+  saveRelocateJobId,
+} from '../lib/storageRelocation'
 import { isDesktopApp } from '../lib/update'
 import { LocalFolderBrowser } from '../research/LocalFolderBrowser'
 import { IconFolder } from './icons'
@@ -27,6 +33,14 @@ function formatBytes(value: number): string {
     index += 1
   }
   return `${index === 0 || size >= 100 ? Math.round(size) : size.toFixed(1)} ${units[index]}`
+}
+
+function formatEta(value: number | undefined): string {
+  if (!value || !Number.isFinite(value) || value <= 0) return ''
+  if (value < 60) return `${Math.ceil(value)} 秒`
+  const minutes = Math.floor(value / 60)
+  const seconds = Math.round(value % 60)
+  return seconds > 0 ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分`
 }
 
 function percentOf(job: StorageRelocateJob): number {
@@ -60,6 +74,10 @@ export function StoragePathPanel() {
 
   const busy = Boolean(job && RELOCATE_ACTIVE_PHASES.includes(job.phase))
   const pct = job ? percentOf(job) : 0
+  const scanning = job?.phase === 'scanning'
+  const speed = job
+    ? (job.instant_speed && job.instant_speed > 0 ? job.instant_speed : job.speed)
+    : 0
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -73,40 +91,63 @@ export function StoragePathPanel() {
     }
   }, [])
 
-  useEffect(() => {
-    void load()
-  }, [load])
-
   const settle = useCallback((next: StorageRelocateJob) => {
     if (next.phase === 'failed') {
+      clearRelocateJobId()
       setJob(null)
       setError(next.error || '迁移失败')
       return
     }
     if (next.phase !== 'done' || !next.result) return
+    clearRelocateJobId()
     const result = next.result
     setJob(next)
     setInfo({
       path: result.path,
       configured: true,
       configured_path: result.path,
+      pending: true,
       fallback: false,
       writable: true,
     })
     setDraft('')
-    if (isDesktopApp()) {
-      setNotice(
-        `已复制 ${result.files} 个文件（${formatBytes(result.bytes)}），正在重启应用…`,
-      )
-      window.setTimeout(() => {
-        void invoke('restart_app').catch(() => undefined)
-      }, 700)
-    } else {
-      setNotice(
-        `迁移完成（${result.files} 个文件，${formatBytes(result.bytes)}）。请手动重启应用以使用新位置。`,
-      )
-    }
+    // 重启由应用根部的迁移守望统一触发，设置页关掉也不会漏
+    setNotice(
+      `迁移完成（${result.files} 个文件，${formatBytes(result.bytes)}）。应用会自动重启；若没有重启，请手动重启以使用新位置。`,
+    )
   }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  // 切换界面/刷新后接上仍在跑的任务：先看本地句柄，再兜底查一次 active。
+  useEffect(() => {
+    let cancelled = false
+    const restore = async () => {
+      const saved = loadRelocateJobId()
+      if (saved) {
+        try {
+          const current = await getRelocateStorageJob(saved)
+          if (cancelled) return
+          if (current.phase === 'done' || current.phase === 'failed') settle(current)
+          else setJob(current)
+          return
+        } catch {
+          clearRelocateJobId()
+        }
+      }
+      const active = await getActiveRelocateJob().catch(() => null)
+      if (!cancelled && active) {
+        saveRelocateJobId(active.job_id)
+        setJob(active)
+      }
+    }
+    void restore()
+    return () => {
+      cancelled = true
+    }
+  }, [settle])
 
   // 后台任务：每 400ms 拉一次进度，done/failed 时停止并收尾。
   useEffect(() => {
@@ -144,6 +185,18 @@ export function StoragePathPanel() {
     }
   }, [job?.job_id, job?.phase, settle])
 
+  // 迁移即使在别的界面失败，也会广播过来；面板打开时直接显示原因。
+  useEffect(() => {
+    const onFailed = (event: Event) => {
+      const message = String((event as CustomEvent).detail || '迁移失败')
+      clearRelocateJobId()
+      setJob(null)
+      setError(message)
+    }
+    window.addEventListener(RELOCATE_FAILED_EVENT, onFailed)
+    return () => window.removeEventListener(RELOCATE_FAILED_EVENT, onFailed)
+  }, [])
+
   const pick = async () => {
     setError('')
     setNotice('')
@@ -169,6 +222,7 @@ export function StoragePathPanel() {
     setNotice('')
     try {
       const { status } = await startRelocateStorage(draft)
+      saveRelocateJobId(status.job_id)
       setJob(status)
       if (!RELOCATE_ACTIVE_PHASES.includes(status.phase)) settle(status)
     } catch (saveError) {
@@ -221,28 +275,41 @@ export function StoragePathPanel() {
         <div className="storage-progress">
           <div className="storage-progress-track">
             <span
-              className={`storage-progress-fill${job.phase === 'scanning' ? ' is-pending' : ''}`}
-              style={{ width: `${job.phase === 'scanning' ? 100 : pct}%` }}
+              className={`storage-progress-fill${scanning ? ' is-pending' : ''}`}
+              style={{ width: `${scanning ? 100 : pct}%` }}
             />
           </div>
           <div className="storage-progress-meta">
             <span>
               {PHASE_TEXT[job.phase]}
-              {job.phase !== 'scanning' ? ` ${pct}%` : ''}
+              {!scanning ? ` ${pct}%` : ''}
             </span>
             <span>
-              {job.files_total > 0 ? `${job.files_done}/${job.files_total} 个文件 · ` : ''}
-              {formatBytes(job.bytes_done)}
-              {job.bytes_total > 0 ? ` / ${formatBytes(job.bytes_total)}` : ''}
+              {scanning
+                ? `已扫描 ${job.files_scanned ?? 0} 个文件 · ${formatBytes(job.bytes_scanned ?? 0)}`
+                : job.files_total > 0
+                  ? `${job.files_done}/${job.files_total} 个文件 · ${formatBytes(job.bytes_done)} / ${formatBytes(job.bytes_total)}`
+                  : formatBytes(job.bytes_done)}
             </span>
           </div>
-          {(job.current || job.speed > 0) && (
+          {!scanning && (job.current || speed > 0) && (
             <div className="storage-progress-meta is-current">
               <span title={job.current}>{job.current || '—'}</span>
-              {job.speed > 0 && <span>{formatBytes(job.speed)}/s</span>}
+              {speed > 0 && (
+                <span>
+                  {formatBytes(speed)}/s
+                  {job.eta ? ` · 剩余 ${formatEta(job.eta)}` : ''}
+                </span>
+              )}
             </div>
           )}
         </div>
+      )}
+
+      {info?.pending && (
+        <p className="storage-path-hint">
+          新路径已保存，重启应用后生效；旧目录会在重启后由后台清理。
+        </p>
       )}
 
       {info?.fallback && (
@@ -258,7 +325,7 @@ export function StoragePathPanel() {
       )}
       {busy && (
         <p className="storage-path-hint">
-          迁移期间可以继续阅读，但请勿关闭应用；复制完成后会自动重启。
+          迁移在后台进行，可以切换界面继续阅读，传输不会中断；复制完成后应用会自动重启。
         </p>
       )}
       {error && <p className="storage-path-error">{error}</p>}

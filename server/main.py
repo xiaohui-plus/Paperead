@@ -86,6 +86,7 @@ from paperead.translate import (
     quality_ok,
     translate_block,
     translate_paper,
+    translate_text,
 )
 from server.feedback_api import API_BASE as FEEDBACK_API_BASE
 from server.feedback_api import build_feedback_router
@@ -3038,9 +3039,18 @@ class TranslateReq(BaseModel):
     )
 
 
+class TranslateTextReq(BaseModel):
+    """划词翻译：只翻选中的一小段文字，不写回论文。"""
+
+    config: LLMConfigIn
+    text: str = Field(..., min_length=1, max_length=6000)
+    target_lang: str = Field("zh-Hans", description="译文目标语言")
+
+
 TRANSLATION_LANGS = {
     "zh-Hans": "简体中文",
     "zh-Hant": "繁體中文",
+    "en": "英语",
     "ja": "日语",
     "ko": "韩语",
     "fr": "法语",
@@ -3056,6 +3066,43 @@ def _norm_lang(lang: str | None) -> str:
 
 def _target_name(lang: str) -> str:
     return TRANSLATION_LANGS.get(lang, "简体中文")
+
+
+@app.post("/api/translate/text")
+async def translate_text_api(req: TranslateTextReq) -> dict:
+    """划词翻译：只翻选中的一小段文字，不写回论文、不影响整篇译文。
+
+    阅读页划选原文后点「翻译」会调这里；桌面端由 sidecar 请求模型，
+    手机离线时前端改走本机模型通道，两条路径共用同一套提示词与占位符保护。
+    """
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="没有可翻译的文字")
+    lang = _norm_lang(req.target_lang)
+    backend = OpenAICompatBackend(
+        LLMConfig(
+            api_key=req.config.api_key,
+            base_url=req.config.base_url.rstrip("/"),
+            model=req.config.model,
+            timeout=req.config.timeout,
+        )
+    )
+    from paperead.llm import set_backend
+
+    set_backend(backend)
+    try:
+        out = await translate_text(text, target_name=_target_name(lang))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # 模型侧错误统一转成可读提示，前端直接展示
+        log.warning("划词翻译失败：%s", exc)
+        raise HTTPException(status_code=502, detail=f"翻译失败：{exc}") from exc
+    return {
+        "ok": True,
+        "translation": out,
+        "target_lang": lang,
+        "target_name": _target_name(lang),
+    }
 
 
 def _reset_for_language(paper_id: str, lang: str) -> bool:
@@ -4249,13 +4296,20 @@ def get_storage() -> dict:
     """当前文献库目录与自定义状态；自定义路径失效时返回回退信息。"""
     configured = load_data_location()
     configured_path = str(configured) if configured is not None else ""
+    differs = bool(configured is not None and not _same_path(configured, DATA_DIR))
+    try:
+        configured_exists = bool(configured is not None and configured.exists())
+    except OSError:
+        configured_exists = False
+    # 迁移完成后新路径已写入配置、但当前进程还开着旧目录：这是“等待重启”，
+    # 不是“自定义路径失效”，界面不能提示成不可用。
+    pending = differs and configured_exists
     return {
         "path": str(DATA_DIR),
         "configured": configured is not None,
         "configured_path": configured_path,
-        "fallback": bool(
-            configured is not None and not _same_path(configured, DATA_DIR)
-        ),
+        "pending": pending,
+        "fallback": differs and not configured_exists,
         "writable": os.access(DATA_DIR, os.W_OK),
     }
 
@@ -4274,6 +4328,12 @@ def relocate_storage(req: StorageRelocateIn) -> dict:
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     return {"job_id": job.id, "status": job.snapshot()}
+
+
+@app.get("/api/storage/relocate/active")
+def relocate_storage_active() -> dict:
+    """当前是否有正在进行的迁移；前端切换界面后重新挂载时用它恢复进度。"""
+    return {"job": storage_migration.active_job()}
 
 
 @app.get("/api/storage/relocate/{job_id}")

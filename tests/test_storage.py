@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -150,3 +151,63 @@ def test_only_one_active_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
             if snapshot and snapshot["phase"] in ("done", "failed"):
                 break
             time.sleep(0.05)
+
+def test_active_job_reports_running_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "old"
+    target = tmp_path / "new"
+    _make_library(source)
+    real_copy = storage._copy_file
+    gate = threading.Event()
+
+    def slow_copy(*args, **kwargs):
+        gate.wait(3)
+        return real_copy(*args, **kwargs)
+
+    monkeypatch.setattr(storage, "_copy_file", slow_copy)
+
+    job = storage.start_relocate(source, target)
+    try:
+        deadline = time.monotonic() + 5
+        snapshot = None
+        while time.monotonic() < deadline:
+            snapshot = storage.active_job()
+            if snapshot is not None:
+                break
+            time.sleep(0.05)
+        assert snapshot is not None
+        assert snapshot["job_id"] == job.id
+        assert snapshot["phase"] in storage._ACTIVE_PHASES
+    finally:
+        gate.set()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            current = storage.get_job(job.id)
+            if current and current["phase"] in ("done", "failed"):
+                break
+            time.sleep(0.05)
+
+
+def test_speed_excludes_scan_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "old"
+    target = tmp_path / "new"
+    _make_library(source)
+    progress = storage.RelocationProgress(target)
+    real_scan = storage._scan
+
+    def slow_scan(src, prog=None):
+        if prog is not None:
+            prog.begin_scan()
+        time.sleep(0.45)
+        return real_scan(src, prog)
+
+    monkeypatch.setattr(storage, "_scan", slow_scan)
+    storage.relocate(source, target, progress)
+    progress.finish({"ok": True})
+    snapshot = progress.snapshot()
+
+    # 扫描耗时不应算进复制速度；扫描阶段也要有真实文件计数
+    assert snapshot["elapsed"] - snapshot["copy_elapsed"] >= 0.4
+    assert snapshot["files_scanned"] == 6
+    assert snapshot["bytes_scanned"] == snapshot["bytes_total"]
+    assert snapshot["speed"] > 0
+    assert snapshot["instant_speed"] >= 0

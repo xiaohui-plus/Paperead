@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { IconClose, IconDownload } from '../../components/icons'
+import { FileTypeIcon } from '../../components/fileTypeIcons'
 import { Markdown } from '../../components/Markdown'
 import {
   formatSize,
@@ -242,12 +243,15 @@ export function FilePreview({ projectId, file, onClose }: Props) {
   return (
     <div className="project-preview">
       <header className="project-preview-head">
-        <div>
-          <h2>{file.name}</h2>
-          <span>
-            {file.path}
-            {file.size ? ` · ${formatSize(file.size)}` : ''} · {KIND_LABEL[kind]}
-          </span>
+        <div className="project-preview-heading">
+          <FileTypeIcon name={file.name} mime={file.mime} />
+          <div>
+            <h2>{file.name}</h2>
+            <span>
+              {file.path}
+              {file.size ? ` · ${formatSize(file.size)}` : ''} · {KIND_LABEL[kind]}
+            </span>
+          </div>
         </div>
         <div className="project-preview-actions">
           <a className="icon-btn" href={url} download={file.name} title="下载">
@@ -285,12 +289,15 @@ export function LocalFilePreview({ url, file, onClose }: LocalProps) {
   return (
     <div className="project-preview">
       <header className="project-preview-head">
-        <div>
-          <h2>{file.name}</h2>
-          <span>
-            {file.path}
-            {file.size ? ` · ${formatSize(file.size)}` : ''} · {KIND_LABEL[kind]}
-          </span>
+        <div className="project-preview-heading">
+          <FileTypeIcon name={file.name} mime={file.mime} />
+          <div>
+            <h2>{file.name}</h2>
+            <span>
+              {file.path}
+              {file.size ? ` · ${formatSize(file.size)}` : ''} · {KIND_LABEL[kind]}
+            </span>
+          </div>
         </div>
         <div className="project-preview-actions">
           <a className="icon-btn" href={url} download={file.name} title="下载">

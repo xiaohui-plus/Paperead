@@ -39,6 +39,8 @@ interface Props {
   pdfUrl?: string | null
   annotations?: Annotation[]
   annotationActions?: AnnotationActions
+  /** 双击页面上已有的荧光笔/批注：左侧批注栏切到并定位到这一条 */
+  onOpenAnnotation?: (annotation: Annotation) => void
   /** 划词工具条点「提问」：把原版 PDF 里选中的文字带到左侧问答面板 */
   onAskQuote?: (quote: ReaderQuoteDraft) => void
 }
@@ -66,6 +68,50 @@ function normalizeRect(rect: DOMRect, frame: DOMRect): PdfRect {
   }
 }
 
+const RECT_EPS = 0.0015
+
+/**
+ * 把一次选区拆出的矩形合并成「每行一个」。
+ *
+ * pdf.js 文本层是按 span 排的，`range.getClientRects()` 在同一行会返回多个
+ * 互相重叠的小矩形；逐个画半透明色会叠成实色并遮住页面文字，逐个画下划线
+ * 则同一行出现两条甚至更多线。先去掉重复框，再把同一行的框横向并成一段，
+ * 荧光笔是连续的一条、批注是干净的一条下划线。
+ */
+function mergeLineRects(rects: PdfRect[]): PdfRect[] {
+  if (rects.length <= 1) return rects.map((rect) => ({ ...rect }))
+  const unique: PdfRect[] = []
+  for (const rect of rects) {
+    const duplicate = unique.some(
+      (item) =>
+        Math.abs(item.x - rect.x) < RECT_EPS &&
+        Math.abs(item.y - rect.y) < RECT_EPS &&
+        Math.abs(item.w - rect.w) < RECT_EPS &&
+        Math.abs(item.h - rect.h) < RECT_EPS,
+    )
+    if (!duplicate) unique.push({ ...rect })
+  }
+  const lines: PdfRect[] = []
+  for (const rect of unique.sort((a, b) => a.y - b.y || a.x - b.x)) {
+    const line = lines.find(
+      (item) => Math.abs(item.y - rect.y) <= Math.max(item.h, rect.h) * 0.45,
+    )
+    if (!line) {
+      lines.push({ ...rect })
+      continue
+    }
+    const left = Math.min(line.x, rect.x)
+    const right = Math.min(1, Math.max(line.x + line.w, rect.x + rect.w))
+    const top = Math.min(line.y, rect.y)
+    const bottom = Math.min(1, Math.max(line.y + line.h, rect.y + rect.h))
+    line.x = left
+    line.y = top
+    line.w = Math.max(0, right - left)
+    line.h = Math.max(0, bottom - top)
+  }
+  return lines
+}
+
 /** 页内标注层：按归一化矩形画荧光笔填色或彩色下划线。 */
 function PdfAnnotationLayer({
   page,
@@ -79,7 +125,7 @@ function PdfAnnotationLayer({
   return (
     <div className="pdf-annot-layer" aria-hidden>
       {items.flatMap((item) =>
-        (item.rects ?? []).map((rect, index) => (
+        mergeLineRects(item.rects ?? []).map((rect, index) => (
           <span
             key={`${item.id}-${index}`}
             className={`pdf-annot pdf-annot-${item.kind} pdf-annot-${item.color}`}
@@ -118,6 +164,7 @@ export function PdfPages({
   pdfUrl,
   annotations = [],
   annotationActions,
+  onOpenAnnotation,
   onAskQuote,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -226,7 +273,8 @@ export function PdfPages({
   }, [useTextLayer, total, pdfReady])
 
   const onFrameMouseUp = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (!annotationActions && !onAskQuote) return
+    // 双击的第二下用于「跳到批注」，不再触发划词工具条
+    if (event.detail > 1) return
     const frame = event.currentTarget
     window.setTimeout(() => {
       const sel = window.getSelection()
@@ -240,13 +288,54 @@ export function PdfPages({
       )
       if (!page) return
       const frameRect = frame.getBoundingClientRect()
-      const rects = [...range.getClientRects()]
-        .filter((rect) => rect.width > 1 && rect.height > 1)
-        .map((rect) => normalizeRect(rect, frameRect))
-        .filter((rect) => rect.w > 0 && rect.h > 0)
+      const rects = mergeLineRects(
+        [...range.getClientRects()]
+          .filter((rect) => rect.width > 1 && rect.height > 1)
+          .map((rect) => normalizeRect(rect, frameRect))
+          .filter((rect) => rect.w > 0 && rect.h > 0),
+      )
       if (!rects.length) return
       setSelection({ page, quote, rects, rect: range.getBoundingClientRect() })
     }, 0)
+  }
+
+  /**
+   * 双击页面上的荧光笔/批注：按坐标命中已有的标注矩形，交给左侧批注栏定位。
+   *
+   * 标注层本身是 `pointer-events: none`（否则会挡住文本选择），所以这里不改
+   * 图层的事件，而是用归一化坐标反查——既能双击定位，也不影响正常划词。
+   */
+  const onFrameDoubleClick = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (!onOpenAnnotation) return
+    const frame = event.currentTarget
+    const bounds = frame.getBoundingClientRect()
+    if (!bounds.width || !bounds.height) return
+    const page = Number(frame.closest<HTMLElement>('[data-page]')?.dataset.page || 0)
+    if (!page) return
+    const x = (event.clientX - bounds.left) / bounds.width
+    const y = (event.clientY - bounds.top) / bounds.height
+    const pad = 0.006
+    const hits = annotations.filter(
+      (item) =>
+        item.page === page &&
+        (item.rects ?? []).some(
+          (rect) =>
+            x >= rect.x - pad &&
+            x <= rect.x + rect.w + pad &&
+            y >= rect.y - pad &&
+            y <= rect.y + rect.h + pad,
+        ),
+    )
+    if (!hits.length) return
+    // 后创建的标注画在上层，命中时优先返回它
+    const hit = [...hits].sort((a, b) =>
+      String(a.created_at ?? '').localeCompare(String(b.created_at ?? '')),
+    )[hits.length - 1]
+    event.preventDefault()
+    event.stopPropagation()
+    window.getSelection()?.removeAllRanges()
+    setSelection(null)
+    onOpenAnnotation(hit)
   }
 
   const applyAnnotation = async (color: AnnotationColor, kind: AnnotationKind) => {
@@ -303,6 +392,7 @@ export function PdfPages({
                     className="pdf-page-frame"
                     style={{ width: '100%', aspectRatio: ratio }}
                     onMouseUp={onFrameMouseUp}
+                    onDoubleClick={onFrameDoubleClick}
                   >
                     {visible.has(page) && (
                       <Page
@@ -337,6 +427,7 @@ export function PdfPages({
                 <div
                   className="pdf-page-frame"
                   style={{ width: '100%', aspectRatio: ratio }}
+                  onDoubleClick={onFrameDoubleClick}
                 >
                   <img
                     src={
@@ -365,6 +456,7 @@ export function PdfPages({
       {selection && (
         <SelectionToolbar
           rect={selection.rect}
+          text={selection.quote}
           onPick={(color) => void applyAnnotation(color, 'highlight')}
           onComment={(color) => void applyAnnotation(color, 'comment')}
           onAsk={

@@ -913,6 +913,21 @@
   flex: none;
 }
 
+/* 文件类型图标：按扩展名 / MIME 使用对应的标准格式图标 */
+.file-type-icon {
+  display: inline-flex;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  line-height: 0;
+}
+
+.file-type-icon > svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
 .project-tree-icon {
   display: inline-flex;
   flex: none;
@@ -1248,6 +1263,22 @@
   gap: 12px;
   padding: 14px 20px;
   border-bottom: 1px solid var(--line);
+}
+
+.project-preview-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.project-preview-heading > div {
+  min-width: 0;
+}
+
+.project-preview-heading .file-type-icon {
+  width: 24px;
+  height: 24px;
 }
 
 .project-preview-head h2 {
@@ -2698,7 +2729,7 @@
   color: var(--blue-ink);
 }
 
-.project-explorer-row svg {
+.project-explorer-row > svg {
   flex: none;
   width: 15px;
   height: 15px;
@@ -2849,7 +2880,7 @@
   color: var(--muted);
 }
 
-.folder-browser-row > span {
+.folder-browser-row > .folder-browser-name {
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -2869,13 +2900,6 @@
   color: var(--faint);
 }
 
-.folder-browser-row > .folder-browser-file-dot {
-  flex: none;
-  width: 9px;
-  height: 9px;
-  border-radius: 3px;
-  background: var(--line-2);
-}
 
 .folder-browser-note {
   margin: 0;
@@ -3635,4 +3659,27 @@
 
 .project-picker-create:hover {
   background: var(--bg-soft);
+}
+
+/* ── 会话正文外包一层：给左侧问答导航留定位基准 ─────── */
+
+.project-transcript-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.project-transcript-wrap .project-transcript-scroll {
+  flex: 1;
+  min-height: 0;
+}
+
+@media (max-width: 900px) {
+  /* 窄屏内容贴边时给圆点让位，避免压到第一列文字 */
+  .project-transcript-body {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
 }

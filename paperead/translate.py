@@ -257,6 +257,43 @@ async def translate_block(
     return restore(strip_dot_leaders(out), pieces)
 
 
+async def translate_text(
+    text: str,
+    target_name: str = "中文",
+    model: str | None = None,
+    temperature: float = 0.2,
+) -> str:
+    """翻译划选的一小段文字（句子 / 短语 / 半段）。
+
+    和整篇段落翻译共用系统提示与占位符保护，引用编号、公式、URL 等会原样保留；
+    但不做术语表与上下文锚定，也不写回论文，适合阅读时的即时划词翻译。
+    """
+    source = strip_dot_leaders(text).strip()
+    if not source:
+        raise ValueError("没有可翻译的文字")
+    masked, pieces = protect(source)
+    prompt = (
+        f"【待翻译片段】\n{masked}\n\n"
+        f"请只输出这段文字的{target_name}译文；若原文是术语、标题或短语，"
+        "保持简洁，不要扩写，也不要补充解释。"
+    )
+    # 划词片段通常很短，给 512 起步即可；推理模型仍留足预算
+    budget = min(4096, max(512, int(len(masked) * 1.6) + 320))
+    out = await _translate_chat(
+        messages=[
+            {"role": "system", "content": _system_prompt(target_name)},
+            {"role": "user", "content": prompt},
+        ],
+        model=model,
+        temperature=temperature,
+        max_tokens=budget,
+    )
+    out = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", out.strip()).strip()
+    if not out:
+        raise RuntimeError("模型返回空译文")
+    return restore(strip_dot_leaders(out), pieces)
+
+
 def quality_ok(
     source: str,
     target: str,

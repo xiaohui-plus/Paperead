@@ -11,6 +11,7 @@ export interface TranslationLang {
 export const TRANSLATION_LANGS: TranslationLang[] = [
   { key: 'zh-Hans', label: '简体中文' },
   { key: 'zh-Hant', label: '繁體中文' },
+  { key: 'en', label: 'English' },
   { key: 'ja', label: '日本語' },
   { key: 'ko', label: '한국어' },
   { key: 'fr', label: 'Français' },

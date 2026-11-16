@@ -37,6 +37,8 @@ import { loadTargetLang } from '../lib/translation'
 import {
   detectPaperLanguage,
   defaultAutoTranslateForPaper,
+  sameLanguage,
+  PAPER_LANG_LABELS,
   type PaperLang,
 } from '../lib/paperLang'
 import { loadAutoHighlights, loadAutoTranslate, loadDefaultReadingMode, loadPaperAutoTranslate, saveAutoHighlights, savePaperAutoTranslate } from '../lib/readingPrefs'
@@ -146,6 +148,8 @@ export function ReaderView({ paperId, onBack }: Props) {
   const [highlights, setHighlights] = useState<ReadingHighlight[]>([])
   const [autoHighlights, setAutoHighlights] = useState(loadAutoHighlights)
   const [autoTranslate, setAutoTranslate] = useState(loadAutoTranslate)
+  // 当前目标译文语种：与原文语种一致时默认不自动翻译
+  const [targetLang, setTargetLang] = useState(loadTargetLang)
   // 当前论文原文语种：中文文献打开时默认关掉自动翻译
   const [paperLang, setPaperLang] = useState<PaperLang>('unknown')
   // 示例数据没有后端，标注/进度只在真实论文上启用
@@ -204,13 +208,15 @@ export function ReaderView({ paperId, onBack }: Props) {
     }
   }, [])
 
-  /** 按论文语种给出默认值：中文文献关闭、外文文献打开（尊重设置里的总开关） */
+  /** 按论文语种给出默认值：与目标译文语种一致就关闭，不一致才自动翻译（尊重总开关） */
   const adoptPaperLanguage = useCallback((next: Paper) => {
     const lang = detectPaperLanguage(next)
+    const target = loadTargetLang()
     setPaperLang(lang)
+    setTargetLang(target)
     const manual = loadPaperAutoTranslate(paperId)
     applyAutoTranslate(
-      manual ?? defaultAutoTranslateForPaper(lang, loadAutoTranslate()),
+      manual ?? defaultAutoTranslateForPaper(lang, loadAutoTranslate(), target),
     )
   }, [paperId, applyAutoTranslate])
 
@@ -526,16 +532,16 @@ export function ReaderView({ paperId, onBack }: Props) {
       window.removeEventListener('paperead:auto-highlights-changed', onChanged)
   }, [])
 
-  // 设置里切换「自动翻译」总开关：中文文献仍保持默认关闭，需在顶栏手动打开
+  // 设置里切换「自动翻译」总开关：原文与目标语种一致时仍保持关闭，需在顶栏手动打开
   useEffect(() => {
     const onChanged = (event: Event) => {
       const enabled = Boolean((event as CustomEvent).detail)
-      applyAutoTranslate(enabled && paperLang !== 'zh')
+      applyAutoTranslate(enabled && !sameLanguage(paperLang, targetLang))
     }
     window.addEventListener('paperead:auto-translate-changed', onChanged)
     return () =>
       window.removeEventListener('paperead:auto-translate-changed', onChanged)
-  }, [applyAutoTranslate, paperLang])
+  }, [applyAutoTranslate, paperLang, targetLang])
 
   // 设置里切换「默认阅读模式」：当前论文立即跟着换视图
   useEffect(() => {
@@ -621,13 +627,14 @@ export function ReaderView({ paperId, onBack }: Props) {
     }
   }, [paper, annotations, annotationsEnabled, annotationActions])
 
-  // 设置里切换译文语言：清掉本地旧译文，交给翻译流程按新语言重来
+  // 设置里切换译文语言：清掉本地旧译文，并按新目标语种重新判定自动翻译
   useEffect(() => {
     if (paperId === 'demo') return
     const onChanged = () => {
       requested.current.clear()
       abortRef.current?.abort()
       const lang = loadTargetLang()
+      setTargetLang(lang)
       setHighlights([])
       extractedPages.current = new Set()
       requestingHighlights.current.clear()
@@ -641,11 +648,16 @@ export function ReaderView({ paperId, onBack }: Props) {
             }
           : prev,
       )
+      // 目标语种变了，原文与目标是否一致也随之变化；用户手动切换过的仍以手动为准
+      const manual = loadPaperAutoTranslate(paperId)
+      applyAutoTranslate(
+        manual ?? defaultAutoTranslateForPaper(paperLang, loadAutoTranslate(), lang),
+      )
     }
     window.addEventListener('paperead:translation-changed', onChanged)
     return () =>
       window.removeEventListener('paperead:translation-changed', onChanged)
-  }, [paperId])
+  }, [paperId, paperLang, applyAutoTranslate])
 
   // 打开论文时如果库里的译文语言和当前设置不一致，先清掉旧译文再按新语言翻。
   // 空值表示旧版本数据（默认中文），不能因此误清。
@@ -1247,6 +1259,7 @@ focusAnnotation={focusAnnotation}
               pdfUrl={pdfHref}
               annotations={annotations}
               annotationActions={annotationActions}
+              onOpenAnnotation={openAnnotation}
               onAskQuote={addQuote}
             />
           </Suspense>
@@ -1261,11 +1274,11 @@ focusAnnotation={focusAnnotation}
               setSettingsKind('answer')
               setSettingsOpen(true)
             }}
-            hint={
+hint={
               !configured
                 ? '未配置回答模型，翻译未开启。填写模型与密钥后，打开论文会自动翻译当前页和下一页。'
-                : paperLang === 'zh' && !autoTranslate
-                  ? '本篇是中文文献，已默认关闭翻译。可在顶栏开启自动翻译。'
+                : sameLanguage(paperLang, targetLang) && !autoTranslate
+                  ? `本篇原文是${PAPER_LANG_LABELS[paperLang]}，与目标译文语言一致，已默认关闭翻译。可在顶栏开启自动翻译。`
                   : !autoTranslate
                     ? '自动翻译已关闭，可在顶栏开启自动翻译。'
                     : translating
