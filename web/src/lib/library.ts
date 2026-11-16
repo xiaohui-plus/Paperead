@@ -352,16 +352,53 @@ export interface StorageRelocateResult {
   previous: string
   files: number
   bytes: number
-  restart_required: boolean
 }
 
-/** 把文献库复制到新目录；成功后需要重启应用让 sidecar 使用新路径。 */
-export async function relocateStorage(path: string): Promise<StorageRelocateResult> {
+export type StorageRelocatePhase =
+  | 'starting'
+  | 'scanning'
+  | 'copying'
+  | 'finalizing'
+  | 'done'
+  | 'failed'
+
+export interface StorageRelocateJob {
+  job_id: string
+  phase: StorageRelocatePhase
+  target: string
+  files_done: number
+  files_total: number
+  bytes_done: number
+  bytes_total: number
+  /** 正在复制的文件（相对文献库根目录的路径） */
+  current: string
+  error: string
+  elapsed: number
+  /** 平均复制速度，字节/秒 */
+  speed: number
+  result?: StorageRelocateResult
+}
+
+export const RELOCATE_ACTIVE_PHASES: StorageRelocatePhase[] = [
+  'starting',
+  'scanning',
+  'copying',
+  'finalizing',
+]
+
+/** 启动后台迁移；立即返回任务号，进度用 getRelocateStorageJob 轮询。 */
+export async function startRelocateStorage(
+  path: string,
+): Promise<{ job_id: string; status: StorageRelocateJob }> {
   return jsonFetch('/api/storage/relocate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path }),
   })
+}
+
+export async function getRelocateStorageJob(jobId: string): Promise<StorageRelocateJob> {
+  return jsonFetch(`/api/storage/relocate/${encodeURIComponent(jobId)}`)
 }
 
 // ── Zotero Web API 双向同步 ─────────────────────────────

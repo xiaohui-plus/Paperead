@@ -11,6 +11,7 @@ import os
 import secrets
 import shutil
 import sys
+import threading
 from pathlib import Path
 
 from paperead.env import env as read_env, migrate_legacy_dir
@@ -124,21 +125,26 @@ def load_data_location() -> Path | None:
     return Path(value).expanduser() if value else None
 
 
+# 迁移写配置与启动清旧目录可能在不同线程里同时发生，读写路径配置统一走这把锁。
+_location_lock = threading.RLock()
+
+
 def save_data_location(path: Path, previous: Path | None = None) -> None:
-    target = location_file()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    # 覆盖前保留上一份配置，主文件被写坏/断电时仍能找回保存路径
-    if target.is_file():
-        try:
-            shutil.copy2(target, location_backup_file())
-        except OSError:
-            pass
-    payload: dict = {"path": str(path)}
-    if previous is not None:
-        payload["previous"] = str(previous)
-    tmp = target.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, target)
+    with _location_lock:
+        target = location_file()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # 覆盖前保留上一份配置，主文件被写坏/断电时仍能找回保存路径
+        if target.is_file():
+            try:
+                shutil.copy2(target, location_backup_file())
+            except OSError:
+                pass
+        payload: dict = {"path": str(path)}
+        if previous is not None:
+            payload["previous"] = str(previous)
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, target)
 
 
 def cleanup_previous_data_dir() -> None:
@@ -168,7 +174,15 @@ def cleanup_previous_data_dir() -> None:
         shutil.rmtree(old)
     except OSError:
         return
-    save_data_location(Path(current))
+    # 删除期间若又完成了一次迁移，配置里的 previous/current 已经变了，
+    # 此时不能把新的 previous 一并清掉，留给下次启动继续清理。
+    with _location_lock:
+        latest = load_location_record()
+        if str(latest.get("previous") or "").strip() != previous:
+            return
+        if str(latest.get("path") or "").strip() != current:
+            return
+        save_data_location(Path(current))
 
 
 def ensure_data_dir(path: Path) -> Path:

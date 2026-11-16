@@ -23,6 +23,7 @@ import mimetypes
 import os
 import re
 import socket
+import threading
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -124,8 +125,7 @@ from server.runtime import (
 log = logging.getLogger("paperead.server")
 
 WEB_DIST = web_dist()
-# 上次迁移成功后，旧目录等这次启动（尚未打开 SQLite/PDF）再清理
-cleanup_previous_data_dir()
+
 DATA_DIR = ensure_data_dir(default_data_dir())
 configure_scholar_daily_cache(DATA_DIR / "cache" / "scholar_daily")
 PORT = int(env("PAPEREAD_PORT", "8010"))
@@ -169,6 +169,13 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     `AttributeError: 'FastAPI' object has no attribute 'add_event_handler'`）。
     lifespan 是官方稳定入口，不随 Starlette 事件 API 的增删而失效。
     """
+    # 上次迁移成功后，旧目录等这次启动再清理；旧库可能有数 GB，
+    # 放到后台线程删除，避免重启后界面白等一大段。
+    threading.Thread(
+        target=cleanup_previous_data_dir,
+        name="storage-cleanup",
+        daemon=True,
+    ).start()
     _schedule_scholar_daily_prefetch()
     # 进程重启后把卡在 running 的研究会话标回 idle，避免界面一直显示在运行。
     # 原来挂在研究路由的 startup 事件上，同样依赖 Starlette 的事件 API，
@@ -4253,17 +4260,29 @@ def get_storage() -> dict:
     }
 
 
-@app.post("/api/storage/relocate", status_code=200)
+@app.post("/api/storage/relocate", status_code=202)
 def relocate_storage(req: StorageRelocateIn) -> dict:
-    """把当前文献库完整复制到新目录，写入路径配置，等待前端重启应用。"""
+    """启动后台迁移，前端轮询进度；复制成功后写入新路径并等待重启。"""
     try:
-        result = storage_migration.relocate(DATA_DIR, Path(req.path))
-        save_data_location(Path(result["path"]), previous=DATA_DIR)
+        job = storage_migration.start_relocate(
+            DATA_DIR,
+            Path(req.path),
+            on_success=lambda result: save_data_location(
+                Path(result["path"]), previous=DATA_DIR
+            ),
+        )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    except Exception as error:
-        raise HTTPException(status_code=500, detail=f"迁移失败：{error}") from error
-    return {**result, "restart_required": True}
+    return {"job_id": job.id, "status": job.snapshot()}
+
+
+@app.get("/api/storage/relocate/{job_id}")
+def relocate_storage_status(job_id: str) -> dict:
+    """迁移进度：phase 为 done 时结果在 result 里，failed 时 error 是原因。"""
+    job = storage_migration.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="迁移任务不存在或已过期")
+    return job
 
 
 APP_SETTINGS_PATH = DATA_DIR / "app-settings.json"

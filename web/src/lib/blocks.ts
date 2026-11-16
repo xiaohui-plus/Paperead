@@ -61,8 +61,15 @@ export function prepareBlocks(blocks: Block[]): RenderBlock[] {
   const out: RenderBlock[] = []
   for (const b of blocks) {
     if (skip.has(b.id)) continue
-    // 目录页残留的纯点线块没有任何可读内容，整块不渲染（含未翻译与已翻译两种情况）
-    if (isDotLeaderOnly(b.text) && isDotLeaderOnly(b.translated ?? '')) continue
+    // 目录页残留的纯点线块没有任何可读内容，整块不渲染（含未翻译与已翻译两种情况）。
+    // 只对确实有文字的块生效：figure/table/equation 的 text 本来为空，
+    // 直接按点线判定会把它们整块丢掉（正文与图表栏都看不到）。
+    if (
+      (b.text.trim() || (b.translated ?? '').trim()) &&
+      isDotLeaderOnly(b.text) &&
+      isDotLeaderOnly(b.translated ?? '')
+    )
+      continue
     if (b.kind === 'caption' && usedCaption.has(b.id)) continue
     if (b.kind === 'figure' || b.kind === 'table') {
       const cap = paired.get(b.id)
