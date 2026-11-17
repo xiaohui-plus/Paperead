@@ -52,7 +52,8 @@ pub fn run_desktop() {
         .invoke_handler(tauri::generate_handler![
             install_update,
             check_desktop_update,
-            restart_app
+            restart_app,
+            save_pdf_file
         ])
         .on_window_event(|window, event| {
             if window.label() != "main" {
@@ -556,6 +557,43 @@ async fn install_update(app: AppHandle) -> Result<String, String> {
 #[tauri::command]
 fn restart_app(app: AppHandle) {
     app.restart();
+}
+
+/// 文献库「下载 PDF」：路径由系统保存对话框让用户自己选，壳直接拉取 sidecar
+/// 里的原文件写盘，避免 WebView 默认下载到浏览器下载目录。
+#[tauri::command]
+async fn save_pdf_file(
+    state: tauri::State<'_, AppState>,
+    paper_id: String,
+    path: String,
+) -> Result<String, String> {
+    let port = state.port;
+    let token = state.token.clone();
+    let target = path.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let url = format!("http://127.0.0.1:{port}/api/papers/{paper_id}/file");
+        let response = ureq::get(&url)
+            .set("x-paperead-token", &token)
+            // 大论文可能几十 MB，给足时间，避免慢盘或代理下中途截断。
+            .timeout(std::time::Duration::from_secs(600))
+            .call()
+            .map_err(|error| match error {
+                ureq::Error::Status(code, _) => format!("下载失败（HTTP {code}）"),
+                other => format!("下载失败：{other}"),
+            })?;
+        let mut bytes = Vec::new();
+        use std::io::Read;
+        response
+            .into_reader()
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("下载中断：{error}"))?;
+        std::fs::write(&target, &bytes)
+            .map_err(|error| format!("无法写入文件：{error}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|error| format!("保存失败：{error}"))??;
+    Ok(path)
 }
 
 async fn check_updates(app: AppHandle, interactive: bool) {

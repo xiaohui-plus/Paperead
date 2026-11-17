@@ -239,6 +239,7 @@ export async function translateStream(
   signal?: AbortSignal,
   targetLang = 'zh-Hans',
   autoHighlights = true,
+  blockIds?: string[],
 ): Promise<void> {
   const res = await fetch(`/api/papers/${id}/translate/stream`, {
     method: 'POST',
@@ -248,6 +249,7 @@ export async function translateStream(
       pages,
       target_lang: targetLang,
       auto_highlights: autoHighlights,
+      block_ids: blockIds,
     }),
     signal,
   })

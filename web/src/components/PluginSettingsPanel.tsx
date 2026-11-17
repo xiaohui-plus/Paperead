@@ -36,7 +36,16 @@ export function PluginSettingsPanel() {
   }, [])
 
   useEffect(() => {
-    void refresh()
+    void refresh().then((rows) => {
+      if (rows.length) return
+      // 还没连接过插件：自动开一个等待窗口，扩展会在后台认领。
+      void startPairingWait()
+        .then(({ expires_at }) => {
+          setKnownIds([])
+          setWaitingExpires(expires_at)
+        })
+        .catch(() => undefined)
+    })
   }, [refresh])
 
   // 等待扩展认领：轮询插件列表，出现新插件即视为连接成功
@@ -134,6 +143,7 @@ export function PluginSettingsPanel() {
         <p className="model-empty">
           Paperead Connector 只读取当前网页的论文信息和 PDF，并通过本机接口存入文献库。
           插件不能访问模型配置、研究项目或文件系统。
+          安装好扩展后，后台会自动连接，不需要输入配对码或手动点连接。
         </p>
         <div className="plugin-install-links">
           <span>安装：</span>
@@ -146,13 +156,13 @@ export function PluginSettingsPanel() {
       <section className="model-section">
         <div className="section-head">
           <h3>连接浏览器插件</h3>
-          <span>无需输入配对码</span>
+          <span>后台自动连接</span>
         </div>
         {waitingExpires ? (
           <div className="plugin-pair-box">
             <b className="plugin-waiting">等待扩展连接…</b>
             <span>
-              现在打开浏览器里的 Paperead Connector，会自动连上；剩余 {secondsLeft} 秒
+              扩展会在后台自动连接，无需打开弹窗；剩余 {secondsLeft} 秒
             </span>
             <button className="link-btn" onClick={() => setWaitingExpires(0)}>
               取消
@@ -188,7 +198,7 @@ export function PluginSettingsPanel() {
         </div>
         {plugins.length === 0 ? (
           <p className="model-empty">
-            还没有插件连接。点上面的「连接浏览器插件」，再打开扩展弹窗即可自动完成连接。
+            还没有插件连接。安装扩展并保持 Paperead 打开，扩展会在后台自动连接。
           </p>
         ) : (
           <div className="plugin-list">

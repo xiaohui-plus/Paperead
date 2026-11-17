@@ -60,9 +60,22 @@ function isPdf(item: ProjectFile): boolean {
   )
 }
 
-/** 产物等虚拟节点是只读的：不能重命名、拖拽、剪切、删除。 */
+/** 产物等虚拟节点是只读的：不能重命名、拖拽。 */
 function isReadOnly(item: ProjectFile): boolean {
   return item.meta?.readOnly === true
+}
+
+/** 产物是系统生成的真实文件：允许复制、剪切与删除，只是不能改名/拖动。 */
+function isArtifact(item: ProjectFile): boolean {
+  return item.kind === 'artifact'
+}
+
+function canClip(item: ProjectFile): boolean {
+  return !isReadOnly(item) || isArtifact(item)
+}
+
+function canDelete(item: ProjectFile): boolean {
+  return !isReadOnly(item) || isArtifact(item)
 }
 
 /** 资源管理器式文件树：默认只展开顶层，支持右键菜单、拖拽移动与多选。 */
@@ -202,7 +215,11 @@ export function ProjectFileTree({
         ? byId.get(activeFolderId)
         : undefined
     if (!active) return null
-    return active.kind === 'folder' ? active.id : active.parentId ?? null
+    if (active.kind === 'folder') return isReadOnly(active) ? null : active.id
+    const parentId = active.parentId ?? null
+    const parent = parentId ? byId.get(parentId) : undefined
+    // 「产物」是只读虚拟目录：选中产物时粘贴落到项目文件根，而不是 404。
+    return parent && isReadOnly(parent) ? null : parentId
   }
 
   /** 某一项允许粘贴到哪个文件夹；undefined 表示不允许。 */
@@ -220,7 +237,7 @@ export function ProjectFileTree({
     const usable = ids
       .map((id) => byId.get(id))
       .filter((entry): entry is ProjectFile => Boolean(entry))
-      .filter((entry) => !isReadOnly(entry))
+      .filter((entry) => canClip(entry))
     if (usable.length === 0) return
     setClipboard({ ids: usable.map((entry) => entry.id), mode })
   }
@@ -295,7 +312,7 @@ export function ProjectFileTree({
         return
       }
       const target = byId.get(ids[0]) ?? active
-      if (!isReadOnly(target)) {
+      if (canDelete(target)) {
         event.preventDefault()
         onDelete?.(target)
       }
@@ -348,7 +365,7 @@ export function ProjectFileTree({
             data-drag={dragId === item.id}
             data-drop={dropId === item.id}
             style={{ paddingLeft: 6 + depth * 14 }}
-            title={item.path || item.name}
+            title={item.absolute || item.path || item.name}
             onClick={(event) => {
               if (renaming) return
               if (isFolder) {
@@ -570,7 +587,7 @@ export function ProjectFileTree({
               重命名
             </button>
           )}
-          {!isReadOnly(menu.item) && (
+          {canClip(menu.item) && (
             <>
               <div className="project-tree-menu-sep" />
               <button
@@ -631,7 +648,7 @@ export function ProjectFileTree({
               {clipboard.ids.length > 1 ? ` ${clipboard.ids.length} 项` : ''}
             </button>
           )}
-          {!isReadOnly(menu.item) && (
+          {canDelete(menu.item) && (
             <>
               <div className="project-tree-menu-sep" />
               <button

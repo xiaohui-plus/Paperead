@@ -31,6 +31,7 @@ import { mediaUrl } from '../lib/mobile'
 import { canRunLocally, serverReachable } from '../lib/connectivity'
 import { readOffline, saveOfflineBlocks } from '../lib/offlineStore'
 import { translatePagesLocal } from '../lib/localTranslate'
+import { priorityBlocks } from '../lib/translationPriority'
 import { mapRangeToOther, pairFits } from '../lib/align'
 import type { AnnotationActions } from './Annotations'
 import { loadTargetLang } from '../lib/translation'
@@ -51,6 +52,7 @@ import {
   type ModelKind,
 } from '../lib/settings'
 import { TopBar } from './TopBar'
+import { IconBack } from './icons'
 import { LeftPanel, PANEL_TABS, type TabKey } from './LeftPanel'
 import { MobileDock } from './MobileDock'
 import { Reader } from './Reader'
@@ -123,6 +125,9 @@ export function ReaderView({ paperId, onBack }: Props) {
   const [scale, setScale] = useState(1)
   const [activeId, setActiveId] = useState('')
   const [visiblePage, setVisiblePage] = useState(1)
+  const [visibleBlocks, setVisibleBlocks] = useState<string[]>([])
+  const [translationRetry, setTranslationRetry] = useState(0)
+  const [translationFailures, setTranslationFailures] = useState<Record<string, number>>({})
   const [settledPage, setSettledPage] = useState(1)
   const [translating, setTranslating] = useState(false)
   // 本机副本：页图、PDF 直链，以及来源（StoryReader 导入的书没有 PDF）
@@ -215,7 +220,8 @@ export function ReaderView({ paperId, onBack }: Props) {
   const abortRef = useRef<AbortController | null>(null)
   const inFlight = useRef(false)
   const inFlightPages = useRef<number[]>([])
-  const queued = useRef<number[] | null>(null)
+  const inFlightBlocks = useRef<string[]>([])
+  const queued = useRef<{ pages: number[]; ids?: string[] } | null>(null)
   // 供异步的翻译流读取最新开关：await 期间用户关掉自动翻译时，
   // 旧闭包里的 autoTranslate 仍是 true，必须用 ref 复检才能拦住。
   const autoTranslateRef = useRef(autoTranslate)
@@ -453,6 +459,7 @@ export function ReaderView({ paperId, onBack }: Props) {
     setError('')
     setVisiblePage(1)
     setSettledPage(1)
+    setTranslationFailures({})
     setPageUrls({})
     setLocalKind('none')
     setLocalPdfUrl(null)
@@ -788,7 +795,7 @@ export function ReaderView({ paperId, onBack }: Props) {
 
   // ── 按页懒翻译：单飞 + 看门狗重试（流式，逐段出现） ──────
   const ensurePages = useCallback(
-    async (pages: number[]) => {
+    async (pages: number[], ids?: string[]) => {
       const current = paperRef.current
       if (!current || paperId === 'demo') return
       if (!autoTranslate) return
@@ -798,10 +805,10 @@ export function ReaderView({ paperId, onBack }: Props) {
       // 同一时刻只跑一条流。用户快速滑动时：若正在翻的页已经离开视野，
       // 直接中止它，把配额让给用户真正停下来的那一页；否则排到队尾。
       if (inFlight.current) {
-        if (!inFlightPages.current.includes(pages[0])) {
+        if (!inFlightPages.current.includes(pages[0]) || (ids?.length && !inFlightBlocks.current.includes(ids[0]))) {
           abortRef.current?.abort()
         }
-        queued.current = pages
+        queued.current = { pages, ids }
         return
       }
 
@@ -811,6 +818,7 @@ export function ReaderView({ paperId, onBack }: Props) {
         const blocks = current.blocks.filter(
           (b) =>
             b.page === pg
+            && (!ids || ids.includes(b.id))
             // 图注/表注随论文一起翻，历史论文的 caption 块也要放行
             && (b.translatable || b.kind === 'caption')
             && b.text.trim(),
@@ -822,11 +830,34 @@ export function ReaderView({ paperId, onBack }: Props) {
       if (!need.length) return
 
       // 服务器不可达时走本机：模型请求由 Rust 发出，逐段流式回填
+      inFlight.current = true
+      inFlightPages.current = pages
+      inFlightBlocks.current = ids ?? []
       const online = await serverReachable()
       // await 期间（最长 2.5s）用户可能已经关掉自动翻译：此时不能再
       // 新建一条翻译流，否则顶栏会重新出现「翻译中」且请求照发。
-      if (!autoTranslateRef.current) return
-      if (!online && !canRunLocally()) return
+      if (!autoTranslateRef.current || (!online && !canRunLocally())) {
+        if (autoTranslateRef.current && ids?.length) {
+          setTranslationFailures((prev) => {
+            const next = { ...prev }
+            for (const id of ids) next[id] = (next[id] ?? 0) + 1
+            return next
+          })
+        }
+        inFlight.current = false
+        inFlightPages.current = []
+        inFlightBlocks.current = []
+        return
+      }
+      if (queued.current) {
+        const next = queued.current
+        queued.current = null
+        inFlight.current = false
+        inFlightPages.current = []
+        inFlightBlocks.current = []
+        window.setTimeout(() => void ensurePages(next.pages, next.ids), 0)
+        return
+      }
 
       need.forEach((pg) => requested.current.add(pg))
       inFlight.current = true
@@ -834,6 +865,10 @@ export function ReaderView({ paperId, onBack }: Props) {
       const ac = new AbortController()
       abortRef.current = ac
       setTranslating(true)
+      const completed = new Set<string>()
+      let interrupted = false
+      let timedOut = false
+      const timeout = window.setTimeout(() => { timedOut = true; ac.abort() }, 60000)
       try {
         if (!online) {
           // 本地状态可能还没提交到 paperRef，单独留一份，保证写库不丢译文
@@ -855,11 +890,12 @@ export function ReaderView({ paperId, onBack }: Props) {
           await translatePagesLocal({
             paper: current,
             pages: need,
+            blockIds: ids,
             config: { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model: cfg.model },
             targetLang,
             signal: ac.signal,
             onPartial: apply,
-            onBlock: apply,
+            onBlock: (blockId, text) => { completed.add(blockId); apply(blockId, text) },
             onPageDone: async () => {
               const snapshot = paperRef.current ?? current
               const blocks = snapshot.blocks.map((b) =>
@@ -897,6 +933,7 @@ export function ReaderView({ paperId, onBack }: Props) {
             }
             if (evt.type === 'block' && evt.block) {
               const updated = evt.block as unknown as Block
+              completed.add(updated.id)
               setPaper((prev) =>
                 prev
                   ? {
@@ -910,21 +947,36 @@ export function ReaderView({ paperId, onBack }: Props) {
           ac.signal,
           targetLang,
           autoHighlights,
+          ids,
         )
       } catch (e) {
+        interrupted = ac.signal.aborted && !timedOut
         if (!(e instanceof DOMException && e.name === 'AbortError')) {
           console.warn('翻译流中断：', e)
         }
         // 失败/中断都撤销标记，交给看门狗重试
         need.forEach((pg) => requested.current.delete(pg))
       } finally {
+        window.clearTimeout(timeout)
+        if (!interrupted && ids?.length) {
+          setTranslationFailures((prev) => {
+            const next = { ...prev }
+            for (const id of ids) {
+              if (completed.has(id)) delete next[id]
+              else next[id] = (next[id] ?? 0) + 1
+            }
+            return next
+          })
+        }
+        need.forEach((pg) => requested.current.delete(pg))
         inFlight.current = false
         inFlightPages.current = []
+        inFlightBlocks.current = []
         abortRef.current = null
         setTranslating(false)
-        const next = queued.current
+        const next = queued.current as { pages: number[]; ids?: string[] } | null
         queued.current = null
-        if (next) window.setTimeout(() => void ensurePages(next), 0)
+        if (next) window.setTimeout(() => void ensurePages(next.pages, next.ids), 0)
       }
     },
     [paperId, mergeHighlights, autoHighlights, autoTranslate],
@@ -933,10 +985,12 @@ export function ReaderView({ paperId, onBack }: Props) {
   // 进入阅读页先翻当前页 + 下一页；滚动停稳后换页继续增量翻
   useEffect(() => {
     if (!paper) return
-    const maxPage = paper.page_count || Math.max(1, ...paper.blocks.map((b) => b.page))
-    const pages = [settledPage, settledPage + 1].filter((p) => p >= 1 && p <= maxPage)
-    void ensurePages(pages)
-  }, [paper, settledPage, ensurePages])
+    const page = pdfMode ? pdfPage : settledPage
+    const eligible = paper.blocks.filter((b) => (b.translatable || b.kind === 'caption') && b.text.trim())
+    const ids = priorityBlocks(paper.blocks, visibleBlocks, pdfMode, page)
+    const selected = eligible.filter((b) => ids.includes(b.id) && !b.translated)
+    if (selected.length) void ensurePages([...new Set(selected.map((b) => b.page))], selected.map((b) => b.id))
+  }, [paper, settledPage, pdfMode, pdfPage, visibleBlocks, ensurePages, translationRetry])
 
   // 滚动停稳 700ms 才算「用户停留」，快速滑动过程中不触发翻译
   useEffect(() => {
@@ -950,25 +1004,10 @@ export function ReaderView({ paperId, onBack }: Props) {
     if (paperId === 'demo' || !autoTranslate) return
     const timer = window.setInterval(() => {
       if (inFlight.current) return
-      const current = paperRef.current
-      if (!current) return
-      const cfg = readyModel(loadModelSettings(), 'answer')
-      if (!cfg) return
-      const maxPage = current.page_count || 1
-      const pages = [settledPage, settledPage + 1].filter((p) => p >= 1 && p <= maxPage)
-      const hasPending = pages.some((pg) =>
-        current.blocks.some(
-          (b) =>
-            b.page === pg
-            && (b.translatable || b.kind === 'caption')
-            && b.text.trim()
-            && !b.translated,
-        ),
-      )
-      if (hasPending) void ensurePages(pages)
+      setTranslationRetry((value) => value + 1)
     }, 3000)
     return () => window.clearInterval(timer)
-  }, [settledPage, ensurePages, paperId, autoTranslate])
+  }, [paperId, autoTranslate])
 
   // 翻译完成后补提取阅读重点：新翻的页由翻译流直接带回，
   // 这里兜底处理「打开时已经翻好」的旧论文。服务端会跳过已处理页。
@@ -1051,11 +1090,19 @@ export function ReaderView({ paperId, onBack }: Props) {
       })
       setActiveId((prev) => (prev === heading ? prev : heading))
       setVisiblePage((prev) => (prev === page ? prev : page))
+      const bounds = el.getBoundingClientRect()
+      const ids = Array.from(el.querySelectorAll<HTMLElement>('[data-block-id], [data-heading-id]'))
+        .filter((node) => {
+          const rect = node.getBoundingClientRect()
+          return rect.bottom > bounds.top && rect.top < bounds.bottom
+        }).map((node) => node.id)
+      setVisibleBlocks((prev) => prev.length === ids.length && prev.every((id, i) => id === ids[i]) ? prev : ids)
     }
 
     el.addEventListener('scroll', onScroll, { passive: true })
+    window.addEventListener('resize', onScroll)
     onScroll()
-    return () => el.removeEventListener('scroll', onScroll)
+    return () => { el.removeEventListener('scroll', onScroll); window.removeEventListener('resize', onScroll) }
     // 从 PDF 切回重排时 Reader 会重新挂载，必须重新绑定滚动监听
   }, [paper, pdfMode])
 
@@ -1152,6 +1199,14 @@ export function ReaderView({ paperId, onBack }: Props) {
   if (!paper) {
     return (
       <div className="splash">
+        <button
+          className="icon-btn splash-back"
+          onClick={onBack}
+          title="返回文献库"
+          aria-label="返回文献库"
+        >
+          <IconBack />
+        </button>
         <div>
           <div className="spinner" />
           {parsing ? '正在解析版面、图表和公式…' : '正在加载论文…'}
@@ -1322,6 +1377,11 @@ focusAnnotation={focusAnnotation}
             scale={scale}
             scrollRef={scrollRef}
             canTranslate={configured}
+            translationFailures={translationFailures}
+            onRetryTranslation={(id) => {
+              setTranslationFailures((prev) => { const next = { ...prev }; delete next[id]; return next })
+              setTranslationRetry((value) => value + 1)
+            }}
             autoTranslate={autoTranslate}
             onOpenSettings={() => {
               setSettingsKind('answer')

@@ -13,6 +13,7 @@
     "opener:default",
     "allow-check-desktop-update",
     "allow-install-update",
-    "allow-restart-app"
+    "allow-restart-app",
+    "allow-save-pdf-file"
   ]
 }

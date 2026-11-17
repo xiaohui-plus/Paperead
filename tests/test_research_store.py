@@ -608,3 +608,84 @@ def test_api_session_approval_forwards_outcome(
         json={"outcome": "deny"},
     )
     assert invalid.status_code == 400
+
+def test_api_item_and_artifact_absolute_paths(
+    client: TestClient, store: ResearchStore
+):
+    project_id = client.post(
+        "/api/research/projects", json={"kind": "research", "name": "路径"}
+    ).json()["id"]
+
+    uploaded = client.post(
+        f"/api/research/projects/{project_id}/files",
+        files={"file": ("阅读笔记.md", b"# note", "text/markdown")},
+    ).json()
+    workspace = store.workspace_root(project_id)
+    assert uploaded["absolute"] == str(workspace / "阅读笔记.md")
+    assert Path(uploaded["absolute"]).is_file()
+
+    artifact_root = store.artifacts_root(project_id)
+    artifact_file = artifact_root / "2026-01-01" / "研究清单.md"
+    artifact_file.parent.mkdir(parents=True, exist_ok=True)
+    artifact_file.write_text("# 清单", encoding="utf-8")
+    store.add_artifact(project_id, "研究清单", "outline", "2026-01-01/研究清单.md")
+
+    listing = client.get(f"/api/research/projects/{project_id}/artifacts").json()
+    assert listing["root"] == str(artifact_root)
+    assert listing["items"][0]["absolute"] == str(artifact_file)
+
+
+def test_api_artifact_copy_move_delete(
+    client: TestClient, store: ResearchStore
+):
+    project_id = client.post(
+        "/api/research/projects", json={"kind": "review", "name": "综述产物"}
+    ).json()["id"]
+    folder = client.post(
+        f"/api/research/projects/{project_id}/folders", json={"name": "整理"}
+    ).json()
+
+    artifact_root = store.artifacts_root(project_id)
+    first_file = artifact_root / "大纲.md"
+    first_file.parent.mkdir(parents=True, exist_ok=True)
+    first_file.write_text("# 大纲", encoding="utf-8")
+    first = store.add_artifact(project_id, "大纲", "outline", "大纲.md")
+
+    copied = client.post(
+        f"/api/research/projects/{project_id}/artifacts/{first['id']}/copy",
+        json={"parentId": folder["id"]},
+    )
+    assert copied.status_code == 201, copied.text
+    copy_row = next(
+        row for row in copied.json()["items"] if row["parentId"] == folder["id"]
+    )
+    assert copy_row["name"] == "大纲.md"
+    assert Path(copy_row["absolute"]).read_text(encoding="utf-8") == "# 大纲"
+    assert first_file.is_file()
+    assert len(store.list_artifacts(project_id)) == 1
+
+    second_file = artifact_root / "草稿.md"
+    second_file.write_text("# 草稿", encoding="utf-8")
+    second = store.add_artifact(project_id, "草稿", "draft", "草稿.md")
+
+    moved = client.post(
+        f"/api/research/projects/{project_id}/artifacts/{second['id']}/move",
+        json={"parentId": folder["id"]},
+    )
+    assert moved.status_code == 201, moved.text
+    moved_row = next(
+        row for row in moved.json()["items"] if row["name"] == "草稿.md"
+    )
+    assert Path(moved_row["absolute"]).read_text(encoding="utf-8") == "# 草稿"
+    assert not second_file.exists()
+    assert [row["id"] for row in store.list_artifacts(project_id)] == [first["id"]]
+
+    deleted = client.delete(
+        f"/api/research/projects/{project_id}/artifacts/{first['id']}"
+    )
+    assert deleted.status_code == 200
+    assert not first_file.exists()
+    assert store.list_artifacts(project_id) == []
+    assert client.delete(
+        f"/api/research/projects/{project_id}/artifacts/missing"
+    ).status_code == 404

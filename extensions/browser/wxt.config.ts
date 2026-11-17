@@ -19,9 +19,10 @@ export default defineConfig({
       'scripting',
       'contextMenus',
       'notifications',
+      'webNavigation',
+      'alarms',
     ],
-    host_permissions: ['http://127.0.0.1/*'],
-    optional_host_permissions: ['https://*/*', 'http://*/*'],
+    host_permissions: ['http://127.0.0.1/*', 'https://*/*', 'http://*/*'],
     ...(browser === 'firefox'
       ? {
           browser_specific_settings: {

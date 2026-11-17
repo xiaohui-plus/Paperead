@@ -1,4 +1,5 @@
 import type { PaperRow } from '../lib/library'
+import { IconDownload, IconRefresh, IconTrash } from './icons'
 
 interface Props {
   paper: PaperRow
@@ -6,9 +7,9 @@ interface Props {
   onOpen: (id: string) => void
   onDelete: (paper: PaperRow) => void
   onReparse: (paper: PaperRow) => void
-  /** 下载到本机的进度；null 表示不在下载 */
-  downloadProgress?: { done: number; total: number } | null
-  onDownload?: (paper: PaperRow) => void
+  /** 把论文 PDF 下载到本机 */
+  onDownloadPdf?: (paper: PaperRow) => void
+  downloading?: boolean
   draggable?: boolean
   dragging?: boolean
   onDragStart?: (paper: PaperRow) => void
@@ -34,8 +35,8 @@ export function PaperCard({
   onOpen,
   onDelete,
   onReparse,
-  downloadProgress = null,
-  onDownload,
+  onDownloadPdf,
+  downloading = false,
   draggable = false,
   dragging = false,
   onDragStart,
@@ -104,30 +105,39 @@ export function PaperCard({
       )}
 
       <div className="paper-actions" onClick={(e) => e.stopPropagation()}>
-        <button className="mini-btn" onClick={() => onOpen(paper.id)}>
-          {readPct > 0 && !finished ? '继续读' : '阅读'}
-        </button>
-        {failed && (
-          <button className="mini-btn" onClick={() => onReparse(paper)}>
-            重试
-          </button>
-        )}
-        {!paper.offline && onDownload && paper.status === 'ready' && (
+        {!paper.offline && !busy && (
           <button
-            className="mini-btn"
-            onClick={() => onDownload(paper)}
-            disabled={Boolean(downloadProgress)}
-            title="把解析结果和各页图片存到本机，离线也能读"
+            type="button"
+            className="paper-icon-btn"
+            onClick={() => onReparse(paper)}
+            title={failed ? '重新解析（上次失败）' : '重新解析'}
+            aria-label="重新解析"
           >
-            {downloadProgress
-              ? `下载 ${downloadProgress.total
-                  ? Math.round((downloadProgress.done / downloadProgress.total) * 100)
-                  : 0}%`
-              : '下载'}
+            <IconRefresh />
           </button>
         )}
-        <button className="mini-btn danger" onClick={() => onDelete(paper)}>
-          删除
+        {!paper.offline && onDownloadPdf && (
+          <button
+            type="button"
+            className="paper-icon-btn"
+            onClick={() => onDownloadPdf(paper)}
+            disabled={downloading}
+            title={downloading ? '正在下载 PDF…' : '下载 PDF 到本地'}
+            aria-label="下载 PDF 到本地"
+          >
+            <span className={downloading ? 'paper-icon-spin' : undefined}>
+              <IconDownload />
+            </span>
+          </button>
+        )}
+        <button
+          type="button"
+          className="paper-icon-btn danger"
+          onClick={() => onDelete(paper)}
+          title="删除论文"
+          aria-label="删除论文"
+        >
+          <IconTrash />
         </button>
       </div>
 

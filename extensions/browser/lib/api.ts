@@ -135,3 +135,35 @@ export async function listFolders(): Promise<
   }>('/api/ext/v1/folders')
   return data.folders
 }
+
+/** 本地是否已配置可用模型；不返回密钥。 */
+export async function readingStatus(): Promise<{
+  model_ready: boolean
+  model_label: string
+}> {
+  return request('/api/ext/v1/reading/status')
+}
+
+/** 划词翻译：使用桌面端设置里选中的模型，扩展不持有 API key。 */
+export async function translateSelection(
+  text: string,
+  targetLang = 'zh-Hans',
+): Promise<{ ok: boolean; translation: string; target_name: string }> {
+  return request('/api/ext/v1/reading/translate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, target_lang: targetLang }),
+  })
+}
+
+/** 针对已解析论文的选中段落提问。 */
+export async function askSelection(
+  paperId: string,
+  question: string,
+): Promise<{ answer: string; sources?: unknown[] }> {
+  return request('/api/ext/v1/reading/ask', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paper_id: paperId, question, web: false }),
+  })
+}

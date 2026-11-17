@@ -51,6 +51,8 @@ export interface ProjectFile {
   kind: 'folder' | 'file' | 'paper' | 'note' | 'artifact'
   name: string
   path: string
+  /** 电脑上可直接使用的绝对路径；后端无法解析时为空串。 */
+  absolute?: string
   mime: string
   size: number
   refId: string | null
@@ -65,9 +67,17 @@ export interface ArtifactSummary {
   kind: string
   title: string
   path: string
+  /** 产物文件的绝对路径。 */
+  absolute?: string
   version: number
   createdAt: number
   meta: Record<string, unknown>
+}
+
+export interface ArtifactListing {
+  items: ArtifactSummary[]
+  /** 产物目录的绝对路径。 */
+  root: string
 }
 
 export interface SessionSummary {
@@ -457,11 +467,41 @@ export const researchApi = {
     )
   },
 
-  async listArtifacts(projectId: string): Promise<ArtifactSummary[]> {
-    const data = await jsonFetch<{ items: ArtifactSummary[] }>(
+  async listArtifacts(projectId: string): Promise<ArtifactListing> {
+    return jsonFetch<ArtifactListing>(
       `/api/research/projects/${projectId}/artifacts`,
     )
+  },
+
+  async copyArtifact(
+    projectId: string,
+    artifactId: string,
+    parentId: string | null,
+  ): Promise<ProjectFile[]> {
+    const data = await jsonFetch<{ items: ProjectFile[] }>(
+      `/api/research/projects/${projectId}/artifacts/${artifactId}/copy`,
+      json('POST', { parentId }),
+    )
     return data.items
+  },
+
+  async moveArtifact(
+    projectId: string,
+    artifactId: string,
+    parentId: string | null,
+  ): Promise<ProjectFile[]> {
+    const data = await jsonFetch<{ items: ProjectFile[] }>(
+      `/api/research/projects/${projectId}/artifacts/${artifactId}/move`,
+      json('POST', { parentId }),
+    )
+    return data.items
+  },
+
+  async deleteArtifact(projectId: string, artifactId: string): Promise<void> {
+    await jsonFetch(
+      `/api/research/projects/${projectId}/artifacts/${artifactId}`,
+      { method: 'DELETE' },
+    )
   },
 
   artifactContentUrl(projectId: string, artifactId: string): string {

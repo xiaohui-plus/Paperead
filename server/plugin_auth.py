@@ -88,10 +88,17 @@ class PluginRegistry:
         now = time.time()
         plugin = Plugin(
             id=f"pl_{secrets.token_hex(6)}",
-            name=(name.strip() or origin)[:60],
+            name=(name.strip() or origin or "用户脚本")[:60],
             origin=origin,
             token_sha256=hashlib.sha256(token.encode("utf-8")).hexdigest(),
-            scopes=["library:read", "library:write"],
+            scopes=[
+                "library:read",
+                "library:write",
+                "reading:meta",
+                "reading:translate",
+                "reading:ask",
+                "reading:annotate",
+            ],
             created_at=now,
             last_used_at=now,
         )
@@ -105,7 +112,7 @@ class PluginRegistry:
         for plugin in self._load():
             if not hmac.compare_digest(plugin.token_sha256, digest):
                 continue
-            if origin and plugin.origin != origin:
+            if origin and plugin.origin and plugin.origin != origin:
                 return None
             if now - plugin.last_used_at > 60:
                 plugin.last_used_at = now

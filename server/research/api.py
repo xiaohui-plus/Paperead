@@ -239,17 +239,24 @@ def _project(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _item(row: dict[str, Any]) -> dict[str, Any]:
+def _item(row: dict[str, Any], store: Any = None) -> dict[str, Any]:
     try:
         meta = json.loads(row.get("meta") or "{}")
     except Exception:
         meta = {}
+    absolute = ""
+    if store is not None:
+        try:
+            absolute = str(store.item_path(str(row.get("project_id")), row))
+        except (LookupError, ValueError, OSError):
+            absolute = ""
     return {
         "id": row["id"],
         "parentId": row.get("parent_id"),
         "kind": row["kind"],
         "name": row["title"],
         "path": row.get("path") or "",
+        "absolute": absolute,
         "mime": row.get("mime") or "",
         "size": int(row.get("size") or 0),
         "refId": row.get("ref_id"),
@@ -258,11 +265,17 @@ def _item(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _artifact(row: dict[str, Any]) -> dict[str, Any]:
+def _artifact(row: dict[str, Any], store: Any = None) -> dict[str, Any]:
     try:
         meta = json.loads(row.get("meta") or "{}")
     except Exception:
         meta = {}
+    absolute = ""
+    if store is not None:
+        try:
+            absolute = str(store.artifact_path(str(row.get("project_id")), row))
+        except (LookupError, ValueError, OSError):
+            absolute = ""
     return {
         "id": row["id"],
         "projectId": row["project_id"],
@@ -270,6 +283,7 @@ def _artifact(row: dict[str, Any]) -> dict[str, Any]:
         "kind": row.get("kind") or "",
         "title": row.get("title") or "",
         "path": row.get("path") or "",
+        "absolute": absolute,
         "version": int(row.get("version") or 1),
         "createdAt": row["created_at"],
         "meta": meta if isinstance(meta, dict) else {},
@@ -607,7 +621,7 @@ def build_router(
     def list_files(project_id: str) -> dict[str, Any]:
         if store.get_project(project_id) is None:
             raise HTTPException(status_code=404, detail="project not found")
-        return {"items": [_item(row) for row in store.list_items(project_id)]}
+        return {"items": [_item(row, store) for row in store.list_items(project_id)]}
 
     @router.get("/projects/{project_id}/explorer")
     def project_explorer(
@@ -729,7 +743,7 @@ def build_router(
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
-        return _item(row)
+        return _item(row, store)
 
     @router.post("/projects/{project_id}/files", status_code=201)
     async def upload_file(
@@ -776,7 +790,7 @@ def build_router(
             size=size,
             kind=kind,
         )
-        return _item(row)
+        return _item(row, store)
 
     @router.post("/projects/{project_id}/folder", status_code=201)
     async def upload_folder(
@@ -888,7 +902,7 @@ def build_router(
                 errors.append(f"{name}: {error}"[:160])
 
         return {
-            "items": [_item(row) for row in store.list_items(project_id)],
+            "items": [_item(row, store) for row in store.list_items(project_id)],
             "added": len(added),
             "errors": errors[:10],
         }
@@ -934,7 +948,7 @@ def build_router(
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
-        return {"items": [_item(row) for row in items]}
+        return {"items": [_item(row, store) for row in items]}
 
     @router.post("/projects/{project_id}/items/{item_id}/copy", status_code=201)
     def copy_item(
@@ -946,7 +960,7 @@ def build_router(
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
-        return {"items": [_item(row) for row in items]}
+        return {"items": [_item(row, store) for row in items]}
 
     @router.delete("/projects/{project_id}/items/{item_id}")
     def delete_item(project_id: str, item_id: str) -> dict[str, Any]:
@@ -970,7 +984,7 @@ def build_router(
                 # 只删除属于这个项目的论文；已在全局文献库里的不动。
                 if row is not None and row.get("project_id") == project_id:
                     library.remove(paper_id)
-        return {"items": [_item(row) for row in remaining]}
+        return {"items": [_item(row, store) for row in remaining]}
 
     @router.post("/projects/{project_id}/items/{item_id}/to-library")
     def add_to_library(project_id: str, item_id: str) -> dict[str, Any]:
@@ -1020,10 +1034,57 @@ def build_router(
             raise HTTPException(status_code=404, detail="project not found")
         return {
             "items": [
-                _artifact(row)
+                _artifact(row, store)
                 for row in store.list_artifacts(project_id)
-            ]
+            ],
+            "root": str(store.artifacts_root(project_id)),
         }
+
+    @router.post("/projects/{project_id}/artifacts/{artifact_id}/copy", status_code=201)
+    def copy_artifact(
+        project_id: str, artifact_id: str, body: ItemCopyIn
+    ) -> dict[str, Any]:
+        """把产物复制成项目文件：产物留在产物区，目标文件夹多一份普通文件。"""
+        try:
+            items = store.transfer_artifact(
+                project_id, artifact_id, body.parent_id
+            )
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except OSError as error:
+            raise HTTPException(status_code=409, detail=f"无法复制产物：{error}") from error
+        return {"items": [_item(row, store) for row in items]}
+
+    @router.post("/projects/{project_id}/artifacts/{artifact_id}/move", status_code=201)
+    def move_artifact(
+        project_id: str, artifact_id: str, body: ItemCopyIn
+    ) -> dict[str, Any]:
+        """把产物剪切进项目文件：文件移出产物区，产物记录随之移除。"""
+        try:
+            items = store.transfer_artifact(
+                project_id, artifact_id, body.parent_id, move=True
+            )
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except OSError as error:
+            raise HTTPException(status_code=409, detail=f"无法移动产物：{error}") from error
+        return {"items": [_item(row, store) for row in items]}
+
+    @router.delete("/projects/{project_id}/artifacts/{artifact_id}")
+    def delete_artifact(project_id: str, artifact_id: str) -> dict[str, Any]:
+        row = store.get_artifact(artifact_id)
+        if row is None or row["project_id"] != project_id:
+            raise HTTPException(status_code=404, detail="artifact not found")
+        store.remove_artifact(artifact_id)
+        return {"ok": True}
 
     @router.get("/projects/{project_id}/artifacts/{artifact_id}/content")
     def artifact_content(project_id: str, artifact_id: str):

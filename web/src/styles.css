@@ -1455,6 +1455,14 @@ body.col-resizing * {
   height: var(--app-h);
   color: var(--muted);
   font-size: 13px;
+  position: relative;
+}
+
+/* 解析中/加载中全屏页：右上角留一个返回入口，不必等解析结束 */
+.splash-back {
+  position: absolute;
+  top: 14px;
+  right: 18px;
 }
 
 .spinner {
@@ -2434,7 +2442,7 @@ body.col-resizing * {
 }
 
 .paper-body {
-  padding: 14px 16px 8px;
+  padding: 14px 16px 34px;
   flex: 1;
 }
 
@@ -2464,16 +2472,71 @@ body.col-resizing * {
   color: var(--faint);
 }
 
+/* 卡片操作收在右下角：常显会打断阅读，悬停/聚焦时浮出图标条 */
 .paper-actions {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
   display: flex;
-  gap: 6px;
-  padding: 8px 16px 14px;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.07);
   opacity: 0;
   transition: opacity 0.15s ease;
 }
 
-.paper-card:hover .paper-actions {
+.paper-card:hover .paper-actions,
+.paper-actions:focus-within {
   opacity: 1;
+}
+
+.paper-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.paper-icon-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.paper-icon-btn:hover {
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.paper-icon-btn.danger:hover {
+  color: #b91c1c;
+  background: #fef2f2;
+}
+
+.paper-icon-btn:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+.paper-icon-spin {
+  display: inline-flex;
+  animation: paper-icon-spin 0.9s linear infinite;
+}
+
+@keyframes paper-icon-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .mini-btn {
@@ -2548,12 +2611,14 @@ body.col-resizing * {
 }
 
 .paper-card.is-list .paper-body {
-  padding: 0;
+  padding: 0 104px 0 0;
 }
 
 .paper-card.is-list .paper-actions {
+  top: 50%;
+  bottom: auto;
+  transform: translateY(-50%);
   opacity: 1;
-  padding: 0 4px 0 0;
 }
 
 .paper-card.is-list .paper-status {
@@ -6584,13 +6649,14 @@ body.col-resizing * {
   }
 
   .mobile-dock-item {
+    position: relative;
     flex: 1 1 0;
     min-width: 0;
-    min-height: 46px;
+    min-height: 44px;
     display: flex;
-    flex-direction: column;
     align-items: center;
-    gap: 3px;
+    justify-content: center;
+    gap: 0;
     padding: 4px 2px;
     border-radius: 8px;
     color: var(--muted);
@@ -6598,9 +6664,23 @@ body.col-resizing * {
     line-height: 1.2;
   }
 
+  /* 手机端底部工具条只留图标：文字对屏幕阅读器保留，视觉上隐藏 */
+  .mobile-dock-item > span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    border: 0;
+    white-space: nowrap;
+  }
+
   .mobile-dock-item svg {
-    width: 18px;
-    height: 18px;
+    width: 20px;
+    height: 20px;
   }
 
   .mobile-dock-item[data-active='true'] {
@@ -7822,13 +7902,42 @@ body.col-resizing * {
     -webkit-overflow-scrolling: touch;
   }
 
+  /* 手机端顶部导航只留图标：文字对屏幕阅读器保留，视觉上隐藏 */
   .settings-sidebar .library-nav-item {
+    position: relative;
     flex: 0 0 auto;
-    width: auto;
-    padding: 7px 12px;
-    border-radius: 99px;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    justify-content: center;
+    border-radius: 50%;
     white-space: nowrap;
     font-size: 13px;
+  }
+
+  .settings-sidebar .library-nav-item > span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    border: 0;
+    white-space: nowrap;
+  }
+
+  .settings-sidebar .library-nav-item svg {
+    display: block;
+    width: 18px;
+    height: 18px;
+  }
+
+  .settings-sidebar .library-nav-item .settings-nav-dot {
+    position: absolute;
+    top: 7px;
+    right: 8px;
   }
 
   .settings-sidebar .library-nav-item[data-active='true'] {
@@ -8159,6 +8268,15 @@ body.col-resizing * {
   animation: hl-translate-in 0.18s ease-out;
 }
 
+/* 翻译卡片与笔记框可按住拖动；拖拽中给一点浮起反馈 */
+.hl-translate.is-dragging,
+.hl-editor.is-dragging {
+  cursor: grabbing;
+  user-select: none;
+  animation: none;
+  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.18);
+}
+
 @keyframes hl-translate-in {
   from {
     opacity: 0;
@@ -8176,6 +8294,12 @@ body.col-resizing * {
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 8px;
+  cursor: grab;
+  touch-action: none;
+}
+
+.hl-translate-head button {
+  cursor: pointer;
 }
 
 .hl-translate-lang {
@@ -8343,6 +8467,12 @@ body.col-resizing * {
   align-items: flex-start;
   gap: 8px;
   margin-bottom: 8px;
+  cursor: grab;
+  touch-action: none;
+}
+
+.hl-editor-head button {
+  cursor: pointer;
 }
 
 .hl-editor-kind {

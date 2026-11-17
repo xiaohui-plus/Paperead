@@ -10,6 +10,7 @@ import { ResearchHome } from './research/ResearchHome'
 import { ProjectPage } from './research/ProjectPage'
 import type { ProjectKind } from './lib/researchApi'
 import { prefetchDaily } from './lib/scholar'
+import { listPlugins, startPairingWait } from './lib/plugins'
 import { hasMobileServer, isMobileShell, loadOfflineMode } from './lib/mobile'
 
 /**
@@ -80,6 +81,16 @@ export default function App() {
   useEffect(() => {
     if (isMobileShell() && !hasMobileServer()) return
     prefetchDaily().catch(() => undefined)
+  }, [])
+
+  // 自动为浏览器扩展开一个配对窗口：扩展后台会轮询认领。
+  // 用户装好扩展后不需要再点「连接」或输入配对码。
+  useEffect(() => {
+    if (sessionStorage.getItem('paperead:pair-wait')) return
+    sessionStorage.setItem('paperead:pair-wait', '1')
+    void listPlugins()
+      .then((plugins) => (plugins.length ? undefined : startPairingWait()))
+      .catch(() => undefined)
   }, [])
 
   // 站内页面（文献库/检索/研究/综述/项目）在窄屏取消 120% 缩放，阅读页保持原样。

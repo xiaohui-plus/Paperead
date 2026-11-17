@@ -14,6 +14,8 @@ interface Props {
   hint?: string
   /** 是否配置了回答模型：没配置时不要显示"等待翻译"的骨架条 */
   canTranslate?: boolean
+  translationFailures?: Record<string, number>
+  onRetryTranslation?: (id: string) => void
   /** 是否开启自动翻译：关闭后没翻的段落不应继续显示骨架条 */
   autoTranslate?: boolean
   onOpenSettings?: () => void
@@ -38,6 +40,8 @@ export function Reader({
   scrollRef,
   hint,
   canTranslate = true,
+  translationFailures = {},
+  onRetryTranslation,
   autoTranslate = true,
   onOpenSettings,
   annotations = [],
@@ -111,6 +115,8 @@ export function Reader({
             mode={effectiveMode}
             terms={terms}
             hasTranslation={hasTranslation && canTranslate && autoTranslate}
+            translationFailed={autoTranslate && canTranslate && (translationFailures[rb.block.id] ?? 0) >= 2}
+            onRetryTranslation={onRetryTranslation}
             paperId={paper.paper_id}
             annotations={annotations}
             annotationActions={annotationActions}

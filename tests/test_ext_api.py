@@ -228,3 +228,27 @@ def test_extension_preflight_allows_private_network(monkeypatch, tmp_path):
         assert response.status_code == 200
         assert response.headers["access-control-allow-origin"] == ORIGIN
         assert response.headers["access-control-allow-private-network"] == "true"
+
+
+def test_pair_wait_accepts_request_without_origin(monkeypatch, tmp_path):
+    _, client = _client(monkeypatch, tmp_path)
+    with client:
+        assert client.post("/api/ext/v1/pair/wait").status_code == 200
+        paired = client.post("/api/ext/v1/pair", json={"name": "用户脚本"})
+        assert paired.status_code == 200, paired.text
+        assert paired.json()["token"]
+
+
+def test_plugin_token_allows_page_origin(monkeypatch, tmp_path):
+    _, client = _client(monkeypatch, tmp_path)
+    with client:
+        client.post("/api/ext/v1/pair/wait")
+        token = client.post("/api/ext/v1/pair", json={"name": "用户脚本"}).json()["token"]
+        response = client.get(
+            "/api/ext/v1/folders",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Origin": "https://arxiv.org",
+            },
+        )
+        assert response.status_code == 200

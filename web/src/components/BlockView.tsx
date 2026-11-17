@@ -41,6 +41,8 @@ interface Props {
   terms: Record<string, string>
   /** 整篇是否有任何译文：没有的话不显示骨架条，避免整页都在转圈 */
   hasTranslation: boolean
+  translationFailed?: boolean
+  onRetryTranslation?: (id: string) => void
   paperId?: string
   annotations?: Annotation[]
   annotationActions?: AnnotationActions
@@ -69,6 +71,8 @@ export function BlockView({
   mode,
   terms,
   hasTranslation,
+  translationFailed = false,
+  onRetryTranslation,
   paperId,
   annotations = [],
   annotationActions,
@@ -399,7 +403,9 @@ export function BlockView({
             />
           ) : (
             <p className="para-zh">
-              <span className="shimmer" />
+              {translationFailed ? (
+                <span>暂时无法翻译，正在重试。 <button type="button" onClick={() => onRetryTranslation?.(b.id)}>立即重试</button></span>
+              ) : <span className="shimmer" />}
             </p>
           ))}
       </div>

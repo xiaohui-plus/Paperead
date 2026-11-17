@@ -32,6 +32,7 @@ fn main() {
             "install_update",
             "check_desktop_update",
             "restart_app",
+            "save_pdf_file",
             "llm_stream",
             "llm_cancel",
             "check_apk_update",

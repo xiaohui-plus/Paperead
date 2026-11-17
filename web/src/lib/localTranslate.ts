@@ -50,6 +50,7 @@ async function pool<T>(
 export interface LocalTranslateOptions {
   paper: Paper
   pages: number[]
+  blockIds?: string[]
   config: LocalLlmConfig
   targetLang: string
   signal?: AbortSignal
@@ -69,6 +70,7 @@ export async function translatePagesLocal(options: LocalTranslateOptions): Promi
     const blocks = options.paper.blocks.filter(
       (block) =>
         block.page === page
+        && (!options.blockIds || options.blockIds.includes(block.id))
         // 图注/表注也要翻：历史论文的 caption 块 translatable 仍是 false
         && (block.translatable || block.kind === 'caption')
         && block.text.trim()
@@ -76,6 +78,9 @@ export async function translatePagesLocal(options: LocalTranslateOptions): Promi
         && !isDotLeaderOnly(block.text)
         && !block.translated,
     )
+    if (options.blockIds) {
+      blocks.sort((a, b) => options.blockIds!.indexOf(a.id) - options.blockIds!.indexOf(b.id))
+    }
     if (!blocks.length) continue
 
     const translations = new Map<string, string>()

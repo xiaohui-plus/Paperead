@@ -319,6 +319,7 @@ export function TopBar({
           <IconSettings />
           <i className="dot" data-on={configured} />
         </button>
+
       </div>
 
       <div className="topbar-progress">

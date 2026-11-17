@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { IconClose, IconDownload } from '../../components/icons'
 import { FileTypeIcon } from '../../components/fileTypeIcons'
 import { Markdown } from '../../components/Markdown'
@@ -291,9 +291,15 @@ interface Props {
 export function FilePreview({ projectId, file, onClose }: Props) {
   const url = researchApi.fileContentUrl(projectId, file.id)
   const kind = detectKind(file)
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  // 切换文件时回到顶部：PDF / Word 由整块面板滚动，否则会停在上一篇的位置。
+  useEffect(() => {
+    rootRef.current?.scrollTo({ top: 0 })
+  }, [url])
 
   return (
-    <div className="project-preview">
+    <div className="project-preview" data-kind={kind} ref={rootRef}>
       <header className="project-preview-head">
         <div className="project-preview-heading">
           <FileTypeIcon name={file.name} mime={file.mime} />
@@ -338,8 +344,14 @@ interface LocalProps {
 /** 工作文件夹里的真实文件：与项目文件预览共用同一套渲染器。 */
 export function LocalFilePreview({ url, file, onClose }: LocalProps) {
   const kind = detectKind(file)
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    rootRef.current?.scrollTo({ top: 0 })
+  }, [url])
+
   return (
-    <div className="project-preview">
+    <div className="project-preview" data-kind={kind} ref={rootRef}>
       <header className="project-preview-head">
         <div className="project-preview-heading">
           <FileTypeIcon name={file.name} mime={file.mime} />

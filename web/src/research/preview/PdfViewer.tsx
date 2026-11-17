@@ -33,9 +33,19 @@ export function PdfViewer({ url, title }: Props) {
 
   const pageWidth = Math.max(240, (width - 32) * zoom)
 
+  /**
+   * PDF 的滚动容器是外层预览面板（标题栏随正文一起滚出），
+   * 找不到时退回自身，兼容单独使用的情况。
+   */
+  const getScrollHost = () => {
+    const el = scrollRef.current
+    if (!el) return null
+    return (el.closest('.project-preview') as HTMLElement | null) ?? el
+  }
+
   /** 滚动时更新右下角/工具栏显示的当前页。 */
   const syncCurrentPage = () => {
-    const container = scrollRef.current
+    const container = getScrollHost()
     if (!container) return
     const top = container.getBoundingClientRect().top + 100
     let next = 1
@@ -45,14 +55,26 @@ export function PdfViewer({ url, title }: Props) {
     setPage(next)
   }
 
+  useEffect(() => {
+    const container = getScrollHost()
+    if (!container) return
+    const onScroll = () => syncCurrentPage()
+    container.addEventListener('scroll', onScroll, { passive: true })
+    return () => container.removeEventListener('scroll', onScroll)
+  }, [])
+
   /** 跳页：把目标页滚到预览区顶部。 */
   const jumpTo = (target: number) => {
-    const container = scrollRef.current
+    const container = getScrollHost()
     const el = pageEls.current[target - 1]
     if (container && el) {
+      // 页面根节点带 CSS zoom（1.2），rect 差是视觉像素，scrollTop 是布局像素。
+      const rootZoom = Number(getComputedStyle(document.documentElement).zoom)
+      const scale = Number.isFinite(rootZoom) && rootZoom > 0 ? rootZoom : 1
       const offset =
-        el.getBoundingClientRect().top -
-        container.getBoundingClientRect().top +
+        (el.getBoundingClientRect().top -
+          container.getBoundingClientRect().top) /
+          scale +
         container.scrollTop
       container.scrollTo({ top: offset, behavior: 'smooth' })
     }
@@ -100,7 +122,7 @@ export function PdfViewer({ url, title }: Props) {
         </button>
       </div>
 
-      <div className="pdf-preview-scroll" ref={scrollRef} onScroll={syncCurrentPage}>
+      <div className="pdf-preview-scroll" ref={scrollRef}>
         <Document
           file={url}
           loading={<p className="project-preview-note">正在加载 PDF…</p>}

@@ -37,11 +37,10 @@ import {
 } from './icons'
 import { LibraryFolders } from './LibraryFolders'
 import { tourBus } from '../tour/tourBus'
-import { isMobileShell } from '../lib/mobile'
+import { isMobileShell, mediaUrl } from '../lib/mobile'
 import { isDesktopApp } from '../lib/update'
 import {
   deleteOffline,
-  downloadPaper,
   listOffline,
   type OfflineSummary,
 } from '../lib/offlineStore'
@@ -51,6 +50,19 @@ import { SCHOLAREAD_SYNCED } from '../lib/scholareadSync'
 
 type Filter = 'all' | 'ready' | 'reading' | 'unread' | 'finished' | 'untranslated' | 'failed'
 type Sort = 'recent' | 'read' | 'title' | 'pages'
+
+/** File System Access API 的保存对话框（Chrome/Edge 支持，手机 WebView 不支持）。 */
+type SaveFilePickerHandle = {
+  name: string
+  createWritable: () => Promise<{
+    write: (data: Blob) => Promise<void>
+    close: () => Promise<void>
+  }>
+}
+type SaveFilePicker = (options: {
+  suggestedName?: string
+  types?: { description?: string; accept: Record<string, string[]> }[]
+}) => Promise<SaveFilePickerHandle>
 
 interface Props {
   onOpenPaper: (id: string) => void
@@ -92,7 +104,7 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
   const mobile = isMobileShell()
   const [offlineItems, setOfflineItems] = useState<OfflineSummary[]>([])
   const [offlineMode, setOfflineMode] = useState(false)
-  const [downloads, setDownloads] = useState<Record<string, { done: number; total: number }>>({})
+  const [pdfBusy, setPdfBusy] = useState<Record<string, boolean>>({})
   const [importing, setImporting] = useState(false)
 
   const [syncImporting, setSyncImporting] = useState(false)
@@ -373,22 +385,90 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
     }
   }
 
-  /** 把论文（解析结果 + 各页图片）下载到本机，离开电脑后仍可阅读。 */
-  const onDownload = async (paper: PaperRow) => {
-    setDownloads((prev) => ({ ...prev, [paper.id]: { done: 0, total: 1 } }))
+  /** 下载这篇论文的 PDF：桌面弹系统保存对话框，用户自己选保存位置。 */
+  const onDownloadPdf = async (paper: PaperRow) => {
+    if (pdfBusy[paper.id]) return
+    const base = (paper.filename || paper.title || 'paper').replace(/\.pdf$/i, '')
+    const safe = base.replace(/[\\/:*?"<>|]+/g, '_').trim().slice(0, 120) || 'paper'
+    const fileName = `${safe}.pdf`
+    const source = mediaUrl(`/api/papers/${paper.id}/file`)
+    setPdfBusy((prev) => ({ ...prev, [paper.id]: true }))
     try {
-      await downloadPaper(paper.id, (progress) => {
-        setDownloads((prev) => ({
-          ...prev,
-          [paper.id]: { done: progress.done, total: Math.max(progress.total, 1) },
-        }))
-      })
-      await refresh()
-      notify('已下载到本机，离线也能阅读')
+      if (isDesktopApp()) {
+        // 桌面壳：系统「另存为」对话框 + 壳内直接下载写盘，绕开 WebView 的默认下载目录。
+        const [{ save }, { invoke }] = await Promise.all([
+          import('@tauri-apps/plugin-dialog'),
+          import('@tauri-apps/api/core'),
+        ])
+        const target = await save({
+          defaultPath: fileName,
+          filters: [{ name: 'PDF 文档', extensions: ['pdf'] }],
+        })
+        if (!target) return
+        // 少数系统保存框不会自动补后缀，写入前统一成 .pdf。
+        const finalPath = /\.pdf$/i.test(target) ? target : `${target}.pdf`
+        await invoke<string>('save_pdf_file', {
+          paperId: paper.id,
+          path: finalPath,
+        })
+        notify(`已保存到 ${finalPath}`)
+        return
+      }
+
+      const picker = (
+        window as unknown as { showSaveFilePicker?: SaveFilePicker }
+      ).showSaveFilePicker
+      if (picker) {
+        const response = await fetch(source)
+        if (!response.ok) {
+          throw new Error(
+            response.status === 404
+              ? '找不到这篇论文的 PDF'
+              : `下载失败（HTTP ${response.status}）`,
+          )
+        }
+        const handle = await picker.call(window, {
+          suggestedName: fileName,
+          types: [{ description: 'PDF 文档', accept: { 'application/pdf': ['.pdf'] } }],
+        })
+        const writable = await handle.createWritable()
+        await writable.write(await response.blob())
+        await writable.close()
+        notify(`已保存 PDF：${handle.name}`)
+        return
+      }
+
+      // 手机等没有保存对话框的环境：退回系统默认下载目录。
+      const response = await fetch(source)
+      if (!response.ok) {
+        throw new Error(
+          response.status === 404
+            ? '找不到这篇论文的 PDF'
+            : `下载失败（HTTP ${response.status}）`,
+        )
+      }
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = fileName
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(url), 10_000)
+      notify('PDF 已开始下载')
     } catch (e) {
-      notify(e instanceof Error ? e.message : '下载失败', 'err')
+      if (e instanceof DOMException && e.name === 'AbortError') return
+      notify(
+        typeof e === 'string'
+          ? e
+          : e instanceof Error
+            ? e.message
+            : '下载失败',
+        'err',
+      )
     } finally {
-      setDownloads((prev) => {
+      setPdfBusy((prev) => {
         const next = { ...prev }
         delete next[paper.id]
         return next
@@ -953,8 +1033,9 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
                 dragging={dragPaper?.id === p.id}
                 onDragStart={handlePaperDragStart}
                 onDragEnd={handlePaperDragEnd}
-                downloadProgress={downloads[p.id] ?? null}
-                onDownload={offlineMode ? undefined : onDownload}
+
+                downloading={Boolean(pdfBusy[p.id])}
+                onDownloadPdf={offlineMode ? undefined : onDownloadPdf}
               />
             ))}
             {!offlineMode && (

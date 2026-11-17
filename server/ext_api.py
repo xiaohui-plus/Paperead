@@ -123,8 +123,10 @@ def build_router(
     @router.post("/pair")
     async def pair(request: Request, payload: PairIn) -> dict:
         origin = request.headers.get("origin", "")
-        if not is_extension_origin(origin):
-            raise HTTPException(status_code=403, detail="只允许浏览器扩展配对")
+        # 扩展必须带扩展 Origin；脚本管理器（脚本猫/Tampermonkey）的
+        # GM_xmlhttpRequest 可能不带 Origin。普通网页的 Origin 一律拒绝。
+        if origin and not is_extension_origin(origin):
+            raise HTTPException(status_code=403, detail="只允许浏览器扩展或用户脚本配对")
         client = request.client.host if request.client else "unknown"
         try:
             codes.consume(client, payload.code)

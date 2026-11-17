@@ -23,7 +23,7 @@ interface Props {
   activeFile?: string | null
   onOpenFile: (entry: FsEntry) => void
 
-  onResetRoot?: () => void
+
   onError?: (message: string) => void
 }
 
@@ -56,7 +56,7 @@ export function ProjectExplorer({
   activeFile,
   onOpenFile,
 
-  onResetRoot,
+
   onError,
 }: Props) {
   const [listing, setListing] = useState<ProjectListing | null>(null)
@@ -235,17 +235,26 @@ export function ProjectExplorer({
 
   return (
     <div className="project-explorer">
-      <div className="project-explorer-toolbar">
-        <button
-          className="icon-btn"
-          title="刷新"
-          onClick={refresh}
-        >
-          <IconRefresh />
-        </button>
+      <div className="project-explorer-pathline">
+        <nav className="project-explorer-path" aria-label="当前路径">
+          <button data-active={!path} onClick={() => go('')} title={rootLabel}>
+            {baseName(rootLabel) || '工作文件夹'}
+          </button>
+          {segments.map((segment, index) => (
+            <span key={`${segment}-${index}`}>
+              <em>/</em>
+              <button
+                data-active={index === segments.length - 1}
+                onClick={() => go(segments.slice(0, index + 1).join('/'))}
+              >
+                {segment}
+              </button>
+            </span>
+          ))}
+        </nav>
         {clipboard && (
           <button
-            className="icon-btn"
+            className="icon-btn project-explorer-refresh"
             title={`粘贴${clipboard.mode === 'cut' ? '（移动）' : ''}「${clipboard.name}」到当前文件夹`}
             disabled={busy}
             onClick={() => paste(path)}
@@ -255,7 +264,7 @@ export function ProjectExplorer({
         )}
         {selected && (
           <button
-            className="icon-btn"
+            className="icon-btn project-explorer-refresh"
             title="删除所选"
             disabled={busy}
             onClick={() => {
@@ -266,33 +275,14 @@ export function ProjectExplorer({
             <IconTrash />
           </button>
         )}
-        {onResetRoot && (
-          <button
-            className="project-explorer-reset"
-            title="改用项目默认文件夹"
-            onClick={onResetRoot}
-          >
-            默认
-          </button>
-        )}
-      </div>
-
-      <nav className="project-explorer-path" aria-label="当前路径">
-        <button data-active={!path} onClick={() => go('')} title={rootLabel}>
-          {baseName(rootLabel) || '工作文件夹'}
+        <button
+          className="icon-btn project-explorer-refresh"
+          title="刷新"
+          onClick={refresh}
+        >
+          <IconRefresh />
         </button>
-        {segments.map((segment, index) => (
-          <span key={`${segment}-${index}`}>
-            <em>/</em>
-            <button
-              data-active={index === segments.length - 1}
-              onClick={() => go(segments.slice(0, index + 1).join('/'))}
-            >
-              {segment}
-            </button>
-          </span>
-        ))}
-      </nav>
+      </div>
 
       {actionError && (
         <p className="project-explorer-error">
@@ -427,7 +417,7 @@ export function ProjectExplorer({
             }}
           >
             <IconCopy />
-            复制名称
+            复制文件名称
           </button>
           <button
             type="button"
@@ -437,7 +427,7 @@ export function ProjectExplorer({
             }}
           >
             <IconCopy />
-            复制路径
+            复制文件路径
           </button>
           <div className="project-tree-menu-sep" />
           <button type="button" onClick={() => cut(menu.entry)}>

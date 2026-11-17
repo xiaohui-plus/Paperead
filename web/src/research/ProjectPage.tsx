@@ -95,6 +95,8 @@ export function ProjectPage({
   const [artifacts, setArtifacts] = useState<ArtifactSummary[]>(
     snapshot?.artifacts ?? [],
   )
+  /** 产物目录的绝对路径：产物区是虚拟节点，路径要单独保存才能复制。 */
+  const [artifactsRoot, setArtifactsRoot] = useState('')
   const [sessions, setSessions] = useState<SessionSummary[]>(
     snapshot?.sessions ?? [],
   )
@@ -163,7 +165,8 @@ export function ProjectPage({
         setProject(loadedProject)
         setFiles(loadedFiles)
         setSessions(loadedSessions)
-        setArtifacts(loadedArtifacts)
+        setArtifacts(loadedArtifacts.items)
+        setArtifactsRoot(loadedArtifacts.root)
         setDraftName(loadedProject.name)
         if (initialRename) setRenaming(true)
       })
@@ -252,7 +255,8 @@ export function ProjectPage({
         researchApi.listArtifacts(projectId),
       ])
       setFiles(nextFiles)
-      setArtifacts(nextArtifacts)
+      setArtifacts(nextArtifacts.items)
+      setArtifactsRoot(nextArtifacts.root)
     } catch {
       // 刷新失败保留旧列表即可，不打断用户。
     }
@@ -271,6 +275,7 @@ export function ProjectPage({
             kind: 'folder',
             name: '产物',
             path: '',
+            absolute: artifactsRoot,
             mime: '',
             size: 0,
             refId: null,
@@ -284,6 +289,7 @@ export function ProjectPage({
               kind: 'artifact' as const,
               name: artifact.title,
               path: artifact.path,
+              absolute: artifact.absolute,
               mime: '',
               size: 0,
               refId: artifact.id,
@@ -379,13 +385,6 @@ export function ProjectPage({
     })
   }
 
-  const resetRoot = async () => {
-    try {
-      await applyRoot('')
-    } catch (resetError) {
-      setError(errorText(resetError))
-    }
-  }
 
   const send = async (text: string) => {
     const value = text.trim()
@@ -529,6 +528,17 @@ export function ProjectPage({
 
   const moveFile = async (item: ProjectFile, parentId: string | null) => {
     try {
+      if (item.kind === 'artifact') {
+        if (!item.refId) return
+        applyItems(
+          await researchApi.moveArtifact(projectId, item.refId, parentId),
+        )
+        setArtifacts((prev) => prev.filter((entry) => entry.id !== item.refId))
+        setPreviewArtifact((prev) =>
+          prev && prev.id === item.refId ? null : prev,
+        )
+        return
+      }
       applyItems(await researchApi.moveItem(projectId, item.id, parentId))
     } catch (moveError) {
       setError(errorText(moveError))
@@ -537,6 +547,13 @@ export function ProjectPage({
 
   const copyFile = async (item: ProjectFile, parentId: string | null) => {
     try {
+      if (item.kind === 'artifact') {
+        if (!item.refId) return
+        applyItems(
+          await researchApi.copyArtifact(projectId, item.refId, parentId),
+        )
+        return
+      }
       applyItems(await researchApi.copyItem(projectId, item.id, parentId))
     } catch (copyError) {
       setError(errorText(copyError))
@@ -544,6 +561,22 @@ export function ProjectPage({
   }
 
   const deleteFile = async (item: ProjectFile) => {
+    if (item.kind === 'artifact') {
+      if (!item.refId) return
+      if (!window.confirm(`确定删除产物「${item.name}」？文件会被删除，无法恢复。`)) {
+        return
+      }
+      try {
+        await researchApi.deleteArtifact(projectId, item.refId)
+        setArtifacts((prev) => prev.filter((entry) => entry.id !== item.refId))
+        setPreviewArtifact((prev) =>
+          prev && prev.id === item.refId ? null : prev,
+        )
+      } catch (deleteError) {
+        setError(errorText(deleteError))
+      }
+      return
+    }
     const what = item.kind === 'folder' ? '文件夹及其中的所有文件' : '文件'
     if (!window.confirm(`确定删除${what}「${item.name}」？删除后无法恢复。`)) return
     try {
@@ -584,9 +617,26 @@ export function ProjectPage({
     }
   }
 
-  const copyPath = (item: ProjectFile) => {
-    const value = item.path || item.name
-    void navigator.clipboard?.writeText(value)
+  const copyPath = async (item: ProjectFile) => {
+    // 普通文件/文件夹用后端解析出的绝对路径；虚拟节点在磁盘上没有独立目录时
+    // 才退回相对路径，避免把「资料/a.pdf」这种片段写进剪贴板。
+    const value = item.absolute || item.path || item.name
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value)
+      } else {
+        const area = document.createElement('textarea')
+        area.value = value
+        area.style.position = 'fixed'
+        area.style.opacity = '0'
+        document.body.appendChild(area)
+        area.select()
+        document.execCommand('copy')
+        area.remove()
+      }
+    } catch {
+      setError('复制路径失败，请检查剪贴板权限后重试。')
+    }
   }
 
   const openSession = (session: SessionSummary) => {
@@ -938,7 +988,6 @@ export function ProjectPage({
                   activeFile={localPreview?.entry.path ?? null}
                   onOpenFile={openLocalFile}
 
-                  onResetRoot={() => void resetRoot()}
                   onError={setError}
                 />
               ) : (

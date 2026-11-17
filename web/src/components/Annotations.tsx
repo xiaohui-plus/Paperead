@@ -448,6 +448,127 @@ function clampPosition(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max)
 }
 
+/** 可交互/可选中区域不参与拖动，避免抢掉点击、输入与复制译文。 */
+const DRAG_IGNORE = 'button, a, input, textarea, select, .hl-translate-text'
+
+/**
+ * 浮层拖动：与划词工具条同一套规则（4px 阈值、zoom 换算、视口钳制、拖完抑制 click）。
+ *
+ * 翻译卡片与笔记编辑框默认贴在选区/工具条旁，只有用户真正按住拖动后才改用拖拽位置；
+ * `resetKey` 变化（换选区、换标注）时回到自动定位，避免沿用上一次的位置。
+ */
+function useFloatDrag(
+  base: { left: number; top: number; width: number },
+  resetKey?: string,
+) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [size, setSize] = useState({ width: base.width, height: 0 })
+  const [dragPos, setDragPos] = useState<{ left: number; top: number } | null>(null)
+  const [dragging, setDragging] = useState(false)
+
+  // 卡片高度会随内容变化（骨架 → 译文、译文长短、textarea 拉伸），用实测值做边界钳制
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const next = { width: el.offsetWidth, height: el.offsetHeight }
+    setSize((prev) => (prev.width === next.width && prev.height === next.height ? prev : next))
+  })
+
+  useEffect(() => {
+    setDragPos(null)
+    setDragging(false)
+  }, [resetKey])
+
+  const dragRef = useRef<{
+    pointerId: number
+    startX: number
+    startY: number
+    baseLeft: number
+    baseTop: number
+    moved: boolean
+  } | null>(null)
+  const suppressClick = useRef(false)
+
+  const zoom = uiZoom()
+  const pad = VIEWPORT_PAD / zoom
+  const width = size.width || base.width
+  const height = size.height
+  const left = dragPos?.left ?? base.left
+  const top = dragPos?.top ?? base.top
+  const maxLeft = Math.max(pad, window.innerWidth / zoom - width - pad)
+  const maxTop = Math.max(pad, window.innerHeight / zoom - height - pad)
+
+  const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return
+    const target = event.target as HTMLElement
+    if (target.closest(DRAG_IGNORE)) return
+    // 非交互区按下时阻止文本选区；点击仍会正常补发，不受影响
+    event.preventDefault()
+    suppressClick.current = false
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      baseLeft: left,
+      baseTop: top,
+      moved: false,
+    }
+  }
+
+  const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    const dx = (event.clientX - drag.startX) / zoom
+    const dy = (event.clientY - drag.startY) / zoom
+    if (!drag.moved && Math.hypot(dx, dy) < 4) return
+    if (!drag.moved) {
+      drag.moved = true
+      suppressClick.current = true
+      setDragging(true)
+      try {
+        event.currentTarget.setPointerCapture(event.pointerId)
+      } catch {
+        // 指针已失效时忽略，下一次 move 会继续拖动
+      }
+    }
+    setDragPos({
+      left: clampPosition(drag.baseLeft + dx, pad, maxLeft),
+      top: clampPosition(drag.baseTop + dy, pad, maxTop),
+    })
+  }
+
+  const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (dragRef.current?.pointerId !== event.pointerId) return
+    dragRef.current = null
+    setDragging(false)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+  }
+
+  // 拖拽结束浏览器会补发 click，不能让它落到「复制译文 / 保存」等按钮上
+  const onClickCapture = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (!suppressClick.current) return
+    suppressClick.current = false
+    event.preventDefault()
+    event.stopPropagation()
+  }
+
+  return {
+    ref,
+    dragging,
+    left,
+    top,
+    handlers: {
+      onPointerDown,
+      onPointerMove,
+      onPointerUp,
+      onPointerCancel: onPointerUp,
+      onClickCapture,
+    },
+  }
+}
+
 interface TranslateState {
   status: 'idle' | 'loading' | 'done' | 'error'
   /** 本机流式翻译时已到达的部分译文 */
@@ -746,6 +867,7 @@ export function SelectionToolbar({
           anchor={{ left, top, width }}
           state={translation}
           target={targetName}
+          resetKey={rectKey}
           onClose={() => setTranslation({ status: 'idle' })}
           onRetry={() => void translate()}
         />
@@ -759,13 +881,16 @@ function TranslateCard({
   anchor,
   state,
   target,
+  resetKey,
   onClose,
   onRetry,
 }: {
-  /** 工具条当前所在位置：卡片贴在工具条下方，拖动后一起走 */
+  /** 工具条当前所在位置：卡片默认贴在工具条下方，工具条拖动后跟随 */
   anchor: { left: number; top: number; width: number }
   state: TranslateState
   target: string
+  /** 选区变化时丢弃手动拖到的位置 */
+  resetKey?: string
   onClose: () => void
   onRetry: () => void
 }) {
@@ -786,6 +911,8 @@ function TranslateCard({
     below <= maxTop
       ? below
       : clampPosition(anchor.top - estimated - FLOAT_GAP / zoom, pad, maxTop)
+
+  const drag = useFloatDrag({ left, top, width }, resetKey)
 
   const copy = async () => {
     const value = state.value
@@ -812,9 +939,11 @@ function TranslateCard({
 
   return (
     <div
-      className="hl-translate"
-      style={{ left, top, width }}
+      ref={drag.ref}
+      className={`hl-translate${drag.dragging ? ' is-dragging' : ''}`}
+      style={{ left: drag.left, top: drag.top, width }}
       onMouseDown={(e) => e.stopPropagation()}
+      {...drag.handlers}
     >
       <div className="hl-translate-head">
         <span className="hl-translate-lang">EN → {target}</span>
@@ -945,8 +1074,19 @@ export function AnnotationPopover({
     window.innerHeight / zoom - 220 - pad,
   )
 
+  const drag = useFloatDrag(
+    { left, top, width },
+    `${annotation.id}:${rect.left}:${rect.top}:${rect.width}:${rect.height}`,
+  )
+
   return (
-    <div className="hl-editor" style={{ left, top, width }} onMouseDown={(e) => e.stopPropagation()}>
+    <div
+      ref={drag.ref}
+      className={`hl-editor${drag.dragging ? ' is-dragging' : ''}`}
+      style={{ left: drag.left, top: drag.top, width }}
+      onMouseDown={(e) => e.stopPropagation()}
+      {...drag.handlers}
+    >
       <div className="hl-editor-head">
         <span className="hl-editor-kind">{isComment ? '批注' : '荧光笔'}</span>
         <span className="hl-editor-quote" title={annotation.quote}>

@@ -11,10 +11,12 @@ import {
   type RewardTier,
 } from '../lib/rewardHistory'
 import { IconClose, IconCoffee, IconFlower, IconReward, IconStar, IconTrash } from './icons'
-import alipayQr from '../assets/alipay-reward.jpg'
+import alipayQr49 from '../assets/alipay-reward-4.9.jpg'
+import alipayQr99 from '../assets/alipay-reward-9.9.jpg'
 import giteeLogo from '../assets/gitee-logo.svg'
 import githubLogo from '../assets/github-logo.svg'
-import wechatQr from '../assets/wechat-reward.jpg'
+import wechatQr49 from '../assets/wechat-reward-4.9.jpg'
+import wechatQr99 from '../assets/wechat-reward-9.9.jpg'
 
 type Tier = RewardTier
 type Channel = RewardChannel
@@ -46,6 +48,12 @@ const TIER_TITLE: Record<Tier, string> = {
 const CHANNEL_NAME: Record<Channel, string> = {
   wechat: '微信',
   alipay: '支付宝',
+}
+
+/** 四张已预设金额的收款码：档位 × 渠道一一对应，扫码后无需再填金额。 */
+const QR_IMAGE: Record<Tier, Record<Channel, string>> = {
+  flower: { wechat: wechatQr49, alipay: alipayQr49 },
+  coffee: { wechat: wechatQr99, alipay: alipayQr99 },
 }
 
 function tierIcon(tier: Tier, size = 18) {
@@ -112,7 +120,7 @@ export function RewardPanel() {
     setNotice('打赏记录已清空。')
   }
 
-  const qr = channel === 'wechat' ? wechatQr : alipayQr
+  const qr = tier ? QR_IMAGE[tier][channel] : QR_IMAGE.flower.wechat
 
   return (
     <div className="modal-body reward-panel">
@@ -311,7 +319,8 @@ export function RewardPanel() {
               <div>
                 <b>{selected.title}</b>
                 <span>
-                  扫码支付 <em>{rewardAmountText(selected.price)}</em>，金额可以自选
+                  {CHANNEL_NAME[channel]}收款码 · 金额已设为{' '}
+                  <em>{rewardAmountText(selected.price)}</em>
                 </span>
               </div>
             </div>
@@ -338,11 +347,15 @@ export function RewardPanel() {
             </div>
 
             <figure className="reward-sheet-qr">
-              <img src={qr} alt={`${CHANNEL_NAME[channel]}收款码`} />
+              <img
+                src={qr}
+                alt={`${CHANNEL_NAME[channel]}收款码 ${rewardAmountText(selected.price)}`}
+              />
             </figure>
 
             <p className="reward-sheet-tip">
-              打开{CHANNEL_NAME[channel]}「扫一扫」，或长按图片识别二维码；付款备注里可以写一句话。
+              打开{CHANNEL_NAME[channel]}「扫一扫」直接付款，金额已固定为
+              {rewardAmountText(selected.price)}，无需再输入。
             </p>
 
             <div className="reward-sheet-actions">

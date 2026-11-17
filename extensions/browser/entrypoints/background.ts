@@ -1,15 +1,36 @@
 import { browser } from 'wxt/browser'
 import { defineBackground } from 'wxt/utils/define-background'
 import { acquirePdf } from '../lib/pdf'
-import { getPaper, ingest, isPaired, lookup } from '../lib/api'
+import { getPaper, ingest, isPaired, lookup, pair } from '../lib/api'
 import { extractMetadataInPage } from '../lib/metadata'
 import type { PaperMetadata, TaskState } from '../lib/types'
 
 const MENU_SAVE_PAGE = 'save-page'
 const MENU_SAVE_LINK = 'save-link'
+const PDF_TAKEOVER_KEY = 'pdfTakeover'
+const AUTO_PAIR_ALARM = 'paperead-auto-pair'
+
+/** 后台自动认领配对窗口；没有窗口时静默跳过，下次 alarm 再试。 */
+async function tryAutoPair(): Promise<void> {
+  if (await isPaired()) return
+  try {
+    await pair('')
+  } catch {
+    // 桌面端未启动或未开等待窗口，保持静默。
+  }
+}
+
+function viewerUrl(url: string): string {
+  return browser.runtime.getURL(`/viewer.html?file=${encodeURIComponent(url)}`)
+}
 
 function isPdfUrl(url: string): boolean {
   return /\.pdf($|[?#])/i.test(url)
+}
+
+/** chrome://、edge:// 等浏览器内部页面禁止扩展注入脚本 */
+function isRestrictedUrl(url: string): boolean {
+  return /^(chrome|edge|about|devtools|chrome-extension|moz-extension|file):/i.test(url)
 }
 
 async function setTask(task: TaskState): Promise<void> {
@@ -35,6 +56,9 @@ async function notify(title: string, message: string): Promise<void> {
 async function readMeta(tabId: number): Promise<PaperMetadata> {
   const tab = await browser.tabs.get(tabId)
   const url = tab.url || ''
+  if (url && isRestrictedUrl(url) && !isPdfUrl(url)) {
+    throw new Error('当前是浏览器内部页面，请切换到论文页面再保存')
+  }
   if (isPdfUrl(url)) {
     return {
       source: 'pdf',
@@ -152,6 +176,15 @@ export default defineBackground(() => {
     })
   })
 
+  void browser.alarms.create(AUTO_PAIR_ALARM, { periodInMinutes: 1 })
+  browser.runtime.onStartup.addListener(() => {
+    void tryAutoPair()
+  })
+  browser.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === AUTO_PAIR_ALARM) void tryAutoPair()
+  })
+  void tryAutoPair()
+
   browser.contextMenus.onClicked.addListener((info, tab) => {
     if (!tab?.id) return
     if (info.menuItemId === MENU_SAVE_PAGE) {
@@ -164,6 +197,19 @@ export default defineBackground(() => {
         notify('保存失败', error instanceof Error ? error.message : '未知错误'),
       )
     }
+  })
+
+  // PDF 接管：把 .pdf 导航重定向到扩展内置的 pdf.js 阅读页，
+  // 这样才能在 PDF 上选词翻译与提问。用户可在阅读页里关闭接管。
+  browser.webNavigation.onBeforeNavigate.addListener((details) => {
+    if (details.frameId !== 0) return
+    const url = details.url
+    if (!isPdfUrl(url) || isRestrictedUrl(url)) return
+    if (/^https?:\/\/(127\.0\.0\.1|localhost)(:|\/)/i.test(url)) return
+    void browser.storage.local.get(PDF_TAKEOVER_KEY).then((stored) => {
+      if (stored[PDF_TAKEOVER_KEY] === false) return
+      void browser.tabs.update(details.tabId, { url: viewerUrl(url) })
+    })
   })
 
   browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {

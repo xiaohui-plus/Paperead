@@ -1408,9 +1408,18 @@
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* PDF / Word：标题栏跟随正文一起滚出，不再固定占高 */
+.project-preview[data-kind='pdf'],
+.project-preview[data-kind='docx'] {
+  overflow-x: auto;
 }
 
 .project-preview-head {
+  flex: none;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1544,9 +1553,7 @@
 
 /* PDF：占满预览区，工具栏 + 画布滚动 */
 
-.project-preview-body[data-kind='pdf'],
 .project-preview-body[data-kind='pptx'],
-.project-preview-body[data-kind='docx'],
 .project-preview-body[data-kind='csv'],
 .project-preview-body[data-kind='sheet'],
 .project-preview-body[data-kind='code'] {
@@ -1554,10 +1561,19 @@
   overflow: hidden;
 }
 
+/* PDF / Word 由外层预览面板统一滚动，正文区不再自带滚动条 */
+.project-preview[data-kind='pdf'] .project-preview-body,
+.project-preview[data-kind='docx'] .project-preview-body {
+  flex: 1 0 auto;
+  height: auto;
+  padding: 0;
+  overflow: visible;
+}
+
 .pdf-preview {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  height: auto;
   min-height: 0;
 }
 
@@ -1629,14 +1645,12 @@
 }
 
 .pdf-preview-scroll {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  padding: 16px;
-  background: #eaf2fc;
+  flex: none;
   display: flex;
   flex-direction: column;
   align-items: center;
+  padding: 16px;
+  background: #eaf2fc;
 }
 
 .pdf-preview-scroll .react-pdf__Document {
@@ -1699,9 +1713,7 @@
 
 .docx-preview {
   position: relative;
-  height: 100%;
   min-height: 0;
-  overflow: auto;
   padding: 18px;
   background: var(--bg-soft);
 }
@@ -1717,13 +1729,11 @@
 }
 
 .docx-preview .project-preview-note {
-  position: absolute;
-  inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   margin: 0;
-  padding: 0 24px;
+  padding: 60px 24px;
   background: var(--bg-soft);
 }
 
@@ -2807,28 +2817,28 @@
   height: 14px;
 }
 
-.project-explorer-reset {
-  padding: 4px 7px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--muted);
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.project-explorer-reset:hover {
-  background: var(--bg-hover);
-  color: var(--ink-2);
+.project-explorer-pathline {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 2px;
+  border-bottom: 1px solid var(--line);
 }
 
 .project-explorer-path {
   display: flex;
+  flex: 1;
+  min-width: 0;
   align-items: center;
   gap: 1px;
   overflow-x: auto;
-  padding: 8px 2px;
   font-size: 12px;
+}
+
+.project-explorer-refresh {
+  flex: none;
+  width: 26px;
+  height: 26px;
 }
 
 .project-explorer-path button {

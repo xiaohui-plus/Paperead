@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import shutil
 import time
@@ -269,14 +270,15 @@ class ResearchStore:
             path = Path(raw)
             if path.is_dir():
                 return path.resolve() / "artifacts"
-        return Path(project["workspace"]) / "artifacts"
+        # workspace 可能以相对路径入库（取决于启动目录），复制路径必须是绝对路径。
+        return (Path(project["workspace"]) / "artifacts").resolve()
 
     def legacy_artifacts_root(self, project_id: str) -> Path:
         """旧版产物目录（内部项目目录），只用于读取兼容。"""
         project = self.get_project(project_id)
         if project is None:
             raise LookupError("project not found")
-        return Path(project["workspace"]) / "artifacts"
+        return (Path(project["workspace"]) / "artifacts").resolve()
 
     # ── 项目文件树 ──────────────────────────────────────
 
@@ -898,6 +900,110 @@ class ResearchStore:
                 "SELECT * FROM artifacts WHERE id = ?", (artifact_id,)
             ).fetchone()
         return dict(row) if row else None
+
+    def artifact_path(self, project_id: str, row: dict[str, Any]) -> Path:
+        """产物文件的实际磁盘路径：优先当前产物目录，兼容旧版内部目录。"""
+        relative = str(row.get("path") or "")
+        current = self.artifacts_root(project_id) / relative
+        if current.is_file():
+            return current
+        legacy = self.legacy_artifacts_root(project_id) / relative
+        if legacy.is_file():
+            return legacy
+        return current
+
+    def remove_artifact(
+        self, artifact_id: str, *, remove_file: bool = True
+    ) -> bool:
+        """删除产物记录（默认连同磁盘文件）；同一文件被多条记录引用时保留文件。"""
+        row = self.get_artifact(artifact_id)
+        if row is None:
+            return False
+        project_id = str(row["project_id"])
+        path = self.artifact_path(project_id, row)
+        with self._db() as conn:
+            conn.execute("DELETE FROM artifacts WHERE id = ?", (artifact_id,))
+            shared = (
+                conn.execute(
+                    "SELECT 1 FROM artifacts WHERE project_id = ? AND path = ? LIMIT 1",
+                    (project_id, str(row.get("path") or "")),
+                ).fetchone()
+                if remove_file
+                else None
+            )
+            conn.execute(
+                "UPDATE projects SET updated_at = ? WHERE id = ?",
+                (_now(), project_id),
+            )
+        if remove_file and shared is None:
+            try:
+                if path.is_file():
+                    path.unlink()
+            except OSError:
+                # 文件被占用时记录仍要删掉，避免列表里留下打不开的产物。
+                pass
+        return True
+
+    def transfer_artifact(
+        self,
+        project_id: str,
+        artifact_id: str,
+        parent_id: str | None = None,
+        *,
+        move: bool = False,
+    ) -> list[dict[str, Any]]:
+        """把产物复制/移动到项目文件树的指定文件夹，作为普通文件落盘。
+
+        产物区是只读虚拟目录，真正可编辑的落点是项目文件根之下；`move=True`
+        对应右键「剪切 → 粘贴」，此时产物记录会被移除（文件已离开产物目录）。
+        """
+        row = self.get_artifact(artifact_id)
+        if row is None or row["project_id"] != project_id:
+            raise LookupError("artifact not found")
+        source = self.artifact_path(project_id, row)
+        if not source.is_file():
+            raise FileNotFoundError("artifact file not found")
+
+        parent_path = ""
+        if parent_id:
+            parent = self.get_item(parent_id)
+            if parent is None or parent["project_id"] != project_id:
+                raise LookupError("parent folder not found")
+            if parent["kind"] != "folder":
+                raise ValueError("parent is not a folder")
+            parent_path = str(parent["path"] or "")
+
+        workspace = self.workspace_root(project_id)
+        title = source.name or f"{row.get('title') or '产物'}.md"
+        with self._db() as conn:
+            unique = self._unique_title(
+                conn,
+                project_id,
+                parent_id,
+                title,
+                workspace=workspace,
+                parent_path=parent_path,
+            )
+        mime = mimetypes.guess_type(unique)[0] or ""
+        new_item = self.add_item(
+            project_id,
+            "file",
+            unique,
+            parent_id=parent_id,
+            mime=mime,
+            size=source.stat().st_size,
+        )
+        target = resolve_in_root(workspace, str(new_item.get("path") or ""))
+        same_file = os.path.normcase(str(source)) == os.path.normcase(str(target))
+        if not same_file:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if move:
+                shutil.move(str(source), str(target))
+            else:
+                shutil.copy2(source, target)
+        if move:
+            self.remove_artifact(artifact_id, remove_file=False)
+        return self.list_items(project_id)
 
     # ── 会话事件 ────────────────────────────────────────
     def list_events(

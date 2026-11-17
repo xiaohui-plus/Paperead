@@ -288,9 +288,10 @@ async def guard(request: Request, call_next):
             return JSONResponse({"detail": "unauthorized"}, status_code=403)
     elif ext_path:
         if path in {"/api/ext/v1/ping", "/api/ext/v1/pair"}:
-            if path.endswith("/pair") and not is_extension_origin(origin):
+            # 脚本管理器的 GM 请求可能没有 Origin；普通网页 Origin 仍拒绝
+            if path.endswith("/pair") and origin and not is_extension_origin(origin):
                 return JSONResponse(
-                    {"detail": "只允许浏览器扩展配对"}, status_code=403
+                    {"detail": "只允许浏览器扩展或用户脚本配对"}, status_code=403
                 )
         elif path in {
             "/api/ext/v1/pair/session",
@@ -306,15 +307,10 @@ async def guard(request: Request, call_next):
             ):
                 return JSONResponse({"detail": "origin not allowed"}, status_code=403)
         else:
+            # 业务接口只认插件 Bearer token；用户脚本可能带页面 Origin，
+            # 因此不在这里按 Origin 拒绝，Origin 绑定由 require_plugin 负责。
             if not request.headers.get("authorization", "").startswith("Bearer "):
                 return JSONResponse({"detail": "unauthorized"}, status_code=401)
-            if (
-                origin
-                and not is_extension_origin(origin)
-                and origin not in ORIGINS
-                and urlparse(origin).netloc != request.headers.get("host", "")
-            ):
-                return JSONResponse({"detail": "origin not allowed"}, status_code=403)
     elif path.startswith("/api"):
         if TOKEN and _supplied_token(request) != TOKEN:
             return JSONResponse({"detail": "unauthorized"}, status_code=403)
@@ -3117,6 +3113,7 @@ class TranslateReq(BaseModel):
     pages: list[int] | None = Field(
         default=None, description="只翻这些页；不传则整篇翻译"
     )
+    block_ids: list[str] | None = None
     target_lang: str = Field("zh-Hans", description="译文目标语言")
     auto_highlights: bool = Field(
         True, description="翻完一页后是否自动提取研究目标/方法/结论"
@@ -3416,9 +3413,19 @@ async def translate_stream(paper_id: str, req: TranslateReq) -> StreamingRespons
                 if _reset_for_language(paper_id, lang):
                     yield _sse({"type": "reset", "target_lang": lang})
                 all_blocks = store.read_blocks(paper_id) or []
+                # A previous stream can persist a result after the client disconnects.
+                # Return requested cached blocks so a stale reader can recover them.
+                if req.block_ids is not None:
+                    requested_ids = set(req.block_ids)
+                    for b in all_blocks:
+                        if (b.get("id") in requested_ids
+                                and (pages is None or b.get("page") in pages)
+                                and (b.get("translated") or "").strip()):
+                            yield _sse({"type": "block", "block": b})
                 targets = [
                     (i, b) for i, b in enumerate(all_blocks)
                     if (pages is None or b.get("page") in pages)
+                    and (req.block_ids is None or b.get("id") in req.block_ids)
                     # 历史数据的图注块 translatable=False，这里按 kind 放行，
                     # 否则图表栏的 captionZh 永远为空。
                     and (b.get("translatable") or b.get("kind") == "caption")
@@ -3428,6 +3435,9 @@ async def translate_stream(paper_id: str, req: TranslateReq) -> StreamingRespons
                     and _is_translatable(b.get("text") or "")
                     and not b.get("translated")
                 ]
+                if req.block_ids is not None:
+                    rank = {block_id: i for i, block_id in enumerate(req.block_ids)}
+                    targets.sort(key=lambda item: rank[item[1]["id"]])
                 if not targets:
                     yield _sse({"type": "done", "translated": 0})
                     return
@@ -3436,7 +3446,7 @@ async def translate_stream(paper_id: str, req: TranslateReq) -> StreamingRespons
 
                 objs = [Block(**{**b, "bbox": tuple(b["bbox"])}) for _, b in targets]
                 glossary = (store.get(paper_id) or {}).get("glossary") or {}
-                if not glossary:
+                if not glossary and req.block_ids is None:
                     everything = [
                         Block(**{**b, "bbox": tuple(b["bbox"])}) for b in all_blocks
                     ]
@@ -3564,6 +3574,19 @@ async def _parse_task(paper_id: str, vision_config: LLMConfig | None = None) -> 
                 log.exception("公式识别失败 %s", paper_id)
         else:
             log.info("未配置识图模型，公式保留裁图：%s", paper_id)
+        if cfg is not None:
+            try:
+                from paperead.vision_text import enrich_paragraphs
+
+                stats = await asyncio.wait_for(
+                    enrich_paragraphs(pdf, parsed.blocks, backend=OpenAICompatBackend(cfg)),
+                    timeout=FORMULA_TIMEOUT,
+                )
+                log.info("正文识图 %s：%s", paper_id, stats)
+            except asyncio.TimeoutError:
+                log.warning("正文识图超时（%ss），未完成的段落保留原结果", FORMULA_TIMEOUT)
+            except Exception:
+                log.exception("正文识图失败 %s，保留原结果", paper_id)
         blocks: list[dict] = []
         for b in parsed.blocks:
             d = b.to_dict()
@@ -4359,6 +4382,103 @@ def put_model_settings(payload: dict) -> dict:
     tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, MODEL_SETTINGS_PATH)
     return {"ok": True, "updated_at": data["updated_at"]}
+
+
+# ── 插件阅读接口（/api/ext/v1/reading/*） ────────────────────────────────
+#
+# 扩展/用户脚本不持有模型配置：这里统一读取「设置 → 模型服务」里选中的
+# answer 模型，再复用阅读页已有的翻译与问答实现，避免把 API key 带到页面。
+
+
+def _require_ext_plugin(scope: str, request: Request) -> dict:
+    authorization = request.headers.get("authorization", "")
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="缺少插件 token")
+    token = authorization.removeprefix("Bearer ").strip()
+    plugin = plugin_registry.verify(token, request.headers.get("origin"))
+    if plugin is None:
+        raise HTTPException(status_code=401, detail="插件 token 无效或已撤销")
+    if scope not in plugin.scopes:
+        raise HTTPException(status_code=403, detail=f"插件缺少 {scope} 权限")
+    return {"id": plugin.id, "name": plugin.name}
+
+
+def _saved_answer_model() -> LLMConfigIn:
+    """读取设置页选中的 answer 模型；没有可用配置时给出可操作提示。"""
+    payload = _read_model_settings()
+    settings = payload.get("settings") if isinstance(payload, dict) else None
+    if not isinstance(settings, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="未配置模型，请先在 Paperead 设置 → 模型服务 中配置",
+        )
+    models = [
+        item
+        for item in settings.get("models") or []
+        if isinstance(item, dict) and item.get("kind") == "answer"
+    ]
+    active = settings.get("active") if isinstance(settings.get("active"), dict) else {}
+    active_id = str(active.get("answer") or "")
+    chosen = next(
+        (item for item in models if str(item.get("id") or "") == active_id),
+        models[0] if models else None,
+    )
+    if not isinstance(chosen, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="未配置可用模型，请先在 Paperead 设置 → 模型服务 中配置",
+        )
+    base_url = str(chosen.get("baseUrl") or "").strip().rstrip("/")
+    api_key = str(chosen.get("apiKey") or "").strip()
+    model = str(chosen.get("model") or "").strip()
+    if not (base_url and api_key and model):
+        raise HTTPException(
+            status_code=400,
+            detail="已选模型缺少地址、密钥或模型名，请先在设置中补全",
+        )
+    return LLMConfigIn(base_url=base_url, api_key=api_key, model=model)
+
+
+class ExtTranslateIn(BaseModel):
+    text: str = Field(..., min_length=1, max_length=6000)
+    target_lang: str = "zh-Hans"
+
+
+class ExtAskIn(BaseModel):
+    paper_id: str = Field(..., min_length=1, max_length=64)
+    question: str = Field(..., min_length=1, max_length=2000)
+    web: bool = False
+
+
+@app.get("/api/ext/v1/reading/status")
+def ext_reading_status(request: Request) -> dict:
+    _require_ext_plugin("reading:meta", request)
+    try:
+        config = _saved_answer_model()
+    except HTTPException:
+        return {"model_ready": False, "model_label": ""}
+    return {"model_ready": True, "model_label": config.model}
+
+
+@app.post("/api/ext/v1/reading/translate")
+async def ext_reading_translate(request: Request, req: ExtTranslateIn) -> dict:
+    _require_ext_plugin("reading:translate", request)
+    config = _saved_answer_model()
+    return await translate_text_api(
+        TranslateTextReq(text=req.text, target_lang=req.target_lang, config=config)
+    )
+
+
+@app.post("/api/ext/v1/reading/ask")
+async def ext_reading_ask(request: Request, req: ExtAskIn) -> dict:
+    _require_ext_plugin("reading:ask", request)
+    if not store.get(req.paper_id):
+        raise HTTPException(status_code=404, detail="论文不在本地库")
+    config = _saved_answer_model()
+    return await ask_paper(
+        req.paper_id,
+        AskReq(question=req.question, web=req.web, config=config),
+    )
 
 
 # 整份设置备份：localStorage 跟着端口走，数据目录与端口无关，换端口也能恢复。
