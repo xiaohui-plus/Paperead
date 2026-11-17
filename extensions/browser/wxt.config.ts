@@ -16,11 +16,12 @@ export default defineConfig({
     permissions: [
       'storage',
       'activeTab',
+      'tabs',
       'scripting',
       'contextMenus',
       'notifications',
-      'webNavigation',
       'alarms',
+      'sidePanel',
     ],
     host_permissions: ['http://127.0.0.1/*', 'https://*/*', 'http://*/*'],
     ...(browser === 'firefox'

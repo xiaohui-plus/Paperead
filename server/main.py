@@ -4481,6 +4481,169 @@ async def ext_reading_ask(request: Request, req: ExtAskIn) -> dict:
     )
 
 
+@app.post("/api/ext/v1/reading/ask/stream")
+async def ext_reading_ask_stream(request: Request, req: ExtAskIn) -> StreamingResponse:
+    _require_ext_plugin("reading:ask", request)
+    if not store.get(req.paper_id):
+        raise HTTPException(status_code=404, detail="论文不在本地库")
+    config = _saved_answer_model()
+    return await ask_stream(
+        req.paper_id,
+        AskReq(question=req.question, web=req.web, config=config),
+    )
+
+
+class ExtPaperIn(BaseModel):
+    paper_id: str = Field(..., min_length=1, max_length=64)
+
+
+class ExtHighlightsIn(BaseModel):
+    paper_id: str = Field(..., min_length=1, max_length=64)
+    pages: list[int] = Field(default_factory=list, max_length=12)
+    force: bool = False
+
+
+class ExtAnnotationIn(BaseModel):
+    paper_id: str = Field(..., min_length=1, max_length=64)
+    quote: str = Field(..., min_length=1, max_length=4000)
+    note: str = Field("", max_length=5000)
+    block_id: str = Field("", max_length=24)
+    page: int = Field(0, ge=0, le=100000)
+
+
+def _ext_translated_pages(paper_id: str) -> int:
+    """已有译文的页数（blocks 里 translatable 且 translated 非空）。"""
+    blocks = store.read_blocks(paper_id) or []
+    return len(
+        {
+            int(row.get("page") or 0)
+            for row in blocks
+            if row.get("translatable") and (row.get("translated") or "").strip()
+        }
+    )
+
+
+@app.get("/api/ext/v1/reading/guide")
+async def ext_reading_guide(
+    request: Request,
+    paper_id: str = Query(..., min_length=1, max_length=64),
+) -> dict:
+    _require_ext_plugin("reading:meta", request)
+    if not store.get(paper_id):
+        raise HTTPException(status_code=404, detail="论文不在本地库")
+    path = store.papers_dir / f"{paper_id}.guide.json"
+    if not path.exists():
+        return {"status": "missing", "guide": None}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return {"status": "missing", "guide": None}
+    if data.get("version") != GUIDE_VERSION:
+        return {"status": "stale", "guide": None}
+    return {"status": data.get("status") or "ready", "guide": data}
+
+
+@app.post("/api/ext/v1/reading/guide")
+async def ext_make_reading_guide(request: Request, req: ExtPaperIn) -> dict:
+    _require_ext_plugin("reading:ask", request)
+    if not store.get(req.paper_id):
+        raise HTTPException(status_code=404, detail="论文不在本地库")
+    config = _saved_answer_model()
+    try:
+        guide = await make_guide(req.paper_id, GuideReq(config=config))
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"导读生成失败：{error}") from error
+    return {"status": guide.get("status") or "ready", "guide": guide}
+
+
+@app.get("/api/ext/v1/reading/highlights")
+async def ext_reading_highlights(
+    request: Request,
+    paper_id: str = Query(..., min_length=1, max_length=64),
+) -> dict:
+    _require_ext_plugin("reading:meta", request)
+    if not store.get(paper_id):
+        raise HTTPException(status_code=404, detail="论文不在本地库")
+    return {
+        "highlights": store.list_highlights(paper_id),
+        "pages": store.highlight_pages(paper_id),
+        "categories": HIGHLIGHT_CATEGORIES,
+        "translated_pages": _ext_translated_pages(paper_id),
+    }
+
+
+@app.post("/api/ext/v1/reading/highlights")
+async def ext_make_reading_highlights(request: Request, req: ExtHighlightsIn) -> dict:
+    _require_ext_plugin("reading:ask", request)
+    if not store.get(req.paper_id):
+        raise HTTPException(status_code=404, detail="论文不在本地库")
+    config = _saved_answer_model()
+    translated_pages = _ext_translated_pages(req.paper_id)
+    try:
+        data = await make_reading_highlights(
+            req.paper_id,
+            HighlightsReq(config=config, pages=req.pages, force=req.force),
+        )
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"阅读重点生成失败：{error}") from error
+    return {
+        **data,
+        "translated_pages": translated_pages,
+        "needs_translation": translated_pages == 0,
+    }
+
+
+@app.get("/api/ext/v1/reading/annotations")
+async def ext_reading_annotations(
+    request: Request,
+    paper_id: str = Query(..., min_length=1, max_length=64),
+) -> dict:
+    _require_ext_plugin("reading:meta", request)
+    if not store.get(paper_id):
+        raise HTTPException(status_code=404, detail="论文不在本地库")
+    return {"annotations": store.list_annotations(paper_id)}
+
+
+@app.post("/api/ext/v1/reading/annotations", status_code=201)
+async def ext_add_reading_annotation(request: Request, req: ExtAnnotationIn) -> dict:
+    _require_ext_plugin("reading:annotate", request)
+    if not store.get(req.paper_id):
+        raise HTTPException(status_code=404, detail="论文不在本地库")
+    quote = req.quote.strip()
+    if not quote:
+        raise HTTPException(status_code=400, detail="批注缺少选中文字")
+    block_id = req.block_id.strip()
+    start = end = 0
+    if block_id:
+        block = next(
+            (row for row in (store.read_blocks(req.paper_id) or []) if row.get("id") == block_id),
+            None,
+        )
+        text = (block or {}).get("text") or ""
+        pos = text.find(quote)
+        if pos >= 0:
+            start, end = pos, pos + len(quote)
+    return store.add_annotation(
+        req.paper_id,
+        {
+            "block_id": block_id,
+            "source": "en",
+            "start": start,
+            "end": end,
+            "quote": req.quote,
+            "color": "yellow",
+            "kind": "comment" if req.note.strip() else "highlight",
+            "note": req.note,
+            "pair": None,
+            "page": req.page or None,
+        },
+    )
+
+
 # 整份设置备份：localStorage 跟着端口走，数据目录与端口无关，换端口也能恢复。
 class StorageRelocateIn(BaseModel):
     path: str = Field(..., min_length=1, max_length=1024)

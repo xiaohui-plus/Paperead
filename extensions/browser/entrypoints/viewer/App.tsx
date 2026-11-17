@@ -146,9 +146,11 @@ export default function App() {
   const [paperId, setPaperId] = useState('')
   const [paperReady, setPaperReady] = useState(false)
   const [modelLabel, setModelLabel] = useState('')
-  const [takeover, setTakeover] = useState(true)
   const [selection, setSelection] = useState<Selection | null>(null)
   const [popover, setPopover] = useState<Popover | null>(null)
+  const [petOpen, setPetOpen] = useState(false)
+  const [petMsg, setPetMsg] = useState('')
+  const [petBusy, setPetBusy] = useState(false)
   const bytesRef = useRef<Uint8Array | null>(null)
   const ingestedRef = useRef(false)
 
@@ -188,12 +190,6 @@ export default function App() {
   useEffect(() => {
     void load()
   }, [load])
-
-  useEffect(() => {
-    void browser.storage.local.get('pdfTakeover').then((stored) => {
-      setTakeover(stored.pdfTakeover !== false)
-    })
-  }, [])
 
   useEffect(() => {
     void readingStatus()
@@ -237,6 +233,14 @@ export default function App() {
       }
       const saved = await ingest(bytes, meta)
       setPaperId(saved.paper.id)
+      try {
+        // 供侧边栏按当前 viewer 标签页的 file 参数找回 paper id
+        await browser.storage.session.set({
+          [`viewerPaper:${fileUrl}`]: saved.paper.id,
+        })
+      } catch {
+        // 不支持 storage.session 的环境忽略，阅读页本身不受影响
+      }
       setStatus(saved.already ? '已在文献库中，正在确认解析状态…' : '正在解析 PDF…')
       for (let attempt = 0; attempt < 120; attempt += 1) {
         const paper = await getPaper(saved.paper.id)
@@ -296,6 +300,28 @@ export default function App() {
     window.open(`${base}/?p=${paperId}`, '_blank')
   }, [paperId])
 
+  const openReflow = useCallback(async () => {
+    if (!paperId || !paperReady) return
+    const base = await discoverBase()
+    // 同一标签页进入重排阅读；浏览器后退即可回到 PDF 原版面。
+    window.location.assign(`${base}/?p=${paperId}`)
+  }, [paperId, paperReady])
+
+  const openAssistant = useCallback(async () => {
+    setPetBusy(true)
+    setPetMsg('')
+    try {
+      const result = (await browser.runtime.sendMessage({ type: 'open-assistant' })) as
+        | { ok?: boolean }
+        | undefined
+      if (!result?.ok) setPetMsg('请点工具栏的 P 图标打开阅读助手')
+    } catch {
+      setPetMsg('请点工具栏的 P 图标打开阅读助手')
+    } finally {
+      setPetBusy(false)
+    }
+  }, [])
+
   const translate = useCallback(async () => {
     if (!selection) return
     setPopover({ kind: 'translate', title: '翻译', body: '正在翻译…', loading: true })
@@ -345,13 +371,6 @@ export default function App() {
     }
   }, [selection, paperId, paperReady])
 
-  const toggleTakeover = useCallback(async () => {
-    const next = !takeover
-    setTakeover(next)
-    await browser.storage.local.set({ pdfTakeover: next })
-    setStatus(next ? '已开启 PDF 接管' : '已关闭 PDF 接管，下次打开 PDF 使用浏览器原生阅读器')
-  }, [takeover])
-
   return (
     <div className="viewer">
       <div className="topbar">
@@ -362,18 +381,21 @@ export default function App() {
         <span className="status">
           {status || (modelLabel ? `模型 ${modelLabel}` : '未配置模型')}
         </span>
-        <button className="button" onClick={() => void toggleTakeover()}>
-          {takeover ? '关闭 PDF 接管' : '恢复 PDF 接管'}
-        </button>
-        {paperId ? (
-          <button className="button primary" onClick={() => void openPaper()}>
-            打开 Paperead
+        <div className="mode-switch" role="group" aria-label="阅读模式">
+          <button className="mode active" type="button" aria-pressed="true">
+            PDF 原版
           </button>
-        ) : (
-          <button className="button primary" disabled>
-            打开 Paperead
+          <button
+            className="mode"
+            type="button"
+            aria-pressed="false"
+            disabled={!paperReady}
+            title={paperReady ? '同一标签页打开重排阅读，浏览器后退可回到 PDF 原版面' : '解析完成后可切换重排阅读'}
+            onClick={() => void openReflow()}
+          >
+            重排阅读
           </button>
-        )}
+        </div>
       </div>
 
       {phase === 'loading' && (
@@ -448,6 +470,34 @@ export default function App() {
           <div className={`body${popover.loading ? ' muted' : ''}`}>{popover.body}</div>
         </div>
       )}
+
+      <div className={`pe-pet-wrap${petOpen ? ' open' : ''}`}>
+        <div className="pe-pet-panel" role="group" aria-label="Paperead 快捷操作">
+          <button
+            className="pe-act"
+            type="button"
+            disabled={!paperId}
+            onClick={() => void openPaper()}
+          >
+            {paperReady ? '打开 Paperead' : '正在解析…'}
+          </button>
+          <button className="pe-act" type="button" disabled={petBusy} onClick={() => void openAssistant()}>
+            打开阅读助手
+          </button>
+          {petMsg && <p className="pe-msg">{petMsg}</p>}
+        </div>
+        <button
+          className="pe-pet"
+          type="button"
+          aria-label="Paperead 灵宠"
+          aria-expanded={petOpen}
+          onClick={() => setPetOpen((value) => !value)}
+        >
+          <span className="pe-eye" />
+          <span className="pe-eye" />
+          <span className="pe-dot" />
+        </button>
+      </div>
     </div>
   )
 }
