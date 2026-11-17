@@ -14,6 +14,8 @@ interface Props {
   hint?: string
   /** 是否配置了回答模型：没配置时不要显示"等待翻译"的骨架条 */
   canTranslate?: boolean
+  /** 是否开启自动翻译：关闭后没翻的段落不应继续显示骨架条 */
+  autoTranslate?: boolean
   onOpenSettings?: () => void
   annotations?: Annotation[]
   annotationActions?: AnnotationActions
@@ -36,6 +38,7 @@ export function Reader({
   scrollRef,
   hint,
   canTranslate = true,
+  autoTranslate = true,
   onOpenSettings,
   annotations = [],
   annotationActions,
@@ -90,7 +93,7 @@ export function Reader({
           </div>
         </header>
 
-        {(!hasTranslation || !canTranslate) && hint && (
+        {(!hasTranslation || !canTranslate || !autoTranslate) && hint && (
           <div className="reader-banner">
             <span>{hint}</span>
             {!canTranslate && onOpenSettings && (
@@ -107,7 +110,7 @@ export function Reader({
             rb={rb}
             mode={effectiveMode}
             terms={terms}
-            hasTranslation={hasTranslation && canTranslate}
+            hasTranslation={hasTranslation && canTranslate && autoTranslate}
             paperId={paper.paper_id}
             annotations={annotations}
             annotationActions={annotationActions}

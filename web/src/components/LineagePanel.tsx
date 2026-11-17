@@ -7,7 +7,7 @@ import {
   type LineageNode,
 } from '../lib/library'
 import { loadModelSettings, readyModel, toPayload } from '../lib/settings'
-import { IconSpark } from './icons'
+import { IconNetwork } from './icons'
 
 interface Props {
   paperId: string
@@ -118,7 +118,7 @@ export function LineagePanel({ paperId, onOpenSettings, settingsVersion = 0 }: P
     return (
       <div className="guide">
         <div className="guide-empty">
-          <IconSpark />
+          <IconNetwork />
           <b>脉络需要模型</b>
           <span>生成脉络要调用一次大模型（约 6 秒），用来判断每篇文献的作用。</span>
           <button className="btn primary" onClick={onOpenSettings}>

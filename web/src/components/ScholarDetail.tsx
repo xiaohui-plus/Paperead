@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { MathText } from './MathText'
-import { IconBack, IconDownload, IconSpark } from './icons'
+import { IconBack, IconDownload, IconFileSearch } from './icons'
 import {
   CITATION_STYLES,
   SOURCE_LABELS,
@@ -151,7 +151,7 @@ export function ScholarDetail({ paper, loading, error, onBack, onImport, importi
               </a>
             ) : paper.doi ? (
               <button className="btn ghost" onClick={lookupFullText} disabled={looking}>
-                <IconSpark />
+                <IconFileSearch />
                 {looking ? '查询中…' : '查找免费全文'}
               </button>
             ) : (

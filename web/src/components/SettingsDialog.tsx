@@ -59,11 +59,12 @@ import {
   IconBook,
   IconCheck,
   IconFeedback,
+  IconLayoutTemplate,
   IconPlus,
   IconRefresh,
   IconSearch,
   IconSettings,
-  IconSpark,
+
 } from './icons'
 import {
   TRANSLATION_LANGS,
@@ -842,7 +843,7 @@ export function SettingsDialog({
                 data-active={tab === 'review'}
                 onClick={() => setTab('review')}
               >
-                <IconSpark />
+                <IconLayoutTemplate />
                 <span>模板</span>
               </button>
             )}

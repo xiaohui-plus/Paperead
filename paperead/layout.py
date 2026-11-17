@@ -90,24 +90,39 @@ _SECTION_RE = re.compile(
 )
 # 编号小节标题：2.1 Foo Bar
 _NUM_HEADING_RE = re.compile(r"^\d+(?:\.\d+)*\.?\s+[A-Z][A-Za-z]")
+# 中文小标题（「2.2 智能问答性能」）没有大小写、也常常不加粗，只能靠
+# 「编号 + 空格 + 汉字」的形态识别；长度由调用方限制，避免误伤正文。
+_NUM_HEADING_ZH_RE = re.compile(r"^\d+(?:\.\d+)*\.?\s*")
+# 编号后面紧跟这些量词时是数据短语（「3.2 分」「15 秒」），不是标题。
+_ZH_MEASURE_RE = re.compile(r"^(?:倍|个|次|分|米|秒|年|月|日|%|％)")
 # 图注 / 表注。编号既可能是阿拉伯数字（Table 3），也可能是罗马数字
 # （MDPI/IEEE 常见的 TABLE II），还可能是补充材料编号（Table S1）。
 _CAP_NUM = r"(?:\d+(?:\.\d+)*|[IVXLCDM]+|[A-Z]\d+)"
+# 编号后不能紧跟字母/数字/汉字：`表2所示` 是正文引用，不是表题。
+_CAP_END = r"(?![0-9A-Za-z\u3400-\u9fff])"
+_CAP_EN_PREFIX = r"(?:(?:Supplementary|Extended\s+Data)\s+)?(?:Figure|Fig\.|FIGURE|Table|TABLE|Tab\.)"
+_CAP_ZH_PREFIX = r"(?:附\s*)?[图表]"
 _CAPTION_RE = re.compile(
-    rf"^(?:(?:Supplementary|Extended\s+Data)\s+)?(?:Figure|Fig\.|FIGURE|Table|TABLE|Tab\.)\s*{_CAP_NUM}\b",
+    rf"^(?:{_CAP_EN_PREFIX}\s*{_CAP_NUM}|{_CAP_ZH_PREFIX}\s*{_CAP_NUM}){_CAP_END}",
     re.IGNORECASE,
 )
 _TABLE_CAP_RE = re.compile(
-    rf"^(?:(?:Supplementary|Extended\s+Data)\s+)?(?:Table|TABLE|Tab\.)\s*{_CAP_NUM}\b",
+    rf"^(?:(?:(?:Supplementary|Extended\s+Data)\s+)?(?:Table|TABLE|Tab\.)\s*{_CAP_NUM}"
+    rf"|(?:附\s*)?表\s*{_CAP_NUM}){_CAP_END}",
     re.IGNORECASE,
 )
-# 只有编号、没有标题内容的图注/表注（"TABLE I" / "Figure 3"）。
+# 只有编号、没有标题内容的图注/表注（"TABLE I" / "Figure 3" / "图 3"）。
 # 这类注的标题通常另起一行且居中，需要单独放宽续行合并条件。
 _CAPTION_NUM_ONLY_RE = re.compile(
-    rf"^(?:(?:Supplementary|Extended\s+Data)\s+)?"
-    rf"(?:Figure|Fig\.|FIGURE|Table|TABLE|Tab\.)\s*{_CAP_NUM}\s*[:：\.\-–—|]?$",
+    rf"^(?:{_CAP_EN_PREFIX}\s*{_CAP_NUM}|{_CAP_ZH_PREFIX}\s*{_CAP_NUM})"
+    rf"\s*[:：\.\-–—|]?$",
     re.IGNORECASE,
 )
+# 中文编号后若是这些词开头，是正文里的「如表 2 所示」而不是表题。
+_CAPTION_ZH_REF_RE = re.compile(
+    r"^(?:所示|中|里|列出|给出|展示|显示|表明|说明|可见|对比|比较|为|是|与|和|、|，|,)"
+)
+_CJK_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
 # 只包含公式编号的行：(3) / （3.1）。裸数字多是页码或图里的数据标签，不收
 _EQ_NUM_ONLY_RE = re.compile(r"^[（(]\s*[A-Z]?\d{1,3}(?:\.\d+)?\s*[)）]$")
 
@@ -146,6 +161,10 @@ def _is_caption_text(text: str) -> bool:
     # Nature 的图注格式是「Fig. 1 | Comparative ...」，竖线同样是编号分隔符
     if first in (":", "：", ".", "-", "–", "—", "|"):
         return True
+    # 中文没有大小写可以判断：编号后紧跟 CNY 标题一般是图注/表注，
+    # 但「如表 2 所示」「图 3 中」这类是正文引用，必须排除。
+    if _CJK_RE.match(first):
+        return not _CAPTION_ZH_REF_RE.match(rest)
     return first.isupper() or first.isdigit() or first in "（(“\"'["
 # 数学字体（Computer Modern 数学族）
 _MATH_FONTS = ("CMMI", "CMEX", "CMSY", "MSBM", "MTMI", "MTEX", "EUSM", "EUFM", "Symbol")
@@ -519,6 +538,15 @@ def _mark_margins(lines: list[Line], doc: pymupdf.Document) -> None:
     widths = {p: doc[p].rect.width for p in range(len(doc))}
     for ln in lines:
         h = heights.get(ln.page - 1, 792)
+        t = ln.text.strip()
+        # 页码常落在 7.5% 页眉/页脚带边缘之外一点（如 59.9pt vs 59.4pt），
+        # 几何阈值判定会漏掉，随后被并进正文段落。页边 12% 内的纯数字
+        # 一律当页码处理。
+        if re.fullmatch(r"\d{1,4}", t) and (
+            ln.y1 < h * 0.12 or ln.y0 > h * 0.90
+        ):
+            ln.is_margin = True
+            continue
         # Nature 等期刊的通栏图注/表题经常紧贴页面顶端（图注首行正好落在
         # 7.5% 页眉带内）。只看几何位置会把它当页眉丢掉，后面的图注续行
         # 变成正文、表格也因为没有表题而无法裁图。
@@ -574,6 +602,80 @@ def _text_area(lines: list[Line]) -> tuple[float, float, float, float]:
     return min(xs0), min(ys0), max(xs1), max(ys1)
 
 
+def _looks_like_data_row(text: str) -> bool:
+    """公式编号 / 表格数据列不能作为「这里有一条栏」的证据。
+
+    单栏论文的公式编号会贴着页面右缘、表格数据列会另起一条 x0，二者都
+    能凑出「右栏」的假象，把单栏页误判成双栏。
+    """
+    t = text.strip()
+    if not t:
+        return True
+    if _EQ_NUM_ONLY_RE.match(t):
+        return True
+    if len(t) <= 3 and not t.isalpha():
+        return True
+    digits = sum(1 for ch in t if ch.isdigit())
+    return digits / len(t) > 0.7
+
+
+_MATH_SYMBOL_RE = re.compile(r"[=+＋−±×÷θρβαδμσλ∑∫√≈≤≥]")
+
+
+def _looks_like_math_fragment(ln: Line) -> bool:
+    """公式/公式碎片行：不能作为「这里有一条栏」的证据。
+
+    单栏论文的长公式会被拆成贴着右侧的几行碎片（`i ) and θv`、
+    `k=1 exp(...)`），左边界雷同，很容易凑成假右栏。
+    """
+    if ln.math:
+        return True
+    t = ln.text.strip()
+    if not t:
+        return True
+    if ln.inline_math:
+        covered = sum(max(0, int(m["end"]) - int(m["start"])) for m in ln.inline_math)
+        if covered / len(t) >= 0.45:
+            return True
+    symbols = _MATH_SYMBOL_RE.findall(t)
+    # 两个以上数学符号：公式行/公式混排行，不是普通正文
+    if len(symbols) >= 2:
+        return True
+    # 短行 + 数学符号密集才算碎片；正文里的「accuracy = 90%」不能排除。
+    if len(t) <= 24 and symbols:
+        if (len(symbols) + sum(ch.isdigit() for ch in t)) / len(t) >= 0.3:
+            return True
+    return False
+
+
+def _caption_lines(lines: list[Line]) -> set[int]:
+    """图注标题及其紧邻续行（同左边界、小行距）。
+
+    单栏论文的通栏图注常常另起一条左边界并连续排成多行，看起来很像一条
+    窄栏；栏检测必须把它们排除，否则单栏页会被误判成双栏。
+    """
+    skip: set[int] = set()
+    ordered = sorted(lines, key=lambda l: (l.y0, l.x0))
+    i = 0
+    while i < len(ordered):
+        if not _CAPTION_RE.match(ordered[i].text.strip()):
+            i += 1
+            continue
+        skip.add(id(ordered[i]))
+        j = i + 1
+        while j < len(ordered):
+            cur, prev = ordered[j], ordered[j - 1]
+            gap = cur.y0 - prev.y1
+            if abs(cur.x0 - prev.x0) > 14 or gap > 6 or gap < -2:
+                break
+            if cur.size > prev.size + 1.0:
+                break
+            skip.add(id(cur))
+            j += 1
+        i = j
+    return skip
+
+
 def _detect_gutter(lines: list[Line]) -> float | None:
     """检测双栏之间的空白带，返回 gutter 中心 x；单栏返回 None。
 
@@ -591,7 +693,20 @@ def _detect_gutter(lines: list[Line]) -> float | None:
     if width <= 0:
         return None
 
-    col_lines = [ln for ln in body if ln.width < width * 0.62]
+    raw_col = [ln for ln in body if ln.width < width * 0.62]
+    skip_captions = _caption_lines(body)
+    col_lines = [
+        ln for ln in raw_col
+        if (
+            not _looks_like_math_fragment(ln)
+            and id(ln) not in skip_captions
+            and not _looks_like_data_row(ln.text)
+        )
+    ]
+    # 公式/数据密集的论文会把过滤做得过头（正文行也被判成公式碎片），
+    # 此时退回未过滤的窄行集合，保持原有双栏检测能力。
+    if len(col_lines) < 0.4 * len(raw_col):
+        col_lines = raw_col
     if len(col_lines) < 0.4 * len(body):
         return None  # 大部分是通栏宽行 → 单栏
 
@@ -615,8 +730,23 @@ def _detect_gutter(lines: list[Line]) -> float | None:
 
     left_rows = [ln for ln in col_lines if abs(ln.x0 - x0 - left_start) <= 8]
     right_rows = [ln for ln in col_lines if abs(ln.x0 - x0 - right_start) <= 8]
-    need = max(5, int(len(col_lines) * 0.15))
-    if len(left_rows) < need or len(right_rows) < need:
+    # 右栏可能只有半页（另一侧被大图/表格占住），用 15% 的同一阈值会把
+    # 这种页判成单栏，左右栏正文随后按 y 交错拼进同一段。左栏仍要求足量，
+    # 右栏只要形成一簇（≥4 行）即可；零星居中标题不足以凑够 4 行。
+    need_left = max(5, int(len(col_lines) * 0.15))
+    need_right = max(4, int(len(col_lines) * 0.05))
+    if len(left_rows) < need_left or len(right_rows) < need_right:
+        return None
+    # 单栏页里成段的多行图注（左边界固定、宽度窄）也会凑出一条「右栏」，
+    # 但只占页面上一小块。真双栏的右栏文字即使被图占去大半，也会覆盖
+    # 页面正文高度的至少一成（目标论文第 4 页右栏只有顶部 6 行正文）。
+    body_span = max(ln.y1 for ln in body) - min(ln.y0 for ln in body)
+    right_span = max(ln.y1 for ln in right_rows) - min(ln.y0 for ln in right_rows)
+    if body_span <= 0 or right_span < 0.10 * body_span:
+        return None
+    # 栏正文是成行的连续文字；公式碎片/页码/零散标注都比半栏窄得多。
+    right_widths = sorted(ln.width for ln in right_rows)
+    if right_widths[len(right_widths) // 2] < width * 0.18:
         return None
 
     bins = int(width) + 1
@@ -922,7 +1052,8 @@ def _guess_body_size(lines: list[Line]) -> float:
 
 
 _CONTINUE_AFTER = ",，、;；:-–—/"
-_CONTINUE_START = re.compile(r"^(?:[a-z]|\d|\(|\[)")
+# 中文没有大小写：汉字开头同样是「上一行没说完」的接续证据。
+_CONTINUE_START = re.compile(r"^(?:[a-z]|\d|\(|\[|[\u3400-\u9fff])")
 
 
 def _continues_paragraph(prev: str, nxt: str) -> bool:
@@ -945,6 +1076,26 @@ def _continues_paragraph(prev: str, nxt: str) -> bool:
     if prev[-1] in _CONTINUE_AFTER:
         return True
     return bool(_CONTINUE_START.match(nxt))
+
+
+def _caption_continuation(prev: str, nxt: str) -> bool:
+    """图注/表注的续行判断。
+
+    续行通常是「同一句标题」的下一小段，长度有限；紧跟图注的完整长句
+    是正文段落，不能并进 caption（否则正文被吞掉、也不再参与翻译）。
+    """
+    n = nxt.strip()
+    if not n:
+        return False
+    # 下一行又是「图 3 / 表 2」开头，说明这是正文里的另一处引用或另一个
+    # 图注，不是当前图注的续行。
+    if _CAPTION_RE.match(n):
+        return False
+    if len(n) > 160:
+        return False
+    if _CJK_RE.search(n) and len(n) > 60:
+        return False
+    return _continues_paragraph(prev, nxt)
 
 
 def _append_line_text(prev: str, nxt: str) -> tuple[str, int]:
@@ -986,6 +1137,17 @@ def _is_heading(ln: Line, body_size: float) -> int:
         return 3
     if _NUM_HEADING_RE.match(text) and ln.bold:
         return 3
+    # 中文编号小标题：编号与标题紧邻、整行较短，且不能是「2.2 倍」这类
+    # 数字+单位短语（排除常见量词开头）。
+    num = _NUM_HEADING_ZH_RE.match(text)
+    if num and len(text) <= 40:
+        after_num = text[num.end():].lstrip()
+        if (
+            after_num
+            and _CJK_RE.match(after_num[:1])
+            and not _ZH_MEASURE_RE.match(after_num)
+        ):
+            return 3
     return 0
 
 
@@ -1033,6 +1195,11 @@ def _looks_equation(
     adjacency matrix.` 这类含行内公式的正文句子只有 4 个英文词，会被误判成公式，
     进而被并进上面的显示公式里、整段不翻译。
     """
+    t = text.strip()
+    # 以中文句末标点收尾、且含汉字的行是正文（`图 4(a)～(b) 所示。`），
+    # 行内公式占比再高也不能当公式裁图。
+    if _CJK_RE.search(t) and t.endswith(("。", "！", "？", "；")):
+        return False
     if inline_math:
         covered = sum(max(0, int(m["end"]) - int(m["start"])) for m in inline_math)
         if text and covered / len(text) >= 0.55:
@@ -1042,7 +1209,6 @@ def _looks_equation(
         if _PROSE_LEAD_RE.match(text.strip()):
             return False
         return True
-    t = text.strip()
     if not t or len(t) > 160:
         return False
     # 私用区字形（大括号等）几乎只出现在公式里；限制英文词数，避免把带项目符号的正文误判
@@ -1266,7 +1432,9 @@ def _build_blocks(
             continue
         flush_eq()
 
-        head_level = _is_heading(ln, body_size)
+        # 表格区里的短行（「3.2 分（1～5 分）」）会被中文编号标题规则误判，
+        # 表格行一律按表格数据处理，不参与标题判定。
+        head_level = 0 if in_table(ln) else _is_heading(ln, body_size)
         split = _split_line_heading(ln, body_size) if head_level else None
 
         if split:
@@ -1367,7 +1535,7 @@ def _build_blocks(
             # 图注比正文短，局部宽度下末行容易被判成「写满」而把紧随的
             # 作者脚注、版权行吞进 caption。只有明确的续行证据才允许合并，
             # 图注以句号结尾或下一行以 ∗ / ‡ / 数字开头时一律断开。
-            or (_is_caption_text(cur["text"]) and not _continues_paragraph(cur["text"], ln.text))
+            or (_is_caption_text(cur["text"]) and not _caption_continuation(cur["text"], ln.text))
             # 同栏里上一行「写满」时，紧接的表注会被当成正文续行并进
             # 表格末行，`Table 2:` 随之失去锚点，整张表识别不出来。
             or _is_caption_text(ln.text)
@@ -1764,7 +1932,24 @@ def _x_overlap(a: tuple, b: tuple) -> float:
     return inter / narrow if narrow > 0 else 0.0
 
 
-def _merge_across_pages(blocks: list[Block]) -> list[Block]:
+def _block_in_table_rects(
+    block: "Block", table_rects: dict[int, list[pymupdf.Rect]] | None
+) -> bool:
+    """块的几何中心是否落在已检测到的表格区域里。"""
+    if not table_rects:
+        return False
+    cx = (block.bbox[0] + block.bbox[2]) / 2
+    cy = (block.bbox[1] + block.bbox[3]) / 2
+    return any(
+        rect.x0 <= cx <= rect.x1 and rect.y0 <= cy <= rect.y1
+        for rect in table_rects.get(block.page, [])
+    )
+
+
+def _merge_across_pages(
+    blocks: list["Block"],
+    table_rects: dict[int, list[pymupdf.Rect]] | None = None,
+) -> list["Block"]:
     """续段合并：上一块没收句、后面的段落小写开头，视为同一段被切断。
 
     需要跨过中间的非正文块。典型场景是通栏大图把一段话劈成两半：
@@ -1779,7 +1964,13 @@ def _merge_across_pages(blocks: list[Block]) -> list[Block]:
     while i < len(blocks):
         b = blocks[i]
         out.append(b)
-        if b.kind in ("para", "caption") and not _ends_sentence(b.text):
+        # 表格区里的短行属于表格数据，不能按「没说完的段落」与旁边正文合并；
+        # 否则表 2 这类多行表会被并成几大块，后面按表题切表就找不到行块。
+        if (
+            b.kind in ("para", "caption")
+            and not _ends_sentence(b.text)
+            and not _block_in_table_rects(b, table_rects)
+        ):
             j = i + 1
             skipped: list[Block] = []
             while j < len(blocks) and blocks[j].kind in skippable and len(skipped) < 3:
@@ -1790,12 +1981,22 @@ def _merge_across_pages(blocks: list[Block]) -> list[Block]:
                 if (
                     n.kind == "para"
                     and n.page in (b.page, b.page + 1)
-                    and n.text[:1].islower()
+                    and not _block_in_table_rects(n, table_rects)
+                    # 英文看小写开头，中文没有大小写，汉字开头即可作为接续
+                    # 证据（上一块已被 `_ends_sentence` 判定为没说完）。
+                    and (n.text[:1].islower() or bool(_CJK_RE.match(n.text[:1])))
                     and not _CANNOT_CONTINUE_RE.match(n.text)
                     # 同页续段只发生在同一栏（被通栏图表劈开）；左右栏的
                     # x 范围不重叠，不能因为「上一块没收句 + 下一块小写开头」
                     # 就把两栏正文拼成一段
                     and (n.page != b.page or _x_overlap(b.bbox, n.bbox) >= 0.3)
+                    # 宽度差得太多说明两块不是同一段：图注比正文窄，图内的小标注
+                    # （「(b) 三维模型可视化」）也比正文窄。图注要求更严格。
+                    and (
+                        min(b.bbox[2] - b.bbox[0], n.bbox[2] - n.bbox[0])
+                        >= (0.6 if b.kind == "caption" else 0.35)
+                        * max(b.bbox[2] - b.bbox[0], n.bbox[2] - n.bbox[0], 1.0)
+                    )
                 ):
                     b.text, offset = _append_line_text(b.text, n.text)
                     lead = len(n.text) - len(n.text.lstrip())
@@ -1821,7 +2022,10 @@ def _is_table_caption(text: str) -> bool:
     return bool(_TABLE_CAP_RE.match(text.strip())) and _is_caption_text(text)
 
 
-def _merge_caption_continuations(blocks: list[Block]) -> list[Block]:
+def _merge_caption_continuations(
+    blocks: list["Block"],
+    table_rects: dict[int, list[pymupdf.Rect]] | None = None,
+) -> list["Block"]:
     """把紧贴图注的续行并回 caption。
 
     `_classify` 只按第一行识别图注，后面几行常被拆成独立 para：图注不完整、
@@ -1846,6 +2050,9 @@ def _merge_caption_continuations(blocks: list[Block]) -> list[Block]:
             if n is b or n.id in consumed or n.page != b.page:
                 continue
             if n.kind not in ("para", "reference", "heading"):
+                continue
+            # 表格区里的短行是表数据，不是图注/表注的续行
+            if _block_in_table_rects(n, table_rects):
                 continue
             if len(n.text.strip()) > 400:
                 continue
@@ -1891,8 +2098,15 @@ def _merge_caption_continuations(blocks: list[Block]) -> list[Block]:
                 continue
             if n.kind not in ("para", "reference", "heading") or n.page != b.page:
                 break
+            # 表格区里的短行属于表格数据，不能被并进表题
+            if _block_in_table_rects(n, table_rects):
+                break
             gap = n.bbox[1] - b.bbox[3]
             if gap > (10 if num_only else 8) or len(b.text) > 600 or len(n.text) > 400:
+                break
+            # 中文图注/表注的第一行通常就是完整标题，紧跟的长正文段不能
+            # 并进 caption（否则正文会被吞掉、也不再参与翻译）。
+            if _CJK_RE.search(b.text) and len(n.text.strip()) > 60:
                 break
             same_size = (not b.size or not n.size) or abs(b.size - n.size) <= 1.5
             if n.kind == "heading":
@@ -3498,8 +3712,8 @@ def parse_pdf(
         blocks = _merge_affiliations(blocks)
         blocks = _drop_noise(blocks)
         blocks = _drop_equation_orphans(blocks)
-        blocks = _merge_across_pages(blocks)
-        blocks = _merge_caption_continuations(blocks)
+        blocks = _merge_across_pages(blocks, table_rects)
+        blocks = _merge_caption_continuations(blocks, table_rects)
 
         if with_figures and figure_dir is not None:
             out = Path(figure_dir)

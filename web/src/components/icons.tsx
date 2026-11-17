@@ -1,3 +1,20 @@
+import type { ComponentType } from 'react'
+import {
+  BookOpen,
+  BookOpenText,
+  Brain,
+  Compass,
+  Cpu,
+  FileSearch,
+  FileText,
+  FolderPlus,
+  LayoutTemplate,
+  Lightbulb,
+  Network,
+  Settings2,
+  Wrench,
+} from 'lucide-react'
+import type { LucideProps } from 'lucide-react'
 import brandIcon from '../assets/brand-icon.svg'
 
 export function BrandMark() {
@@ -193,14 +210,6 @@ export function IconPrint() {
   )
 }
 
-export function IconSpark() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-      <path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3Z" />
-      <path d="M18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2Z" />
-    </svg>
-  )
-}
 
 export function IconChat() {
   return (
@@ -413,3 +422,37 @@ export function IconFeedback() {
     </svg>
   )
 }
+// ── 专业图标（Lucide，ISC 许可的真实 SVG 图标集） ─────────
+// 统一 15px、1.8 描边，跟随 currentColor；容器 CSS 仍可覆盖尺寸。
+function lucideIcon(Component: ComponentType<LucideProps>) {
+  return function Glyph(props: LucideProps = {}) {
+    return <Component size={15} strokeWidth={1.8} {...props} />
+  }
+}
+
+/** 研究：探索与研究方向 */
+export const IconCompass = lucideIcon(Compass)
+/** 新建文件夹 */
+export const IconFolderPlus = lucideIcon(FolderPlus)
+/** 模板 */
+export const IconLayoutTemplate = lucideIcon(LayoutTemplate)
+/** 导读：打开一本书 */
+export const IconBookOpen = lucideIcon(BookOpen)
+/** 阅读助手：打开的书本 */
+export const IconBookOpenText = lucideIcon(BookOpenText)
+/** 快速开始：灵感/提示 */
+export const IconLightbulb = lucideIcon(Lightbulb)
+/** 模型设置 */
+export const IconSettings2 = lucideIcon(Settings2)
+/** 需要配置模型 */
+export const IconCpu = lucideIcon(Cpu)
+/** 脉络：关系网络 */
+export const IconNetwork = lucideIcon(Network)
+/** 思考过程 */
+export const IconBrain = lucideIcon(Brain)
+/** 工具调用 */
+export const IconWrench = lucideIcon(Wrench)
+/** 查找全文 */
+export const IconFileSearch = lucideIcon(FileSearch)
+/** 文档产物 */
+export const IconFileText = lucideIcon(FileText)

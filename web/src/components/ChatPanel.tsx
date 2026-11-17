@@ -32,10 +32,11 @@ import {
   IconCheck,
   IconClose,
   IconFolder,
+  IconLightbulb,
   IconPlus,
   IconSend,
   IconSettings,
-  IconSpark,
+  IconSettings2,
   IconStop,
 } from './icons'
 
@@ -739,7 +740,7 @@ export function ChatPanel({
           <>
             <p className="greeting">Hi，准备好阅读了吗？你想从哪里开始？</p>
             <div className="quick-label">
-              <IconSpark /> 快速开始
+              <IconLightbulb /> 快速开始
             </div>
             <div className="chips">
               {QUICK.map((q) => (
@@ -1168,7 +1169,7 @@ export function ChatPanel({
               </>
             ) : (
               <button className="model-select is-empty" onClick={onOpenSettings}>
-                <IconSpark /> 配置回答模型
+                <IconSettings2 /> 配置回答模型
               </button>
             )}
           </div>

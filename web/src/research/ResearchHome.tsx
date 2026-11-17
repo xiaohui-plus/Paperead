@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { IconList, IconSpark } from '../components/icons'
+import { IconCompass, IconList } from '../components/icons'
 import type { ProjectKind, ProjectSummary } from '../lib/researchApi'
 import { tourBus } from '../tour/tourBus'
 import { Composer } from './Composer'
@@ -129,45 +129,50 @@ export function ResearchHome({
 
   return (
     <div className="research-home">
-      <header className="research-hero">
-        <span className="research-kicker">
-          {kind === 'research' ? <IconSpark /> : <IconList />}
-          {kind === 'research' ? '研究' : '写综述报告'}
-        </span>
-        <p>
-          {kind === 'research'
-            ? '从文献库或学术库出发，检索、精读、整理，再让 agent 接着往下做。'
-            : '先定问题，再列证据，最后逐节写成可核验的综述草稿。'}
-        </p>
-      </header>
+      <div className="research-center">
+        <header className="research-hero">
+          <span className="research-kicker">
+            {kind === 'research' ? <IconCompass /> : <IconList />}
+            {kind === 'research' ? '学术研究' : '文献综述'}
+          </span>
+          <h1 className="research-title">
+            {kind === 'research' ? '研究' : '写综述报告'}
+          </h1>
+          <p>
+            {kind === 'research'
+              ? '从文献库或学术库出发，检索、精读、整理，再让 agent 接着往下做。'
+              : '先定问题，再列证据，最后逐节写成可核验的综述草稿。'}
+          </p>
+        </header>
 
-      <section className="research-composer">
-        <div className="research-composer-top">
-          <ProjectPicker
-            projects={projects}
-            value={target}
-            disabled={busy}
-            onChange={setTarget}
-            onCreate={onCreateProject}
+        <section className="research-composer">
+          <div className="research-composer-top">
+            <ProjectPicker
+              projects={projects}
+              value={target}
+              disabled={busy}
+              onChange={setTarget}
+              onCreate={onCreateProject}
+            />
+
+          </div>
+          <Composer
+            kind={kind}
+            variant="home"
+            projectId={effectiveProject ?? undefined}
+            running={busy}
+            seed={seed ?? undefined}
+            placeholder={
+              kind === 'research'
+                ? '描述你想研究的问题，/ 调用指令，@ 引用文件或论文'
+                : '描述综述主题与目标读者，/ 调用指令，@ 引用文件或论文'
+            }
+
+            onSend={(text) => void run(text, text.slice(0, 40))}
+            onStop={() => undefined}
           />
-
-        </div>
-        <Composer
-          kind={kind}
-          variant="home"
-          projectId={effectiveProject ?? undefined}
-          running={busy}
-          seed={seed ?? undefined}
-          placeholder={
-            kind === 'research'
-              ? '描述你想研究的问题，/ 调用指令，@ 引用文件或论文'
-              : '描述综述主题与目标读者，/ 调用指令，@ 引用文件或论文'
-          }
-
-          onSend={(text) => void run(text, text.slice(0, 40))}
-          onStop={() => undefined}
-        />
-      </section>
+        </section>
+      </div>
 
       <section
         className="research-section"

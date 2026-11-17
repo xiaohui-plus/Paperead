@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ModelProfile } from '../lib/settings'
-import { IconCheck, IconSettings, IconSpark } from './icons'
+import { IconCheck, IconCpu, IconSettings } from './icons'
 
 interface Props {
   models: ModelProfile[]
@@ -33,7 +33,7 @@ export function ModelPicker({ models, current, onChoose, onManage, up }: Props) 
         title={onManage ? '去设置里配置回答模型' : '还没有可用的回答模型'}
         disabled={!onManage}
       >
-        <IconSpark /> 配置文件模型
+        <IconCpu /> 配置文件模型
       </button>
     )
   }

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { getGuide, makeGuide, waitForGenerated, type Guide } from '../lib/library'
 import { loadModelSettings, readyModel, toPayload } from '../lib/settings'
 import { tourBus } from '../tour/tourBus'
-import { IconSpark } from './icons'
+import { IconCpu } from './icons'
 
 interface Props {
   paperId: string
@@ -140,7 +140,7 @@ export function GuidePanel({ paperId, onOpenSettings, settingsVersion = 0 }: Pro
     return (
       <div className="guide">
         <div className="guide-empty">
-          <IconSpark />
+          <IconCpu />
           <b>导读需要模型</b>
           <span>生成导读要调用一次大模型（约 5 秒）。配置后自动生成。</span>
           <button className="btn primary" onClick={onOpenSettings}>

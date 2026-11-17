@@ -1,5 +1,5 @@
 import type { AskToolCall, AskToolItem } from '../lib/library'
-import { IconBook, IconChevron, IconList, IconSearch, IconSpark } from './icons'
+import { IconBook, IconChevron, IconList, IconSearch, IconWrench } from './icons'
 
 const TOOL_TITLES: Record<string, string> = {
   paper_search: '检索论文',
@@ -11,7 +11,7 @@ function toolIcon(name: string) {
   if (name === 'paper_search') return <IconBook />
   if (name === 'web_fetch') return <IconList />
   if (name.includes('search')) return <IconSearch />
-  return <IconSpark />
+  return <IconWrench />
 }
 
 function statusText(tool: AskToolCall): string {

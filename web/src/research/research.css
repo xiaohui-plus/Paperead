@@ -121,40 +121,66 @@
 /* ── 功能首页 ───────────────────────────────────────── */
 
 .research-main {
-  padding: 40px clamp(28px, 6vw, 88px) 80px;
+  padding: 0 clamp(28px, 6vw, 88px) 80px;
+  display: flex;
+  flex-direction: column;
 }
 
 .research-home {
+  width: 100%;
   max-width: 900px;
   margin: 0 auto;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 首屏：标题与消息栏作为一个整体在可用高度内垂直居中 */
+.research-center {
+  flex: 1 0 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  /* 标题在输入框上方，底部留白收掉，让消息框更贴近视口中心 */
+  padding: clamp(80px, 13vh, 128px) 0 0;
 }
 
 .research-hero {
-  margin: 12px 0 26px;
+  margin: 0 0 24px;
 }
 
 .research-kicker {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
+  gap: 8px;
+  font-size: 12.5px;
   color: var(--blue-ink);
   letter-spacing: 0.6px;
 }
 
+.research-title {
+  margin: 10px 0 0;
+  font-size: clamp(30px, 3.6vw, 44px);
+  line-height: 1.15;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+
 .research-hero p {
-  margin: 8px 0 0;
+  margin: 10px 0 0;
   color: var(--muted);
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.7;
 }
 
+/* 单层消息框：外层不再叠一张带边框/阴影的卡片 */
 .research-composer {
-  border: 1px solid var(--line-2);
-  border-radius: 14px;
-  background: var(--bg);
-  box-shadow: var(--shadow-2);
-  padding: 12px 14px 10px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
 }
 
 .research-composer-top {
@@ -525,7 +551,7 @@
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
-  font-size: 14px;
+  font-size: 15.5px;
   font-weight: 600;
   text-align: left;
   overflow: hidden;
@@ -551,7 +577,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--faint);
 }
 
@@ -565,7 +591,7 @@
   padding: 5px 8px;
   border: 1px solid var(--blue-line);
   border-radius: var(--radius-sm);
-  font-size: 14px;
+  font-size: 15.5px;
   font-weight: 600;
   outline: none;
 }
@@ -2463,6 +2489,12 @@
     padding: 28px 20px 56px;
   }
 
+  /* 窄屏不再强求垂直居中，避免标题+输入框被压缩 */
+  .research-center {
+    justify-content: flex-start;
+    padding-top: 8px;
+  }
+
   .project-page {
     height: 100dvh;
   }
@@ -2549,6 +2581,10 @@
 @media (max-width: 640px) {
   .research-main {
     padding: 22px 16px 64px;
+  }
+
+  .research-center {
+    padding: 4px 0 20px;
   }
 
   .research-actions {

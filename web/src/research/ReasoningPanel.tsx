@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState } from 'react'
-import { IconChevron, IconSpark } from '../components/icons'
+import { IconBrain, IconChevron } from '../components/icons'
 
 function firstLine(text: string): string {
   const newline = text.indexOf('\n')
@@ -42,7 +42,7 @@ export function ReasoningPanel({ text, running, duration }: Props) {
         onClick={() => setOpen((value) => !value)}
       >
         <span className="reasoning-leading">
-          <IconSpark />
+          <IconBrain />
         </span>
         <span className="reasoning-title">思考</span>
         {summary && (

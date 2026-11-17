@@ -13,10 +13,15 @@ from paperead.layout import (
     Block,
     Line,
     _build_blocks,
+    _caption_continuation,
     _drop_noise,
+    _is_caption_text,
+    _is_heading,
+    _is_table_caption,
     _join_text,
     _line_from_dict,
     _merge_across_pages,
+    _merge_caption_continuations,
     _merge_math_fragments,
     _merge_visual_rows,
     _normalize_text,
@@ -367,3 +372,86 @@ def test_detected_table_rows_stay_separate_blocks():
         "CEPDB 2.3M HOPV 350 PFD 1055 NFA 654 PD 277",
         "by inter-level message passing module on GI.",
     ]
+
+# ── 中文图注/表注、小标题与跨页续段 ───────────────────────────────────
+def test_chinese_table_caption_is_recognized():
+    assert _is_caption_text("表2 数据治理前后核心指标对比表")
+    assert _is_caption_text("图3 复合问答—识别材料属性并作出节能判断")
+    assert _is_table_caption("表1 数据治理前后核心指标对比表")
+    # 正文里的引用不是图注/表注
+    assert not _is_caption_text("如表 2 所示，本平台的准确率更高")
+    assert not _is_caption_text("图 3 展示系统能够基于复合场景多类信息进行")
+    assert not _is_caption_text("表2所示")
+
+
+def test_chinese_section_heading_is_recognized():
+    heading = Line("2.2 智能问答性能", bbox=(56.7, 154.4, 131.7, 167.8), page=4, size=10.0)
+    assert _is_heading(heading, 10.0) == 3
+    # 表格里的「3.2 分（1～5 分）」是数字+量词，不能当标题
+    cell = Line("3.2 分（1～5 分）", bbox=(117.3, 455.2, 252.2, 466.0), page=4, size=8.0)
+    assert _is_heading(cell, 10.0) == 0
+
+
+def test_chinese_paragraph_continues_across_page():
+    a = Block(
+        "b0", 0, 3, "para",
+        "使 BIM 数据的完整性、准确性、一致性及动态更新率",
+        (56.7, 600.0, 299.9, 620.0),
+    )
+    b = Block(
+        "b1", 1, 4, "para",
+        "等方面得到了极大的提升，主要得益于构件统一分类。",
+        (56.7, 80.0, 299.9, 100.0),
+    )
+    merged = _merge_across_pages([a, b])
+    assert len(merged) == 1
+    assert "等方面得到了极大的提升" in merged[0].text
+
+
+def test_caption_does_not_swallow_following_chinese_body():
+    cap = Block(
+        "b0", 0, 3, "caption",
+        "图2 智能问答技术流程图",
+        (126.3, 520.0, 225.3, 532.1),
+    )
+    body = Block(
+        "b1", 1, 3, "para",
+        "系统在 Prompt 中仅保留角色定义、元数据与用户问题三个部分，"
+        "并将结构化结果交给模型生成最终回答，从而减少无关上下文。",
+        (56.7, 534.0, 299.9, 560.0),
+    )
+    out = _merge_caption_continuations([cap, body])
+    assert len(out) == 2
+    assert out[1].kind == "para"
+
+    # 下一行又是另一处「图 3」引用：不是当前图注的续行
+    assert not _caption_continuation(
+        "图4 对问题以可视化形式问答",
+        "图 3 展示系统能够基于复合场景多类信息进行",
+    )
+
+
+def test_table_rows_are_not_merged_into_caption():
+    cap = Block(
+        "b0", 0, 4, "caption",
+        "表2 数据治理前后核心指标对比表",
+        (108.3, 349.4, 243.3, 361.5),
+    )
+    row = Block(
+        "b1", 1, 4, "para",
+        "问答准确率 55% 90% 64%",
+        (63.9, 390.9, 283.2, 401.7),
+    )
+    tables = {4: [pymupdf.Rect(60.0, 369.2, 291.9, 464.8)]}
+    out = _merge_caption_continuations([cap, row], tables)
+    assert len(out) == 2
+    assert out[1].text == "问答准确率 55% 90% 64%"
+
+    merged = _merge_across_pages(
+        [
+            Block("b0", 0, 4, "para", "指标提升幅度", (75.9, 373.6, 291.9, 382.9)),
+            Block("b1", 1, 4, "para", "（未治理数据）（治理后数据）", (118.3, 378.4, 247.2, 387.7)),
+        ],
+        tables,
+    )
+    assert len(merged) == 2

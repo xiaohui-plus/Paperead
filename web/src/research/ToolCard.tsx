@@ -5,7 +5,7 @@ import {
   IconEdit,
   IconList,
   IconSearch,
-  IconSpark,
+  IconWrench,
 } from '../components/icons'
 import {
   asText,
@@ -22,7 +22,7 @@ export function toolIcon(name: string) {
   if (name.includes('import') || name.includes('ingest')) return <IconDownload />
   if (name.includes('write')) return <IconEdit />
   if (name.includes('read')) return <IconList />
-  return <IconSpark />
+  return <IconWrench />
 }
 
 function doneText(tool: ToolCall): string {

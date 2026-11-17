@@ -2,10 +2,11 @@ import type { ReactElement, ReactNode } from 'react'
 import {
   BrandMark,
   IconBook,
+  IconCompass,
+  IconFolderPlus,
   IconList,
   IconSearch,
   IconSettings,
-  IconSpark,
 } from './icons'
 import { isMobileShell } from '../lib/mobile'
 
@@ -26,7 +27,7 @@ interface Props {
 const NAV: { key: NavKey; label: string; icon: () => ReactElement }[] = [
   { key: 'library', label: '文献库', icon: IconBook },
   { key: 'search', label: '文献检索', icon: IconSearch },
-  { key: 'research', label: '研究', icon: IconSpark },
+  { key: 'research', label: '研究', icon: IconCompass },
   { key: 'review', label: '写综述报告', icon: IconList },
 ]
 
@@ -74,7 +75,7 @@ export function Sidebar({
           <div className="folders-head">
             <span>文件夹</span>
             <button className="icon-btn" title="新建文件夹（即将上线）" disabled>
-              <IconSpark />
+              <IconFolderPlus />
             </button>
           </div>
           <p className="folders-empty">还没有文件夹</p>

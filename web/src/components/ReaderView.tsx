@@ -195,6 +195,9 @@ export function ReaderView({ paperId, onBack }: Props) {
   const inFlight = useRef(false)
   const inFlightPages = useRef<number[]>([])
   const queued = useRef<number[] | null>(null)
+  // 供异步的翻译流读取最新开关：await 期间用户关掉自动翻译时，
+  // 旧闭包里的 autoTranslate 仍是 true，必须用 ref 复检才能拦住。
+  const autoTranslateRef = useRef(autoTranslate)
   /** 已经提取过阅读重点的页（服务端也会去重，这里只减少请求） */
   const extractedPages = useRef<Set<number>>(new Set())
   const requestingHighlights = useRef<Set<number>>(new Set())
@@ -202,11 +205,21 @@ export function ReaderView({ paperId, onBack }: Props) {
   /** 切换当前论文的自动翻译：关闭时立刻中止正在跑的翻译流 */
   const applyAutoTranslate = useCallback((enabled: boolean) => {
     setAutoTranslate(enabled)
+    autoTranslateRef.current = enabled
     if (!enabled) {
       abortRef.current?.abort()
+      abortRef.current = null
       queued.current = null
+      // 关闭后重新打开时要能重新请求；同时立刻收起「翻译中」状态，
+      // 不等被 abort 的流在自己的 finally 里才复位。
+      requested.current.clear()
+      setTranslating(false)
     }
   }, [])
+
+  useEffect(() => {
+    autoTranslateRef.current = autoTranslate
+  }, [autoTranslate])
 
   /** 按论文语种给出默认值：与目标译文语种一致就关闭，不一致才自动翻译（尊重总开关） */
   const adoptPaperLanguage = useCallback((next: Paper) => {
@@ -774,6 +787,9 @@ export function ReaderView({ paperId, onBack }: Props) {
 
       // 服务器不可达时走本机：模型请求由 Rust 发出，逐段流式回填
       const online = await serverReachable()
+      // await 期间（最长 2.5s）用户可能已经关掉自动翻译：此时不能再
+      // 新建一条翻译流，否则顶栏会重新出现「翻译中」且请求照发。
+      if (!autoTranslateRef.current) return
       if (!online && !canRunLocally()) return
 
       need.forEach((pg) => requested.current.add(pg))
@@ -1270,6 +1286,7 @@ focusAnnotation={focusAnnotation}
             scale={scale}
             scrollRef={scrollRef}
             canTranslate={configured}
+            autoTranslate={autoTranslate}
             onOpenSettings={() => {
               setSettingsKind('answer')
               setSettingsOpen(true)

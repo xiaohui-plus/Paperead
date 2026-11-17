@@ -13,13 +13,14 @@ import { FiguresPanel } from './FiguresPanel'
 import { GuidePanel } from './GuidePanel'
 import { LineagePanel } from './LineagePanel'
 import {
+  IconBookOpen,
+  IconBookOpenText,
   IconChat,
   IconComment,
   IconFolder,
   IconImage,
   IconKey,
   IconList,
-  IconSpark,
 } from './icons'
 
 export type TabKey =
@@ -69,7 +70,7 @@ export interface PanelProps {
 }
 
 export const PANEL_TABS: { key: TabKey; label: string; icon: ReactNode }[] = [
-  { key: 'guide', label: '导读', icon: <IconSpark /> },
+  { key: 'guide', label: '导读', icon: <IconBookOpen /> },
   { key: 'chat', label: '问答', icon: <IconChat /> },
   { key: 'files', label: '附件', icon: <IconFolder /> },
   { key: 'outline', label: '目录', icon: <IconList /> },
@@ -192,7 +193,7 @@ export function LeftPanel(props: PanelProps & { tab?: TabKey; onTab?: (tab: TabK
     <aside className="panel">
       <div className="panel-head">
         <span className="spark">
-          <IconSpark />
+          <IconBookOpenText />
         </span>
         <h2>阅读助手</h2>
       </div>
