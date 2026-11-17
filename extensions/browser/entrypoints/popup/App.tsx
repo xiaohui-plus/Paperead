@@ -70,8 +70,11 @@ export function App() {
       try {
         await pair('')
         if (!cancelled) await load()
-      } catch {
-        // 没有等待窗口时留在未配对界面，「自动连接」可重试
+      } catch (err) {
+        // 自动认领失败要说明原因，否则用户只会看到「没反应」
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : '自动连接失败')
+        }
       }
     }
     void claim()
