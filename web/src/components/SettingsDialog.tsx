@@ -43,6 +43,8 @@ import { MobileServerPanel } from './MobileSetup'
 import { FileSyncDialog, type FileSyncTarget } from './FileSyncDialog'
 import { FileSyncSettingsPanel } from './FileSyncSettingsPanel'
 import { FeedbackPanel } from './FeedbackPanel'
+import { RewardPanel } from './RewardPanel'
+import { PluginSettingsPanel } from './PluginSettingsPanel'
 import { isMobileShell } from '../lib/mobile'
 import {
   deleteOffline,
@@ -60,8 +62,10 @@ import {
   IconCheck,
   IconFeedback,
   IconLayoutTemplate,
+  IconPlug,
   IconPlus,
   IconRefresh,
+  IconReward,
   IconSearch,
   IconSettings,
 
@@ -279,7 +283,7 @@ export function SettingsDialog({
   const [settings, setSettings] = useState<ModelSettings>(loadModelSettings)
   const [kind, setKind] = useState<ModelKind>(initialKind)
   const [tab, setTab] = useState<
-    'models' | 'reading' | 'scholar' | 'review' | 'sync' | 'general' | 'feedback'
+    'models' | 'reading' | 'scholar' | 'review' | 'sync' | 'plugins' | 'general' | 'feedback' | 'reward'
   >('models')
   const [editor, setEditor] = useState<EditorState | null>(null)
   const [showKey, setShowKey] = useState(false)
@@ -308,7 +312,7 @@ export function SettingsDialog({
 
   // 安卓端不显示论文模板入口，误入时回到配置模型
   useEffect(() => {
-    if (mobile && tab === 'review') {
+    if (mobile && (tab === 'review' || tab === 'plugins')) {
       setTab('models')
     }
   }, [mobile, tab])
@@ -766,9 +770,13 @@ export function SettingsDialog({
             ? '模板'
             : tab === 'sync'
               ? '文件同步'
-              : tab === 'feedback'
-                ? '问题反馈'
-                : '常规设置'
+              : tab === 'plugins'
+                ? '插件与连接'
+                : tab === 'feedback'
+                  ? '问题反馈'
+                  : tab === 'reward'
+                    ? '打赏支持'
+                    : '常规设置'
   const pageHint =
     tab === 'models'
       ? '回答模型负责问答与翻译，识图模型负责论文里的图片识别；两者可以分开配置，修改会自动保存在本机。'
@@ -780,9 +788,13 @@ export function SettingsDialog({
             ? '论文模板决定章节骨架与写作约束；PPT 模板决定汇报幻灯片的版式与配色，做 PPT 时默认套用这里选中的模板。模板不会上传文献或密钥。'
             : tab === 'sync'
               ? 'Zotero、学术阅读与手机的文件同步都收在这里；打开同步窗口后可以先查看目标里的论文，再选择拉取或推送。'
-              : tab === 'feedback'
-                ? '遇到问题或有建议可以直接提交；截图支持 Ctrl+V 粘贴，内容会同步到 Gitee Issue。'
-                : '应用更新、目标译文语种与自动翻译、离线库、服务器连接与写作工具等设置都收在这里。'
+              : tab === 'plugins'
+                ? '浏览器插件把网页上的论文和 PDF 送进本地文献库；配对码一次性有效，可随时撤销已连接的插件。'
+                : tab === 'feedback'
+                  ? '遇到问题或有建议可以直接提交；截图支持 Ctrl+V 粘贴，内容会同步到 Gitee Issue。'
+                  : tab === 'reward'
+                    ? '给仓库一颗星，或扫码送一朵小花、请作者喝杯咖啡；所有支持都出于自愿，不影响任何功能。'
+                    : '应用更新、目标译文语种与自动翻译、离线库、服务器连接与写作工具等设置都收在这里。'
 
   return (
     <div
@@ -840,6 +852,16 @@ export function SettingsDialog({
             {!mobile && (
               <button
                 className="library-nav-item"
+                data-active={tab === 'plugins'}
+                onClick={() => setTab('plugins')}
+              >
+                <IconPlug />
+                <span>插件与连接</span>
+              </button>
+            )}
+            {!mobile && (
+              <button
+                className="library-nav-item"
                 data-active={tab === 'review'}
                 onClick={() => setTab('review')}
               >
@@ -865,6 +887,14 @@ export function SettingsDialog({
             >
               <IconFeedback />
               <span>问题反馈</span>
+            </button>
+            <button
+              className="library-nav-item"
+              data-active={tab === 'reward'}
+              onClick={() => setTab('reward')}
+            >
+              <IconReward />
+              <span>打赏</span>
             </button>
           </nav>
           <div className="settings-sidebar-foot">
@@ -1279,8 +1309,12 @@ export function SettingsDialog({
       <ReviewTemplatePanel />
     ) : tab === 'sync' ? (
       <FileSyncSettingsPanel onOpen={setSyncTarget} />
+    ) : tab === 'plugins' ? (
+      <PluginSettingsPanel />
     ) : tab === 'feedback' ? (
       <FeedbackPanel />
+    ) : tab === 'reward' ? (
+      <RewardPanel />
     ) : (
       <div className="modal-body settings-general" ref={bodyRef}>
         <div className="general-section">

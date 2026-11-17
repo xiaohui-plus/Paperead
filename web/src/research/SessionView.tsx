@@ -37,6 +37,11 @@ interface Props {
   onTitle?: (title: string) => void
   /** 输入框上传的附件，交给项目页刷新文件树。 */
   onFilesUploaded?: (files: ProjectFile[]) => void
+  /** 打开设置并切到「配置模型」分组。 */
+  onOpenSettings?: () => void
+  /** 当前项目工作文件夹名，显示在消息框「/」右侧。 */
+  workspaceName?: string
+  onPickWorkspace?: () => void
   kind: ProjectKind
 }
 
@@ -53,6 +58,9 @@ export function SessionView({
   onMeta,
   onTitle,
   onFilesUploaded,
+  onOpenSettings,
+  workspaceName,
+  onPickWorkspace,
   kind,
 }: Props) {
   /** 上次离开时的快照：命中就先渲染，再从该 seq 增量补齐。 */
@@ -346,6 +354,9 @@ export function SessionView({
           }
           onSend={(text, meta) => void submit(text, meta)}
           onStop={() => void stop()}
+          onOpenSettings={onOpenSettings}
+          workspaceName={workspaceName}
+          onPickWorkspace={onPickWorkspace}
           onCommandResult={(event) =>
             setChat((prev) => applyEvent(prev, event))
           }

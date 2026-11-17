@@ -787,6 +787,28 @@ class ResearchStore:
                 )
         return self.get_session(session_id)
 
+    def delete_session(self, session_id: str) -> bool:
+        """删除会话及其事件；产物索引保留，只解除会话关联。"""
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT project_id FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            conn.execute(
+                "DELETE FROM session_sources WHERE session_id = ?", (session_id,)
+            )
+            conn.execute(
+                "UPDATE artifacts SET session_id = NULL WHERE session_id = ?",
+                (session_id,),
+            )
+            conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            conn.execute(
+                "UPDATE projects SET updated_at = ? WHERE id = ?",
+                (_now(), row["project_id"]),
+            )
+        return True
+
     # ── 产物索引 ────────────────────────────────────────
 
     def add_artifact(

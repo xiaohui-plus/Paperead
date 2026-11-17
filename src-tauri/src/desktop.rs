@@ -173,7 +173,8 @@ fn create_main_window(app: &mut tauri::App, port: u16, data_dir: &std::path::Pat
     let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
         .title("Paperead")
         .inner_size(1280.0, 860.0)
-        .min_inner_size(1000.0, 680.0)
+        // 分屏贴边时要能继续拉窄：过高的最小宽度会让 Windows 分屏卡在 1000px 以上。
+        .min_inner_size(640.0, 520.0)
         .data_directory(webview_dir)
         // 外部文件拖放必须由 Tauri 接管：WebView2 收不到 HTML5 drop，
         // 前端通过 onDragDropEvent 拿本地路径，再调 /api/papers/import 入库。

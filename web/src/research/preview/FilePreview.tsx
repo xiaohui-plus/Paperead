@@ -24,6 +24,7 @@ const DocxPreview = lazy(() =>
 
 type PreviewKind =
   | 'image'
+  | 'svg'
   | 'pdf'
   | 'pptx'
   | 'docx'
@@ -57,6 +58,7 @@ const CODE_RE =
 
 const KIND_LABEL: Record<PreviewKind, string> = {
   image: '图片',
+  svg: '矢量图',
   pdf: 'PDF',
   pptx: 'PPT',
   docx: 'Word',
@@ -73,6 +75,7 @@ const KIND_LABEL: Record<PreviewKind, string> = {
 function detectKind(file: PreviewTarget): PreviewKind {
   const name = file.name
   const mime = (file.mime || '').toLowerCase()
+  if (mime === 'image/svg+xml' || /\.svg$/i.test(name)) return 'svg'
   if (mime.startsWith('image/') || IMAGE_RE.test(name)) return 'image'
   if (mime === 'application/pdf' || /\.pdf$/i.test(name)) return 'pdf'
   if (mime === PPTX_MIME || PPTX_RE.test(name)) return 'pptx'
@@ -124,6 +127,52 @@ function useFileText(url: string, enabled: boolean) {
 
 const MAX_CODE_LINES = 4000
 
+/**
+ * SVG 走文本 + Blob URL 渲染：不依赖服务端返回的 Content-Type。
+ * Windows 上 .svg 的 MIME 可能被登记成 image/svg（缺 +xml），
+ * 浏览器对 <img> 的 MIME 严格校验后会直接不渲染。
+ */
+function SvgPreview({ url, name }: { url: string; name: string }) {
+  const [src, setSrc] = useState('')
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    let objectUrl = ''
+    setSrc('')
+    setError(null)
+    fetch(url)
+      .then((response) => {
+        if (!response.ok) throw new Error(`读取失败（HTTP ${response.status}）`)
+        return response.text()
+      })
+      .then((text) => {
+        if (!alive) return
+        objectUrl = URL.createObjectURL(
+          new Blob([text], { type: 'image/svg+xml' }),
+        )
+        setSrc(objectUrl)
+      })
+      .catch((loadError: unknown) => {
+        if (alive) {
+          setError(loadError instanceof Error ? loadError.message : '读取失败')
+        }
+      })
+    return () => {
+      alive = false
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [url])
+
+  if (error) return <p className="project-preview-note">{error}</p>
+  if (!src) return <p className="project-preview-note">正在读取图片…</p>
+  return (
+    <div className="project-preview-image-wrap">
+      <img src={src} alt={name} className="project-preview-image" />
+    </div>
+  )
+}
+
 /** 代码 / 纯文本：等宽字体 + 行号。 */
 function CodePreview({ text }: { text: string }) {
   const lines = useMemo(() => text.split('\n'), [text])
@@ -159,6 +208,9 @@ function PreviewBody({
   const needsText = kind === 'markdown' || kind === 'code'
   const { text, error, loading } = useFileText(url, needsText)
 
+  if (kind === 'svg') {
+    return <SvgPreview url={url} name={name} />
+  }
   if (kind === 'image') {
     return (
       <div className="project-preview-image-wrap">

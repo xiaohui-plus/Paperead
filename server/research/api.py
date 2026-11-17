@@ -84,6 +84,21 @@ class SessionCreateIn(BaseModel):
     title: str | None = None
 
 
+class SessionPatchIn(BaseModel):
+    title: str
+
+
+class ExplorerRenameIn(BaseModel):
+    path: str
+    name: str
+
+
+class ExplorerTransferIn(BaseModel):
+    path: str
+    target: str = ""
+    mode: str = "copy"
+
+
 class MessageRef(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -636,6 +651,76 @@ def build_router(
         media = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
         return FileResponse(str(file_path), media_type=media)
 
+    @router.patch("/projects/{project_id}/explorer")
+    def rename_explorer_item(
+        request: Request,
+        project_id: str,
+        body: ExplorerRenameIn,
+    ) -> dict[str, Any]:
+        """重命名项目工作文件夹内的文件或文件夹。"""
+        _local_only(request)
+        try:
+            root = store.workspace_root(project_id)
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail="project not found") from error
+        try:
+            path = explorer.rename(root, body.path, body.name)
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except FileExistsError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except (ValueError, NotADirectoryError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except OSError as error:
+            raise HTTPException(status_code=409, detail=f"无法重命名：{error}") from error
+        return {"path": path}
+
+    @router.post("/projects/{project_id}/explorer/transfer")
+    def transfer_explorer_item(
+        request: Request,
+        project_id: str,
+        body: ExplorerTransferIn,
+    ) -> dict[str, Any]:
+        """复制或移动工作文件夹内的文件/文件夹，重名自动加后缀。"""
+        _local_only(request)
+        try:
+            root = store.workspace_root(project_id)
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail="project not found") from error
+        try:
+            path = explorer.transfer(root, body.path, body.target, body.mode)
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except FileExistsError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except (ValueError, NotADirectoryError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except OSError as error:
+            raise HTTPException(status_code=409, detail=f"无法复制或移动：{error}") from error
+        return {"path": path}
+
+    @router.delete("/projects/{project_id}/explorer")
+    def delete_explorer_item(
+        request: Request,
+        project_id: str,
+        path: str = Query(...),
+    ) -> dict[str, Any]:
+        """删除工作文件夹内的文件或整个文件夹。"""
+        _local_only(request)
+        try:
+            root = store.workspace_root(project_id)
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail="project not found") from error
+        try:
+            explorer.delete(root, path)
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except (ValueError, NotADirectoryError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except OSError as error:
+            raise HTTPException(status_code=409, detail=f"无法删除：{error}") from error
+        return {"ok": True}
+
     @router.post("/projects/{project_id}/folders", status_code=201)
     def create_folder(project_id: str, body: FolderCreateIn) -> dict[str, Any]:
         try:
@@ -825,7 +910,12 @@ def build_router(
                 if pdf is not None and pdf.is_file():
                     return FileResponse(str(pdf), media_type="application/pdf")
             raise HTTPException(status_code=404, detail="file not found")
-        return FileResponse(str(path), media_type=item.get("mime") or None)
+        # 数据库里的 mime 可能是旧进程按 Windows 注册表写入的（例如 .svg
+        # 被写成 image/svg），这里按扩展名重新推断，保证 <img> 能正常渲染。
+        mime = mimetypes.guess_type(path.name)[0] or item.get("mime") or None
+        if path.suffix.lower() == ".svg":
+            mime = "image/svg+xml"
+        return FileResponse(str(path), media_type=mime)
 
     @router.patch("/projects/{project_id}/items/{item_id}")
     def update_item(
@@ -967,6 +1057,22 @@ def build_router(
         except PermissionError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return _session(row)
+
+    @router.patch("/sessions/{session_id}")
+    def rename_session(session_id: str, body: SessionPatchIn) -> dict[str, Any]:
+        row = store.update_session(session_id, title=body.title)
+        if row is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        return _session(row)
+
+    @router.delete("/sessions/{session_id}")
+    async def delete_session(session_id: str) -> dict[str, Any]:
+        session = _session_or_404(session_id)
+        with contextlib.suppress(Exception):
+            await agent_client.cancel(str(session["id"]))
+        if not store.delete_session(session_id):
+            raise HTTPException(status_code=404, detail="session not found")
+        return {"ok": True}
 
     # ── 会话消息 / 事件流 ──────────────────────────────
 

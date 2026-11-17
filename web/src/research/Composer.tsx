@@ -5,6 +5,7 @@ import {
   IconAt,
   IconChevronDown,
   IconClose,
+  IconFolder,
   IconPlus,
   IconShield,
   IconSlash,
@@ -43,6 +44,8 @@ interface Props {
   onUploaded?: (file: ProjectFile) => void
   onSend: (text: string, meta: SendMeta) => void
   onStop: () => void
+  /** 打开设置并切到「配置模型」分组。 */
+  onOpenSettings?: () => void
   onCommandResult?: (event: AgentEvent) => void
   variant?: 'session' | 'home'
   /** 快捷卡片填充：key 变化时把 text 放进输入框。 */
@@ -51,6 +54,9 @@ interface Props {
   permission?: PermissionPreset | null
   /** 空会话时把本地权限偏好下发到该会话。 */
   empty?: boolean
+  /** 当前项目工作文件夹名；传入后显示在「/」右侧，点击可更换。 */
+  workspaceName?: string
+  onPickWorkspace?: () => void
 }
 
 interface Mention {
@@ -115,11 +121,14 @@ export function Composer({
   onUploaded,
   onSend,
   onStop,
+  onOpenSettings,
   onCommandResult,
   variant = 'session',
   seed,
   permission,
   empty = false,
+  workspaceName,
+  onPickWorkspace,
 }: Props) {
   const prefs = useRef(loadPrefs())
   const [mode, setMode] = useState<ResearchMode>(prefs.current.mode)
@@ -610,7 +619,8 @@ export function Composer({
           onKeyDown={onKeyDown}
         />
 
-        {menu && menu !== 'mode' && (
+
+        {(menu === 'slash' || menu === 'mention') && (
           <div
             className="rc-menu rc-suggest"
             style={{
@@ -798,10 +808,26 @@ export function Composer({
             >
               <IconSlash />
             </button>
+            {workspaceName && (
+              <button
+                type="button"
+                className="rc-folder"
+                title={`当前项目文件夹：${workspaceName}（点击更换）`}
+                onClick={onPickWorkspace}
+              >
+                <IconFolder />
+                <span className="rc-folder-name">{workspaceName}</span>
+              </button>
+            )}
           </div>
           <div className="rc-right">
             {hintText && <span className="rc-hint">{hintText}</span>}
-            <ModelPicker models={models} current={model} onChoose={chooseModel} />
+            <ModelPicker
+              models={models}
+              current={model}
+              onChoose={chooseModel}
+              onManage={onOpenSettings}
+            />
             {running ? (
               <button className="rc-send is-stop" title="停止" onClick={onStop}>
                 <IconStop />

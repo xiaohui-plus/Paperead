@@ -1,17 +1,18 @@
 """本机文件夹浏览：Jupyter 式目录列表与项目工作文件夹内的相对浏览。
 
-只负责列目录与定位文件，不复制、不删除用户文件。
+列目录只读；工作文件夹内的重命名、复制、移动、删除也只允许在项目根内。
 """
 
 from __future__ import annotations
 
 import mimetypes
 import os
+import shutil
 import string
 from pathlib import Path
 from typing import Any
 
-from server.research.files import resolve_in_root
+from server.research.files import resolve_in_root, safe_name
 
 MAX_ENTRIES = 2000
 AGENT_MAX_FILES = 300
@@ -197,6 +198,83 @@ def project_file(root: Path, relative: str) -> Path:
     if not target.is_file():
         raise FileNotFoundError("文件不存在")
     return target
+
+
+def _relative(base: Path, path: Path) -> str:
+    return path.relative_to(base).as_posix()
+
+
+def _unique_child(directory: Path, name: str) -> Path:
+    """目标目录里已有同名项时，按 ``-1``、``-2`` 找一个可用名。"""
+    target = directory / name
+    if not target.exists():
+        return target
+    stem, suffix = Path(name).stem, Path(name).suffix
+    for index in range(1, 1000):
+        candidate = directory / f"{stem}-{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise FileExistsError("目标文件夹里同名项目过多")
+
+
+def rename(root: Path, relative: str, name: str) -> str:
+    """重命名工作文件夹内的文件或文件夹，返回新的相对路径。"""
+    base = Path(root).resolve()
+    source = resolve_in_root(base, relative)
+    if source == base:
+        raise ValueError("不能重命名项目文件夹")
+    if not source.exists():
+        raise FileNotFoundError("文件不存在")
+    clean = safe_name(name)
+    if clean == source.name:
+        return _relative(base, source)
+    target = source.with_name(clean)
+    if target.exists():
+        raise FileExistsError("同名文件已存在")
+    source.rename(target)
+    return _relative(base, target)
+
+
+def transfer(root: Path, relative: str, target_dir: str = "", mode: str = "copy") -> str:
+    """在工作文件夹内复制或移动文件，返回目标相对路径。"""
+    base = Path(root).resolve()
+    source = resolve_in_root(base, relative)
+    if source == base:
+        raise ValueError("不能复制或移动项目文件夹")
+    if not source.exists():
+        raise FileNotFoundError("文件不存在")
+    directory = resolve_in_root(base, target_dir) if target_dir else base
+    if not directory.is_dir():
+        raise NotADirectoryError("目标不是文件夹")
+    if directory == source or source in directory.parents:
+        raise ValueError("不能放进自身或子文件夹")
+    if mode == "move" and directory == source.parent:
+        return _relative(base, source)
+    destination = _unique_child(directory, source.name)
+    if mode == "move":
+        shutil.move(str(source), str(destination))
+    elif mode == "copy":
+        if source.is_dir():
+            shutil.copytree(source, destination)
+        else:
+            shutil.copy2(source, destination)
+    else:
+        raise ValueError("无效操作")
+    return _relative(base, destination)
+
+
+def delete(root: Path, relative: str) -> None:
+    """删除工作文件夹内的文件或整个文件夹。"""
+    base = Path(root).resolve()
+    target = resolve_in_root(base, relative)
+    if target == base:
+        raise ValueError("不能删除项目文件夹")
+    if not target.exists():
+        raise FileNotFoundError("文件不存在")
+    if target.is_dir():
+        shutil.rmtree(target)
+    else:
+        target.unlink()
 
 
 def project_files(root: Path, limit: int = AGENT_MAX_FILES) -> list[dict[str, Any]]:

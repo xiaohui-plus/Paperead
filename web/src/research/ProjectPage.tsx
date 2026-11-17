@@ -3,12 +3,16 @@ import {
   IconBack,
   IconChat,
   IconClose,
+  IconCopy,
   IconDownload,
+  IconEdit,
   IconFolder,
   IconPlus,
+  IconTrash,
 } from '../components/icons'
 import { Markdown } from '../components/Markdown'
 import { FileTypeIcon } from '../components/fileTypeIcons'
+import { SettingsDialog } from '../components/SettingsDialog'
 import {
   relativeTime,
   researchApi,
@@ -110,6 +114,7 @@ export function ProjectPage({
     url: string
   } | null>(null)
   const [folderPicker, setFolderPicker] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [activeFolderId, setActiveFolderId] = useState<string | null>(null)
   const [selectedFiles, setSelectedFiles] = useState<string[]>([])
   const [folderParent, setFolderParent] = useState<string | null | undefined>(undefined)
@@ -119,6 +124,13 @@ export function ProjectPage({
   const [renaming, setRenaming] = useState(false)
   const [draftName, setDraftName] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
+  const [sessionMenu, setSessionMenu] = useState<{
+    session: SessionSummary
+    x: number
+    y: number
+  } | null>(null)
+  const [sessionRenaming, setSessionRenaming] = useState<string | null>(null)
+  const [sessionDraft, setSessionDraft] = useState('')
   const [pendingText, setPendingText] = useState<string | null>(
     initialText ?? null,
   )
@@ -195,6 +207,24 @@ export function ProjectPage({
   }, [tab])
 
   useEffect(() => {
+    if (!sessionMenu) return
+    const close = (event: MouseEvent) => {
+      if (!(event.target as Element).closest('.project-tree-menu')) {
+        setSessionMenu(null)
+      }
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setSessionMenu(null)
+    }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', close)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [sessionMenu])
+
+  useEffect(() => {
     if (!railOpen) return
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setRailOpen(false)
@@ -266,6 +296,11 @@ export function ProjectPage({
     artifactItems.length > 0
       ? [...files.map(withSuffix), ...artifactItems]
       : files.map(withSuffix)
+
+  const workspaceLabel = (() => {
+    const root = (project?.rootPath || '').replace(/[\\/]+$/, '')
+    return root.split(/[\\/]/).filter(Boolean).pop() || project?.name || ''
+  })()
 
   const back = () => onBack(project?.kind ?? 'research')
 
@@ -554,6 +589,56 @@ export function ProjectPage({
     void navigator.clipboard?.writeText(value)
   }
 
+  const openSession = (session: SessionSummary) => {
+    setPreview(null)
+    setLocalPreview(null)
+    setRailOpen(false)
+    onSelectSession(session.id)
+  }
+
+  const startSessionRename = (session: SessionSummary) => {
+    setSessionMenu(null)
+    setSessionRenaming(session.id)
+    setSessionDraft(session.title)
+  }
+
+  const commitSessionRename = async (session: SessionSummary) => {
+    const title = sessionDraft.trim()
+    setSessionRenaming(null)
+    if (!title || title === session.title) return
+    try {
+      const updated = await researchApi.renameSession(session.id, title)
+      setSessions((prev) =>
+        prev.map((item) => (item.id === session.id ? updated : item)),
+      )
+      if (session.id === sessionId) setSessionTitle(updated.title)
+    } catch (renameError) {
+      setError(errorText(renameError))
+    }
+  }
+
+  const deleteSession = async (session: SessionSummary) => {
+    setSessionMenu(null)
+    if (
+      !window.confirm(
+        `确定删除会话「${session.title}」？\n\n该会话的对话记录会被删除，无法恢复。`,
+      )
+    ) {
+      return
+    }
+    try {
+      await researchApi.deleteSession(session.id)
+      setSessions((prev) => prev.filter((item) => item.id !== session.id))
+      if (session.id === sessionId) onSelectSession(null)
+    } catch (deleteError) {
+      setError(errorText(deleteError))
+    }
+  }
+
+  const copySessionValue = (value: string) => {
+    void navigator.clipboard?.writeText(value)
+  }
+
   const toggleSelected = (id: string) => {
     setSelectedFiles((prev) =>
       prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
@@ -706,29 +791,143 @@ export function ProjectPage({
           />
 
           {tab === 'sessions' ? (
-            <div className="project-session-list">
+            <>
+              <div className="project-session-list">
               {sessions.length === 0 ? (
                 <p className="project-rail-empty">还没有会话</p>
               ) : (
                 sessions.map((session) => (
-                  <button
+                  <div
                     key={session.id}
                     className="project-session-row"
+                    role="button"
+                    tabIndex={0}
                     data-active={session.id === sessionId}
-                    onClick={() => {
-                      setPreview(null)
-                      setLocalPreview(null)
-                      setRailOpen(false)
-                      onSelectSession(session.id)
+                    onClick={() => openSession(session)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') openSession(session)
+                    }}
+                    onContextMenu={(event) => {
+                      event.preventDefault()
+                      setSessionMenu({
+                        session,
+                        x: event.clientX,
+                        y: event.clientY,
+                      })
                     }}
                   >
-                    <span className="project-session-name">{session.title}</span>
+                    {sessionRenaming === session.id ? (
+                      <input
+                        autoFocus
+                        className="project-session-input"
+                        value={sessionDraft}
+                        maxLength={80}
+                        onClick={(event) => event.stopPropagation()}
+                        onChange={(event) => setSessionDraft(event.target.value)}
+                        onBlur={() => void commitSessionRename(session)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.preventDefault()
+                            event.currentTarget.blur()
+                          }
+                          if (event.key === 'Escape') {
+                            event.preventDefault()
+                            setSessionRenaming(null)
+                          }
+                        }}
+                      />
+                    ) : (
+                      <span className="project-session-name">{session.title}</span>
+                    )}
                     <em>{relativeTime(session.updatedAt)}</em>
                     {session.running && <i className="project-running" />}
-                  </button>
+                    <button
+                      type="button"
+                      className="project-tree-more"
+                      title="会话操作：重命名、复制、删除"
+                      aria-label={`${session.title} 的会话操作`}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        const rect = event.currentTarget.getBoundingClientRect()
+                        setSessionMenu({
+                          session,
+                          x: rect.right - 4,
+                          y: rect.bottom + 2,
+                        })
+                      }}
+                    >
+                      ⋯
+                    </button>
+                  </div>
                 ))
               )}
             </div>
+            {sessionMenu && (
+              <div
+                className="project-tree-menu"
+                style={{
+                  left: Math.min(
+                    sessionMenu.x,
+                    Math.max(8, window.innerWidth - 184),
+                  ),
+                  top: Math.min(
+                    sessionMenu.y,
+                    Math.max(8, window.innerHeight - 240),
+                  ),
+                }}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    openSession(sessionMenu.session)
+                    setSessionMenu(null)
+                  }}
+                >
+                  <IconChat />
+                  打开会话
+                </button>
+                <button
+                  type="button"
+                  onClick={() => startSessionRename(sessionMenu.session)}
+                >
+                  <IconEdit />
+                  重命名
+                </button>
+                <div className="project-tree-menu-sep" />
+                <button
+                  type="button"
+                  onClick={() => {
+                    copySessionValue(sessionMenu.session.title)
+                    setSessionMenu(null)
+                  }}
+                >
+                  <IconCopy />
+                  复制名称
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    copySessionValue(sessionMenu.session.id)
+                    setSessionMenu(null)
+                  }}
+                >
+                  <IconCopy />
+                  复制会话 ID
+                </button>
+                <div className="project-tree-menu-sep" />
+                <button
+                  type="button"
+                  className="is-danger"
+                  onClick={() => void deleteSession(sessionMenu.session)}
+                >
+                  <IconTrash />
+                  删除
+                </button>
+              </div>
+            )}
+          </>
+
           ) : (
             <div className="project-file-panel">
               {project?.rootPath ? (
@@ -861,6 +1060,9 @@ export function ProjectPage({
               onMeta={updateSessionMeta}
               onTitle={setSessionTitle}
               kind={project?.kind ?? 'research'}
+              onOpenSettings={() => setSettingsOpen(true)}
+              workspaceName={workspaceLabel || undefined}
+              onPickWorkspace={() => setFolderPicker(true)}
               onFilesUploaded={(uploaded) =>
                 setFiles((prev) => [...prev, ...uploaded])
               }
@@ -884,6 +1086,9 @@ export function ProjectPage({
                 onUploaded={(file) => setFiles((prev) => [...prev, file])}
                 onSend={(text) => void send(text)}
                 onStop={() => undefined}
+                onOpenSettings={() => setSettingsOpen(true)}
+                workspaceName={workspaceLabel || undefined}
+                onPickWorkspace={() => setFolderPicker(true)}
               />
             </div>
           )}
@@ -895,6 +1100,10 @@ export function ProjectPage({
         initialPath={project?.rootPath || ''}
         onClose={() => setFolderPicker(false)}
         onSelect={applyRoot}
+      />
+      <SettingsDialog
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
       />
     </div>
   )

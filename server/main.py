@@ -88,6 +88,8 @@ from paperead.translate import (
     translate_paper,
     translate_text,
 )
+from server.ext_api import build_router as build_ext_router
+from server.plugin_auth import PluginRegistry, is_extension_origin
 from server.feedback_api import API_BASE as FEEDBACK_API_BASE
 from server.feedback_api import build_feedback_router
 from server.llm_proxy import build_llm_proxy_router
@@ -115,6 +117,7 @@ from server.runtime import (
     allowed_origins,
     bind_host,
     cleanup_previous_data_dir,
+    config_dir,
     default_data_dir,
     ensure_data_dir,
     is_frozen,
@@ -229,6 +232,28 @@ app.include_router(
     )
 )
 
+# 浏览器插件接口：独立命名空间与作用域 token，不暴露主应用 token。
+plugin_registry = PluginRegistry(config_dir() / "plugins.json")
+app.include_router(
+    build_ext_router(
+        store=store,
+        registry=plugin_registry,
+        parse_task=lambda paper_id: _parse_task(paper_id),
+        public=lambda row: _public(row),
+    )
+)
+
+
+def _supplied_token(request: Request) -> str:
+    return (
+        request.cookies.get("pr_token")
+        or request.headers.get("x-paperead-token")
+        or request.headers.get("x-paper-reflow-token")
+        or request.query_params.get("pr_token")
+        or ""
+    )
+
+
 @app.middleware("http")
 async def guard(request: Request, call_next):
     """本地 API 防护：cookie/header token + Origin 校验。
@@ -236,31 +261,75 @@ async def guard(request: Request, call_next):
     桌面壳把随机 token 作为 HttpOnly cookie 在首页下发，前端无需改代码；
     壳自己用 X-Paperead-Token 调 health。直接 python -m server.main 时
     TOKEN 为空，鉴权关闭，保持原有开发体验。
+
+    /api/ext/v1 是浏览器插件命名空间：ping/pair 对扩展开放，管理接口仍走
+    主 token，业务接口由路由校验插件 Bearer token。
     """
     path = request.url.path
+    origin = request.headers.get("origin", "")
+    ext_path = path.startswith("/api/ext/v1")
+
+    if ext_path and request.method == "OPTIONS":
+        if is_extension_origin(origin):
+            return Response(
+                status_code=204,
+                headers={
+                    "Access-Control-Allow-Origin": origin,
+                    "Access-Control-Allow-Headers": "authorization, content-type",
+                    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+                    "Access-Control-Max-Age": "600",
+                },
+            )
+        return Response(status_code=403)
+
     if path.startswith("/api/llm-proxy/"):
         # 研究 agent 用 Authorization: Bearer <token> 调本地 LLM 代理
         if TOKEN and request.headers.get("authorization") != f"Bearer {TOKEN}":
             return JSONResponse({"detail": "unauthorized"}, status_code=403)
-    elif path.startswith("/api"):
-        # 旧版壳/脚本可能还在发 x-paper-reflow-token，继续接受。
-        supplied = (
-            request.cookies.get("pr_token")
-            or request.headers.get("x-paperead-token")
-            or request.headers.get("x-paper-reflow-token")
-            # 图片/PDF 等媒体请求由 <img src> 发起，带不了自定义头，用查询参数传 token
-            or request.query_params.get("pr_token")
-        )
-        if TOKEN and supplied != TOKEN:
-            return JSONResponse({"detail": "unauthorized"}, status_code=403)
-        origin = request.headers.get("origin")
-        if origin and origin not in ORIGINS:
-            # 用局域网 IP / 域名访问时，页面自身的 Origin 与 Host 同源，直接放行
-            parsed = urlparse(origin)
-            if parsed.netloc != request.headers.get("host", ""):
+    elif ext_path:
+        if path in {"/api/ext/v1/ping", "/api/ext/v1/pair"}:
+            if path.endswith("/pair") and not is_extension_origin(origin):
+                return JSONResponse(
+                    {"detail": "只允许浏览器扩展配对"}, status_code=403
+                )
+        elif path in {
+            "/api/ext/v1/pair/session",
+            "/api/ext/v1/pair/wait",
+        } or path.startswith("/api/ext/v1/admin/"):
+            if TOKEN and _supplied_token(request) != TOKEN:
+                return JSONResponse({"detail": "unauthorized"}, status_code=403)
+            if (
+                origin
+                and not is_extension_origin(origin)
+                and origin not in ORIGINS
+                and urlparse(origin).netloc != request.headers.get("host", "")
+            ):
                 return JSONResponse({"detail": "origin not allowed"}, status_code=403)
+        else:
+            if not request.headers.get("authorization", "").startswith("Bearer "):
+                return JSONResponse({"detail": "unauthorized"}, status_code=401)
+            if (
+                origin
+                and not is_extension_origin(origin)
+                and origin not in ORIGINS
+                and urlparse(origin).netloc != request.headers.get("host", "")
+            ):
+                return JSONResponse({"detail": "origin not allowed"}, status_code=403)
+    elif path.startswith("/api"):
+        if TOKEN and _supplied_token(request) != TOKEN:
+            return JSONResponse({"detail": "unauthorized"}, status_code=403)
+        if (
+            origin
+            and origin not in ORIGINS
+            and urlparse(origin).netloc != request.headers.get("host", "")
+        ):
+            return JSONResponse({"detail": "origin not allowed"}, status_code=403)
 
     response = await call_next(request)
+    if ext_path and is_extension_origin(origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+
     content_type = response.headers.get("content-type", "")
     if content_type.startswith("text/html"):
         # 前端更新后 index.html 引用的是新 hash；禁止缓存 HTML，
@@ -280,8 +349,12 @@ async def guard(request: Request, call_next):
 app.add_middleware(
     CORSMiddleware,
     allow_origins=sorted(ORIGINS),
+    allow_origin_regex=r"^(chrome-extension|moz-extension)://[A-Za-z0-9_-]+$",
     allow_methods=["*"],
     allow_headers=["*"],
+    # Chrome 对「扩展/网页 → 127.0.0.1」会先发私有网络预检，
+    # 不放行的话浏览器直接报 Failed to fetch。
+    allow_private_network=True,
 )
 
 MOCK_LATEX = r"S_{\mathrm{AA}}[u,v]=\sum_{z\in N(u)\cap N(v)}\frac{1}{\log(d_z)}"

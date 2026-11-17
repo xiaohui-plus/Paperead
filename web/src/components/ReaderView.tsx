@@ -71,6 +71,9 @@ const PANEL_WIDTH_KEY = 'paperead.panelWidth'
 const MIN_PANEL_WIDTH = 260
 const MAX_PANEL_WIDTH = 640
 const DEFAULT_PANEL_WIDTH = 344
+// 窗口压到这么窄时自动收起左侧阅读栏，把宽度还给正文；拉宽后自动恢复。
+// 阅读页整体带 120% 缩放，这里比较的是折算后的布局宽度。
+const AUTO_COLLAPSE_WIDTH = 980
 
 function readInitialTab(): TabKey {
   const q = new URLSearchParams(window.location.search).get('tab')
@@ -101,6 +104,15 @@ function readPanelCollapsed(): boolean {
   } catch {
     return false
   }
+}
+
+/** 阅读页的布局宽度：window.innerWidth 是视口宽，需按 ui-zoom 折算。 */
+function readingLayoutWidth(): number {
+  const zoom =
+    Number.parseFloat(
+      getComputedStyle(document.documentElement).zoom || '1',
+    ) || 1
+  return (document.documentElement.clientWidth || window.innerWidth) / zoom
 }
 
 export function ReaderView({ paperId, onBack }: Props) {
@@ -156,6 +168,15 @@ export function ReaderView({ paperId, onBack }: Props) {
   const annotationsEnabled = paperId !== 'demo'
   const [panelWidth, setPanelWidth] = useState(readPanelWidth)
   const [panelCollapsed, setPanelCollapsed] = useState(readPanelCollapsed)
+  // 窗口太窄时自动折叠侧栏：只影响本次窗口尺寸，不覆盖用户手动折叠偏好
+  const [autoCollapsed, setAutoCollapsed] = useState(
+    () =>
+      typeof window !== 'undefined' &&
+      readingLayoutWidth() < AUTO_COLLAPSE_WIDTH,
+  )
+  // 用户在窄屏手动展开过：直到窗口重新变宽前都不再自动收起
+  const narrowPanelOverride = useRef(false)
+  const panelHidden = panelCollapsed || autoCollapsed
   const [panelTab, setPanelTab] = useState<TabKey>(readInitialTab)
   // 双击正文高亮后要聚焦的批注条：at 让连续双击同一条也能重新滚动
   const [focusAnnotation, setFocusAnnotation] = useState<{
@@ -265,8 +286,17 @@ export function ReaderView({ paperId, onBack }: Props) {
   }, [panelWidth])
 
   useEffect(() => {
-    const onResize = () =>
+    const onResize = () => {
       setPanelWidth((width) => clampPanelWidth(width))
+      const narrow = readingLayoutWidth() < AUTO_COLLAPSE_WIDTH
+      if (narrow) {
+        if (!narrowPanelOverride.current) setAutoCollapsed(true)
+      } else {
+        narrowPanelOverride.current = false
+        setAutoCollapsed(false)
+      }
+    }
+    onResize()
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -347,6 +377,12 @@ export function ReaderView({ paperId, onBack }: Props) {
   }
 
   const togglePanel = () => {
+    if (readingLayoutWidth() < AUTO_COLLAPSE_WIDTH) narrowPanelOverride.current = true
+    // 自动折叠时点按钮＝手动展开，不影响用户持久化的折叠偏好
+    if (autoCollapsed) {
+      setAutoCollapsed(false)
+      return
+    }
     setPanelCollapsed((prev) => {
       const next = !prev
       try {
@@ -1171,7 +1207,7 @@ export function ReaderView({ paperId, onBack }: Props) {
         pdfHref={pdfHref}
         pdfExpanded={pdfExpanded}
         onTogglePdfExpand={togglePdfExpand}
-        panelCollapsed={panelCollapsed}
+        panelCollapsed={panelHidden}
         onTogglePanel={togglePanel}
         showPanelToggle={!(pdfMode && pdfExpanded)}
         autoHighlights={autoHighlights}
@@ -1206,11 +1242,11 @@ export function ReaderView({ paperId, onBack }: Props) {
       <div
         ref={workspaceRef}
         className={`workspace ${pdfMode && pdfExpanded ? 'is-pdf-expanded' : ''}${
-          panelCollapsed ? ' is-panel-collapsed' : ''
+          panelHidden ? ' is-panel-collapsed' : ''
         }`}
         style={{ '--panel-w': `${panelWidth}px` } as CSSProperties}
       >
-        {!(pdfMode && pdfExpanded) && !panelCollapsed && (
+        {!(pdfMode && pdfExpanded) && !panelHidden && (
           <>
             <LeftPanel
               paperId={paperId}

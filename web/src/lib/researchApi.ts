@@ -294,6 +294,36 @@ export const researchApi = {
     return `/api/research/projects/${projectId}/explorer/file?path=${encodeURIComponent(path)}`
   },
 
+  renameExplorerItem(
+    projectId: string,
+    path: string,
+    name: string,
+  ): Promise<{ path: string }> {
+    return jsonFetch<{ path: string }>(
+      `/api/research/projects/${projectId}/explorer`,
+      json('PATCH', { path, name }),
+    )
+  },
+
+  transferExplorerItem(
+    projectId: string,
+    path: string,
+    target: string,
+    mode: 'copy' | 'move',
+  ): Promise<{ path: string }> {
+    return jsonFetch<{ path: string }>(
+      `/api/research/projects/${projectId}/explorer/transfer`,
+      json('POST', { path, target, mode }),
+    )
+  },
+
+  async deleteExplorerItem(projectId: string, path: string): Promise<void> {
+    await jsonFetch(
+      `/api/research/projects/${projectId}/explorer?path=${encodeURIComponent(path)}`,
+      { method: 'DELETE' },
+    )
+  },
+
   getProject(projectId: string): Promise<ProjectSummary> {
     return jsonFetch<ProjectSummary>(`/api/research/projects/${projectId}`)
   },
@@ -450,6 +480,17 @@ export const researchApi = {
       `/api/research/projects/${projectId}/sessions`,
       json('POST', { title: title ?? '' }),
     )
+  },
+
+  renameSession(sessionId: string, title: string): Promise<SessionSummary> {
+    return jsonFetch<SessionSummary>(
+      `/api/research/sessions/${sessionId}`,
+      json('PATCH', { title }),
+    )
+  },
+
+  async deleteSession(sessionId: string): Promise<void> {
+    await jsonFetch(`/api/research/sessions/${sessionId}`, { method: 'DELETE' })
   },
 
   async sendMessage(

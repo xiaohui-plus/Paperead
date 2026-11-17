@@ -128,21 +128,20 @@
 
 .research-home {
   width: 100%;
-  max-width: 900px;
+  max-width: 820px;
   margin: 0 auto;
   min-height: 100%;
   display: flex;
   flex-direction: column;
 }
 
-/* 首屏：标题与消息栏作为一个整体在可用高度内垂直居中 */
+/* 首屏：标题、输入框与示例作为一个整体在可用高度内垂直居中 */
 .research-center {
   flex: 1 0 auto;
   display: flex;
   flex-direction: column;
   justify-content: center;
-  /* 标题在输入框上方，底部留白收掉，让消息框更贴近视口中心 */
-  padding: clamp(80px, 13vh, 128px) 0 0;
+  padding: clamp(64px, 11vh, 112px) 0 0;
 }
 
 .research-hero {
@@ -188,7 +187,7 @@
   align-items: center;
   justify-content: flex-start;
   gap: 10px;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 
 .research-composer-top label {
@@ -496,6 +495,111 @@
   color: var(--blue-ink);
 }
 
+/* 简洁首屏：居中大标题 + 宽输入框 + 示例卡片 */
+.rh-hero {
+  margin: 0 0 26px;
+  text-align: center;
+}
+
+.rh-title {
+  margin: 0;
+  color: var(--ink);
+  font-size: clamp(28px, 3.4vw, 40px);
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.rh-accent {
+  color: var(--blue);
+}
+
+.rh-examples {
+  margin-top: 22px;
+  padding: 14px 18px 6px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--bg);
+}
+
+.rh-examples-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.rh-examples-title {
+  color: var(--blue-ink);
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.rh-examples-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+}
+
+.rh-examples-close:hover {
+  background: var(--bg-soft);
+  color: var(--ink-2);
+}
+
+.rh-examples-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.rh-example {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 11px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.65;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rh-example:first-child {
+  border-top: 0;
+}
+
+.rh-example-tag {
+  flex: none;
+  color: var(--blue);
+  font-weight: 600;
+}
+
+.rh-example-text {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--muted);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.rh-example:hover .rh-example-text {
+  color: var(--ink-2);
+}
+
 .research-placeholder {
   margin-top: 20px;
   padding: 42px 24px;
@@ -756,6 +860,30 @@
   font-style: normal;
   font-size: 11px;
   color: var(--faint);
+}
+
+.project-session-input {
+  flex: 1;
+  min-width: 0;
+  padding: 1px 4px;
+  border: 1px solid var(--blue);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  outline: none;
+}
+
+.project-session-row:hover .project-tree-more,
+.project-session-row:focus-within .project-tree-more {
+  opacity: 1;
+  background: var(--bg);
+}
+
+.project-session-row:focus-visible {
+  outline: 2px solid var(--blue-line);
+  outline-offset: -2px;
 }
 
 .project-artifacts {
@@ -1814,8 +1942,8 @@
   min-height: 0;
   padding: 9px 13px;
   border-radius: 14px 14px 4px 14px;
-  background: var(--ink);
-  color: #fff;
+  background: #f1f2f4;
+  color: var(--ink);
   font-size: 13.5px;
   line-height: 1.75;
   white-space: pre-wrap;
@@ -2787,6 +2915,41 @@
   color: var(--faint);
 }
 
+.project-explorer-row:hover .project-tree-more,
+.project-explorer-row:focus-within .project-tree-more {
+  opacity: 1;
+  background: var(--bg);
+}
+
+.project-explorer-row:focus-visible {
+  outline: 2px solid var(--blue-line);
+  outline-offset: -2px;
+}
+
+.project-explorer-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 6px 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(220, 38, 38, 0.08);
+  color: #b42318;
+  font-size: 11.5px;
+}
+
+.project-explorer-error button {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 11.5px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .folder-browser-backdrop {
   position: fixed;
   inset: 0;
@@ -3194,6 +3357,52 @@
   opacity: 0.5;
 }
 
+/* 「/」右侧的项目文件夹标签 */
+.rc-folder {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 180px;
+  height: 27px;
+  padding: 0 9px;
+  border: 1px solid var(--line-2, #e3e5e8);
+  border-radius: 999px;
+  background: var(--bg-2, #f7f8fa);
+  color: var(--text-2, #4b5563);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.rc-folder:hover {
+  border-color: var(--line-3, #cfd3d9);
+  color: var(--text, #1f2328);
+}
+
+.rc-folder svg {
+  flex: none;
+}
+
+.rc-folder-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .rc-folder {
+    justify-content: center;
+    width: 27px;
+    padding: 0;
+    border-color: transparent;
+    background: transparent;
+    color: var(--text-2, #6b7280);
+  }
+
+  .rc-folder-name {
+    display: none;
+  }
+}
+
 .rc-mode.is-danger {
   color: var(--red, #dc2626);
 }
@@ -3429,8 +3638,33 @@
   font-size: 11.5px;
 }
 
+/* 首页输入框：白底、浅蓝描边、大圆角，聚焦时描边转为主蓝 */
 .rc-home .rc-box {
-  box-shadow: none;
+  border: 1px solid #b9d2ec;
+  border-radius: 18px;
+  background: var(--bg, #fff);
+  padding: 14px 16px 10px;
+  box-shadow: 0 4px 18px rgba(20, 80, 140, 0.06);
+}
+
+.rc-home .rc-box:focus-within {
+  border-color: var(--blue, #14508C);
+  box-shadow: 0 6px 24px rgba(20, 80, 140, 0.12);
+}
+
+.rc-home textarea {
+  min-height: 76px;
+  font-size: 15px;
+}
+
+.rc-home .rc-send {
+  width: 34px;
+  height: 34px;
+}
+
+.rc-home .rc-send:disabled {
+  background: #cfe1f3;
+  color: #fff;
 }
 
 
@@ -3441,6 +3675,22 @@
 
   .rc-hint {
     display: none;
+  }
+
+  .rh-hero {
+    margin-bottom: 20px;
+  }
+
+  .rh-title {
+    font-size: 26px;
+  }
+
+  .rh-examples {
+    padding: 12px 14px 4px;
+  }
+
+  .rh-example {
+    font-size: 12.5px;
   }
 
   .rc textarea {

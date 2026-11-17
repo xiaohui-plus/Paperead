@@ -3,15 +3,19 @@ import {
   BookOpen,
   BookOpenText,
   Brain,
+  Coffee,
   Compass,
   Cpu,
   FileSearch,
   FileText,
+  Flower2,
   FolderPlus,
+  Heart,
   LayoutTemplate,
   Lightbulb,
   Network,
   Settings2,
+  Star,
   Wrench,
 } from 'lucide-react'
 import type { LucideProps } from 'lucide-react'
@@ -456,3 +460,27 @@ export const IconWrench = lucideIcon(Wrench)
 export const IconFileSearch = lucideIcon(FileSearch)
 /** 文档产物 */
 export const IconFileText = lucideIcon(FileText)
+/** 打赏：心意 */
+export const IconReward = lucideIcon(Heart)
+/** 打赏：送一朵小花 */
+export const IconFlower = lucideIcon(Flower2)
+/** 打赏：请喝咖啡 */
+export const IconCoffee = lucideIcon(Coffee)
+/** 打赏：给仓库一颗星 */
+export const IconStar = lucideIcon(Star)
+
+export function IconPlug() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.9"
+    >
+      <path d="M9 3v6M15 3v6M7 9h10v3a5 5 0 0 1-10 0V9Z" />
+      <path d="M12 17v4" />
+    </svg>
+  )
+}

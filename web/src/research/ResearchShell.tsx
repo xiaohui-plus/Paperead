@@ -24,6 +24,7 @@ interface Props {
     projects: ProjectSummary[],
     start: StartHandler,
     createProject: CreateProjectHandler,
+    openSettings: () => void,
   ) => ReactNode
 }
 
@@ -175,7 +176,7 @@ export function ResearchShell({
             project: result.project ?? undefined,
             error: result.error,
           }
-        })}
+        }, () => setSettingsOpen(true))}
       </main>
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <CreateProjectDialog

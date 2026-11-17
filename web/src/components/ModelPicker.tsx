@@ -30,10 +30,10 @@ export function ModelPicker({ models, current, onChoose, onManage, up }: Props) 
       <button
         className="model-select is-empty"
         onClick={onManage}
-        title={onManage ? '去设置里配置回答模型' : '还没有可用的回答模型'}
+        title={onManage ? '去设置里配置大模型' : '还没有可用的回答模型'}
         disabled={!onManage}
       >
-        <IconCpu /> 配置文件模型
+        <IconCpu /> 配置大模型
       </button>
     )
   }

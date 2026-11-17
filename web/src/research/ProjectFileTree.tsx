@@ -10,7 +10,7 @@ import {
   IconClipboard,
   IconCopy,
   IconEdit,
-  IconFileText,
+
   IconFolder,
   IconPlus,
   IconRefresh,
@@ -47,7 +47,7 @@ type Clipboard = { ids: string[]; mode: 'cut' | 'copy' }
 
 function iconFor(item: ProjectFile) {
   if (item.kind === 'folder') return <IconFolder />
-  if (item.kind === 'artifact') return <IconFileText />
+
   return <FileTypeIcon name={item.name || item.path} mime={item.mime} />
 }
 
