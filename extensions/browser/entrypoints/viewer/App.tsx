@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { PointerEvent as ReactPointerEvent } from 'react'
 import { browser } from 'wxt/browser'
 import * as pdfjsLib from 'pdfjs-dist'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
@@ -6,6 +7,7 @@ import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import PdfViewer from './PdfViewer'
 import {
   askSelection,
+  createReadingAnnotation,
   discoverBase,
   getPaper,
   ingest,
@@ -71,8 +73,20 @@ export default function App() {
   const [petOpen, setPetOpen] = useState(false)
   const [petMsg, setPetMsg] = useState('')
   const [petBusy, setPetBusy] = useState(false)
+  const [page, setPage] = useState(1)
+  const [petPos, setPetPos] = useState<{ left: number; top: number } | null>(null)
   const bytesRef = useRef<Uint8Array | null>(null)
   const ingestedRef = useRef(false)
+  const petWrapRef = useRef<HTMLDivElement>(null)
+  const petDrag = useRef<{
+    pointerId: number
+    startX: number
+    startY: number
+    left: number
+    top: number
+    moved: boolean
+  } | null>(null)
+  const petSuppressClick = useRef(false)
 
   const load = useCallback(async () => {
     if (!fileUrl) {
@@ -83,14 +97,14 @@ export default function App() {
     setPhase('loading')
     setError('')
     try {
-      const origin = `${new URL(fileUrl).origin}/*`
-      const granted = await browser.permissions.contains({ origins: [origin] })
-      if (!granted) {
-        setPhase('permission')
-        return
-      }
+      // manifest 已声明全站 host 权限，不再用 permissions.contains 预判：
+      // 某些浏览器会把 contains 判成 false，导致直接掉进权限死页。
       const response = await fetch(fileUrl, { credentials: 'include' })
       if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          setPhase('permission')
+          return
+        }
         throw new Error(`无法读取 PDF（HTTP ${response.status}），可能需要登录该站点`)
       }
       const bytes = new Uint8Array(await response.arrayBuffer())
@@ -117,21 +131,6 @@ export default function App() {
       .catch(() => setModelLabel(''))
   }, [])
 
-  const requestPermission = useCallback(async () => {
-    try {
-      const origin = `${new URL(fileUrl).origin}/*`
-      const granted = await browser.permissions.request({ origins: [origin] })
-      if (granted) {
-        await load()
-      } else {
-        setError('未授予该站点的读取权限，无法获取 PDF')
-        setPhase('error')
-      }
-    } catch {
-      setError('申请站点权限失败，请重试')
-      setPhase('error')
-    }
-  }, [fileUrl, load])
 
   const runIngest = useCallback(async () => {
     const bytes = bytesRef.current
@@ -238,19 +237,86 @@ export default function App() {
     return () => document.removeEventListener('mouseup', onMouseUp)
   }, [])
 
-  const openPaper = useCallback(async () => {
-    if (!paperId) return
-    if (readerUrl) {
-      window.open(readerUrl, '_blank', 'noopener')
-      return
-    }
-    const base = await discoverBase()
-    window.open(`${base}/?p=${paperId}`, '_blank', 'noopener')
-  }, [paperId, readerUrl])
-
   const openReaderTab = useCallback(() => {
     if (readerUrl) window.open(readerUrl, '_blank', 'noopener')
   }, [readerUrl])
+
+  // ── 灵宠拖动：位置写 localStorage，拖动超过 4px 抑制这次点击 ──
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('paperead.pet.viewer')
+      if (!raw) return
+      const saved = JSON.parse(raw) as { left?: number; top?: number }
+      if (typeof saved.left === 'number' && typeof saved.top === 'number') {
+        setPetPos({ left: saved.left, top: saved.top })
+      }
+    } catch {
+      // 本地存储不可用时使用默认右下角
+    }
+  }, [])
+
+  useEffect(() => {
+    const onMove = (event: PointerEvent) => {
+      const drag = petDrag.current
+      if (!drag || event.pointerId !== drag.pointerId) return
+      const dx = event.clientX - drag.startX
+      const dy = event.clientY - drag.startY
+      if (!drag.moved && Math.hypot(dx, dy) < 4) return
+      drag.moved = true
+      setPetPos({
+        left: Math.min(Math.max(6, drag.left + dx), Math.max(6, window.innerWidth - 54)),
+        top: Math.min(Math.max(6, drag.top + dy), Math.max(6, window.innerHeight - 54)),
+      })
+    }
+    const onUp = (event: PointerEvent) => {
+      const drag = petDrag.current
+      if (!drag || event.pointerId !== drag.pointerId) return
+      petDrag.current = null
+      if (!drag.moved) return
+      petSuppressClick.current = true
+      const left = Math.min(
+        Math.max(6, drag.left + (event.clientX - drag.startX)),
+        Math.max(6, window.innerWidth - 54),
+      )
+      const top = Math.min(
+        Math.max(6, drag.top + (event.clientY - drag.startY)),
+        Math.max(6, window.innerHeight - 54),
+      )
+      try {
+        localStorage.setItem('paperead.pet.viewer', JSON.stringify({ left, top }))
+      } catch {
+        // 只保留本次位置
+      }
+    }
+    document.addEventListener('pointermove', onMove)
+    document.addEventListener('pointerup', onUp)
+    document.addEventListener('pointercancel', onUp)
+    return () => {
+      document.removeEventListener('pointermove', onMove)
+      document.removeEventListener('pointerup', onUp)
+      document.removeEventListener('pointercancel', onUp)
+    }
+  }, [])
+
+  const onPetPointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) return
+    const rect = petWrapRef.current?.getBoundingClientRect()
+    if (!rect) return
+    petDrag.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      left: rect.left,
+      top: rect.top,
+      moved: false,
+    }
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId)
+    } catch {
+      // 不支持 pointer capture 时仍可在 document 上继续拖
+    }
+    event.preventDefault()
+  }
 
   const openAssistant = useCallback(async () => {
     setPetBusy(true)
@@ -316,6 +382,41 @@ export default function App() {
     }
   }, [selection, paperId, paperReady])
 
+  const highlight = useCallback(async () => {
+    if (!selection) return
+    if (!paperId) {
+      setPopover({
+        kind: 'ask',
+        title: '高亮',
+        body: '论文还在解析，完成后即可保存高亮。',
+        loading: false,
+      })
+      return
+    }
+    try {
+      await createReadingAnnotation(paperId, selection.text, '', '', page)
+      try {
+        // 先给当前选区一个即时视觉反馈；持久高亮在完整阅读页按批注渲染
+        document.execCommand('hiliteColor', false, 'rgba(255, 214, 102, 0.45)')
+      } catch {
+        // 浏览器不支持 execCommand 时只保存批注
+      }
+      setPopover({
+        kind: 'ask',
+        title: '高亮已保存',
+        body: '已写入论文批注栏，可在完整阅读里查看。',
+        loading: false,
+      })
+    } catch (cause) {
+      setPopover({
+        kind: 'ask',
+        title: '高亮失败',
+        body: cause instanceof Error ? cause.message : '请稍后重试',
+        loading: false,
+      })
+    }
+  }, [selection, paperId, page])
+
   const readerStatus = paperReady
     ? '完整阅读已就绪'
     : paperId
@@ -367,10 +468,16 @@ export default function App() {
 
       {phase === 'permission' && (
         <div className="center">
-          <h1>需要访问该站点的权限</h1>
-          <p>Paperead 只读取这一个 PDF，用于本地渲染、翻译和问答。</p>
-          <button className="button primary" onClick={() => void requestPermission()}>
-            允许读取并打开
+          <h1>这个 PDF 需要站点登录或验证</h1>
+          <p>
+            浏览器不允许扩展直接读取需要登录的 PDF。可以在浏览器里打开一次完成登录，
+            或下载后拖入 Paperead。
+          </p>
+          <button className="button primary" onClick={() => window.open(fileUrl, '_blank', 'noopener')}>
+            在浏览器中打开
+          </button>
+          <button className="button" onClick={() => void load()}>
+            重试
           </button>
         </div>
       )}
@@ -391,6 +498,7 @@ export default function App() {
           bytes={bytesRef.current}
           filename={filename}
           fileUrl={fileUrl}
+          onPageChange={setPage}
         />
       )}
 
@@ -435,6 +543,7 @@ export default function App() {
           style={{ left: selection.left, top: selection.top }}
           onMouseDown={(event) => event.preventDefault()}
         >
+          <button onClick={() => void highlight()}>高亮</button>
           <button onClick={() => void translate()}>翻译</button>
           <button onClick={() => void ask()}>提问</button>
         </div>
@@ -467,17 +576,46 @@ export default function App() {
         </div>
       )}
 
-      <div className={`pe-pet-wrap${petOpen ? ' open' : ''}`}>
+      <div
+        className={`pe-pet-wrap${petOpen ? ' open' : ''}`}
+        ref={petWrapRef}
+        style={
+          petPos
+            ? { left: petPos.left, top: petPos.top, right: 'auto', bottom: 'auto' }
+            : undefined
+        }
+      >
         <div className="pe-pet-panel" role="group" aria-label="Paperead 快捷操作">
           <button
             className="pe-act"
             type="button"
             disabled={!paperId}
-            onClick={() => void openPaper()}
+            onClick={() => setMode('reader')}
           >
-            {paperReady ? '打开 Paperead' : '正在解析…'}
+            使用 Paperead 在线阅读
           </button>
-          <button className="pe-act" type="button" disabled={petBusy} onClick={() => void openAssistant()}>
+          <button
+            className="pe-act"
+            type="button"
+            disabled={!readerUrl}
+            onClick={() => void openReaderTab()}
+          >
+            在 Paperead 本地阅读
+          </button>
+          <button
+            className="pe-act"
+            type="button"
+            disabled={!bytesRef.current || paperReady}
+            onClick={() => void runIngest()}
+          >
+            {paperReady ? '已保存到 Paperead' : '保存到 Paperead'}
+          </button>
+          <button
+            className="pe-act"
+            type="button"
+            disabled={petBusy}
+            onClick={() => void openAssistant()}
+          >
             打开阅读助手
           </button>
           {petMsg && <p className="pe-msg">{petMsg}</p>}
@@ -487,7 +625,14 @@ export default function App() {
           type="button"
           aria-label="Paperead 灵宠"
           aria-expanded={petOpen}
-          onClick={() => setPetOpen((value) => !value)}
+          onPointerDown={onPetPointerDown}
+          onClick={() => {
+            if (petSuppressClick.current) {
+              petSuppressClick.current = false
+              return
+            }
+            setPetOpen((value) => !value)
+          }}
         >
           <span className="pe-eye" />
           <span className="pe-eye" />

@@ -41,6 +41,30 @@ describe('extractMetadataInPage', () => {
     expect(meta.pdf_url).toBe('https://arxiv.org/pdf/2401.00001')
   })
 
+  it('derives arXiv pdf url from html and ar5iv pages', () => {
+    render('')
+
+    const html = extractMetadataInPage('https://arxiv.org/html/2401.00001v2')
+    expect(html.source_id).toBe('arxiv:2401.00001')
+    expect(html.pdf_url).toBe('https://arxiv.org/pdf/2401.00001')
+
+    const ar5iv = extractMetadataInPage('https://ar5iv.labs.arxiv.org/html/2401.00001')
+    expect(ar5iv.source_id).toBe('arxiv:2401.00001')
+    expect(ar5iv.pdf_url).toBe('https://arxiv.org/pdf/2401.00001')
+  })
+
+  it('detects OpenReview and ACL Anthology papers', () => {
+    render('')
+
+    const openreview = extractMetadataInPage('https://openreview.net/forum?id=abc123')
+    expect(openreview.source_id).toBe('openreview:abc123')
+    expect(openreview.pdf_url).toBe('https://openreview.net/pdf?id=abc123')
+
+    const acl = extractMetadataInPage('https://aclanthology.org/2024.acl-long.1/')
+    expect(acl.source_id).toBe('aclanthology:2024.acl-long.1')
+    expect(acl.pdf_url).toBe('https://aclanthology.org/2024.acl-long.1.pdf')
+  })
+
   it('reads JSON-LD scholarly article', () => {
     render(`
       <script type="application/ld+json">

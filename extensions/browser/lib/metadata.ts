@@ -39,9 +39,17 @@ export function extractMetadataInPage(href = location.href): PaperMetadata {
 
   const html = document.documentElement.innerHTML
 
-  const arxiv = href.match(
-    /arxiv\.org\/(?:abs|pdf)\/([0-9]{4}\.[0-9]{4,5})(?:v\d+)?/i,
-  )
+  const arxiv =
+    href.match(/arxiv\.org\/(?:abs|pdf|html)\/(\d{4}\.\d{4,5})(?:v\d+)?/i) ||
+    href.match(
+      /ar5iv(?:\.labs\.arxiv\.org|labs\.arxiv\.org|\.org)\/(?:abs|html)\/(\d{4}\.\d{4,5})(?:v\d+)?/i,
+    )
+  const arxivId = arxiv ? arxiv[1] : ''
+  const openreviewId = /openreview\.net/i.test(href)
+    ? new URL(href, location.href).searchParams.get('id') || ''
+    : ''
+  const aclId =
+    (href.match(/aclanthology\.org\/([A-Za-z0-9._-]+)\/?$/i) || [])[1] || ''
   const pubmed = href.match(/pubmed\.ncbi\.nlm\.nih\.gov\/(\d+)/i)
   const pmc = href.match(/pmc\.ncbi\.nlm\.nih\.gov\/articles\/(PMC\d+)/i)
 
@@ -51,9 +59,15 @@ export function extractMetadataInPage(href = location.href): PaperMetadata {
 
   let source = 'web'
   let sourceId = ''
-  if (arxiv) {
+  if (arxivId) {
     source = 'arxiv'
-    sourceId = `arxiv:${arxiv[1]}`
+    sourceId = `arxiv:${arxivId}`
+  } else if (openreviewId) {
+    source = 'openreview'
+    sourceId = `openreview:${openreviewId}`
+  } else if (aclId) {
+    source = 'acl'
+    sourceId = `aclanthology:${aclId}`
   } else if (pubmed) {
     source = 'pubmed'
     sourceId = `pubmed:${pubmed[1]}`
@@ -128,7 +142,9 @@ export function extractMetadataInPage(href = location.href): PaperMetadata {
     pdf_url:
       meta('citation_pdf_url') ||
       pdfLink?.href ||
-      (arxiv ? `https://arxiv.org/pdf/${arxiv[1]}` : '') ||
+      (arxivId ? `https://arxiv.org/pdf/${arxivId}` : '') ||
+      (openreviewId ? `https://openreview.net/pdf?id=${openreviewId}` : '') ||
+      (aclId ? `https://aclanthology.org/${aclId}.pdf` : '') ||
       anchor?.href ||
       '',
   }

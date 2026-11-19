@@ -490,3 +490,73 @@ def test_rect_with_adjacent_figure_caption_is_figure_region():
     hit = _rect_is_figure_region(page, pymupdf.Rect(90, 90, 510, 400), [cap], 1)
     doc.close()
     assert hit is True
+
+def test_page_wide_table_box_over_body_is_rejected(tmp_path):
+    """整页伪表框（发布包缺 pymupdf.layout 时的 find_tables 结果）要判成正文。"""
+    from paperead.layout import _collect_lines, _table_rect_covers_body_text
+
+    def draw(page):
+        for i in range(12):
+            page.insert_text(
+                (108, 90 + i * 14),
+                "A long body sentence used to verify that a full page table box "
+                "is rejected as prose text",
+                fontsize=10,
+            )
+
+    pdf = _text_pdf(tmp_path / "body.pdf", [draw])
+    doc = pymupdf.open(str(pdf))
+    try:
+        lines = _collect_lines(doc)
+    finally:
+        doc.close()
+    assert _table_rect_covers_body_text(
+        lines, 1, pymupdf.Rect(108, 28.56, 504, 730.72), 792, 612 * 792
+    ) is True
+
+
+def test_page_wide_real_table_box_is_kept(tmp_path):
+    """真正的整页大表以短单元格行为主，不能被正文守卫误杀。"""
+    from paperead.layout import _collect_lines, _table_rect_covers_body_text
+
+    def draw(page):
+        page.draw_rect(pymupdf.Rect(108, 60, 504, 600), color=(0, 0, 0))
+        for i in range(12):
+            page.insert_text((116, 84 + i * 20), f"Row {i + 1} 12.3 45.6", fontsize=9)
+
+    pdf = _text_pdf(tmp_path / "table.pdf", [draw])
+    doc = pymupdf.open(str(pdf))
+    try:
+        lines = _collect_lines(doc)
+    finally:
+        doc.close()
+    assert _table_rect_covers_body_text(
+        lines, 1, pymupdf.Rect(108, 28.56, 504, 730.72), 792, 612 * 792
+    ) is False
+
+
+def test_fake_full_page_table_box_does_not_split_body(tmp_path, monkeypatch):
+    """误判整页表框被丢弃后，正文仍合并成段落而不是一行一块。"""
+    from paperead import layout
+
+    def draw(page):
+        for i in range(12):
+            page.insert_text(
+                (108, 90 + i * 14),
+                "A long body sentence used to verify that a full page table box "
+                "is rejected as prose text",
+                fontsize=10,
+            )
+
+    pdf = _text_pdf(tmp_path / "doc.pdf", [draw])
+
+    def fake_tables(doc):
+        return {1: [(pymupdf.Rect(108, 28.56, 504, 730.72), "<table></table>", 3)]}
+
+    monkeypatch.setattr(layout, "_find_page_tables", fake_tables)
+    parsed = layout.parse_pdf(
+        pdf, paper_id="fakebox", figure_dir=None, with_figures=False
+    )
+    paras = [b for b in parsed.blocks if b.kind == "para"]
+    assert len(paras) <= 2
+    assert any(len(b.text) > 200 for b in paras)

@@ -7,7 +7,9 @@ import {
   type PairingCode,
   type PluginInfo,
 } from '../lib/plugins'
+import { copyText } from '../lib/browserExtension'
 import { ExtensionInstaller } from './ExtensionInstaller'
+import { PluginNotice } from './PluginNotice'
 
 function formatTime(value: number) {
   if (!value) return '—'
@@ -23,6 +25,7 @@ export function PluginSettingsPanel() {
   const [loading, setLoading] = useState(false)
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
+  const [copiedCode, setCopiedCode] = useState(false)
 
   const refresh = useCallback(async () => {
     try {
@@ -103,6 +106,7 @@ export function PluginSettingsPanel() {
   const generate = async () => {
     setLoading(true)
     setNotice('')
+    setCopiedCode(false)
     setWaitingExpires(0)
     try {
       const code = await createPairingCode()
@@ -113,6 +117,11 @@ export function PluginSettingsPanel() {
     } finally {
       setLoading(false)
     }
+  }
+
+  const copyPairingCode = async () => {
+    if (!pairing) return
+    setCopiedCode(await copyText(pairing.code))
   }
 
   const remove = async (plugin: PluginInfo) => {
@@ -150,33 +159,52 @@ export function PluginSettingsPanel() {
           <span>{waitingExpires ? '等待中' : plugins.length ? '已就绪' : '未连接'}</span>
         </div>
         {waitingExpires ? (
-          <div className="plugin-pair-box">
-            <b className="plugin-waiting">等待扩展连接…</b>
-            <span>
-              装好扩展后会在后台自动连接，无需打开弹窗；剩余 {secondsLeft} 秒
-            </span>
-            <button className="link-btn" onClick={() => setWaitingExpires(0)}>
-              取消
-            </button>
-          </div>
+          <PluginNotice
+            tone="busy"
+            title="等待扩展连接"
+            action={
+              <button className="link-btn" onClick={() => setWaitingExpires(0)}>
+                取消
+              </button>
+            }
+          >
+            装好扩展后会在后台自动连接，无需打开弹窗；剩余 {secondsLeft} 秒。
+          </PluginNotice>
         ) : (
           <div className="plugin-actions">
             <button className="btn primary" onClick={() => void startWait()} disabled={loading}>
               {loading ? '准备中…' : '连接浏览器插件'}
             </button>
-            <span className="plugin-hint">装完扩展后点这里，扩展会自动认领；也可以直接等它自己连上。</span>
+            <span className="plugin-hint">
+              装完扩展后点这里，扩展会自动认领；也可以直接等它自己连上。
+            </span>
           </div>
         )}
-        {notice && <p className="plugin-notice">{notice}</p>}
-        {error && <p className="plugin-error">{error}</p>}
+        {notice && <PluginNotice tone="ok" title={notice} />}
+        {error && (
+          <PluginNotice tone="error" title="操作失败">
+            {error}
+          </PluginNotice>
+        )}
 
         <details className="plugin-manual">
-          <summary>自动连接失败？用 6 位配对码</summary>
+          <summary>自动连接失败？使用备用配对码</summary>
           {pairing ? (
-            <div className="plugin-pair-box">
-              <b className="plugin-pair-code">{pairing.code}</b>
-              <span>在扩展侧边栏的配对入口输入这 6 位数字，剩余 {secondsLeft} 秒</span>
-            </div>
+            <PluginNotice
+              tone="info"
+              title="备用配对码"
+              action={
+                <button className="link-btn" onClick={() => void copyPairingCode()}>
+                  {copiedCode ? '已复制' : '复制配对码'}
+                </button>
+              }
+            >
+              <span className="plugin-pair-code">{pairing.code}</span>
+              <span>
+                扩展通常会自动认领，不需要手动输入；如果没连上，关掉再重新打开一次扩展侧边栏。
+                剩余 {secondsLeft} 秒。
+              </span>
+            </PluginNotice>
           ) : (
             <button className="link-btn" onClick={() => void generate()} disabled={loading}>
               {loading ? '生成中…' : '生成 6 位配对码'}

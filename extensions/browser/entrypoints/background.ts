@@ -325,6 +325,21 @@ export default defineBackground(() => {
         .catch((error) => sendResponse({ error: String(error.message || error) }))
       return true
     }
+    // 灵宠「在 Paperead 本地阅读」：先确保入库，再返回本地网页阅读版地址
+    if (payload.type === 'ensure-paper-url') {
+      const tabId = sender.tab?.id
+      if (typeof tabId !== 'number') {
+        sendResponse({ error: '没有找到当前标签页' })
+        return false
+      }
+      ensurePaper(tabId)
+        .then(async (paper) => {
+          const full = await getPaper(paper.id).catch(() => null)
+          sendResponse({ paper, openUrl: full?.open_url || '' })
+        })
+        .catch((error) => sendResponse({ error: String(error.message || error) }))
+      return true
+    }
     // 侧边栏只能在用户手势里打开；失败时让灵宠提示点工具栏图标
     if (payload.type === 'open-assistant') {
       const tabId = sender.tab?.id

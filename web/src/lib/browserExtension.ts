@@ -25,10 +25,47 @@ function invoke(): TauriInternals['invoke'] | undefined {
   return (window as any).__TAURI_INTERNALS__?.invoke
 }
 
+const DEV_PREVIEW =
+  import.meta.env.DEV &&
+  typeof window !== 'undefined' &&
+  new URLSearchParams(window.location.search).get('desktop') === '1'
+
+/** 开发预览：没有 Tauri 桥时用假数据把安装向导的完整分页跑起来。 */
+function previewSetup(): ExtensionSetup {
+  return {
+    version: 'preview',
+    chromium_dir: 'C:\\Users\\Public\\Paperead\\browser-extension\\chrome-mv3',
+    firefox_dir: 'C:\\Users\\Public\\Paperead\\browser-extension\\firefox-mv2',
+    browsers: [
+      {
+        id: 'chrome',
+        name: 'Google Chrome',
+        family: 'chromium',
+        path: '',
+        extensions_url: 'chrome://extensions/',
+      },
+      {
+        id: 'edge',
+        name: 'Microsoft Edge',
+        family: 'chromium',
+        path: '',
+        extensions_url: 'edge://extensions/',
+      },
+      {
+        id: 'firefox',
+        name: 'Firefox',
+        family: 'firefox',
+        path: '',
+        extensions_url: 'about:debugging#/runtime/this-firefox',
+      },
+    ],
+  }
+}
+
 /** 读取本机浏览器与已释放的扩展目录；网页端返回 null。 */
 export async function loadExtensionSetup(): Promise<ExtensionSetup | null> {
   const call = invoke()
-  if (!call) return null
+  if (!call) return DEV_PREVIEW ? previewSetup() : null
   try {
     const raw = (await call('browser_extension_setup')) as ExtensionSetup
     return {
@@ -46,14 +83,20 @@ export async function loadExtensionSetup(): Promise<ExtensionSetup | null> {
 /** 用指定浏览器打开它的扩展管理页。 */
 export async function openBrowserExtensions(id: string): Promise<void> {
   const call = invoke()
-  if (!call) throw new Error('网页版无法直接打开浏览器扩展页，请手动打开扩展管理页')
+  if (!call) {
+    if (DEV_PREVIEW) return
+    throw new Error('网页版无法直接打开浏览器扩展页，请手动打开扩展管理页')
+  }
   await call('open_browser_extensions', { id })
 }
 
 /** 在资源管理器里打开扩展目录，方便用户在选择框里直接定位。 */
 export async function openExtensionFolder(family: string): Promise<void> {
   const call = invoke()
-  if (!call) throw new Error('网页版无法打开本地目录')
+  if (!call) {
+    if (DEV_PREVIEW) return
+    throw new Error('网页版无法打开本地目录')
+  }
   await call('open_extension_folder', { family })
 }
 

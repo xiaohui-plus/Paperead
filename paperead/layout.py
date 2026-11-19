@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
 from bisect import bisect_left
 from collections import Counter
@@ -57,6 +59,23 @@ def _force_accurate_table_bboxes() -> bool:
 
 
 _ACCURATE_TABLE_BBOXES = _force_accurate_table_bboxes()
+
+# 解析中间量诊断：PAPEREAD_DIAG 指向文件时，parse_pdf 结束前把行几何、
+# 栏归属、表格区与分块结果写到该 JSON。发布包与源码解析结果不一致时，
+# 靠这份数据定位第一个分叉的量，而不是逐条猜判据。默认关闭。
+_DIAG_PATH = os.environ.get("PAPEREAD_DIAG", "")
+
+
+def _diag_dump(payload: dict) -> None:
+    if not _DIAG_PATH:
+        return
+    try:
+        out = Path(_DIAG_PATH)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        # 诊断本身不能影响正常解析
+        pass
 
 # ── 文本清洗 ───────────────────────────────────────────────────────────
 
@@ -2940,6 +2959,48 @@ def _looks_like_text_table(html: str, cols: int) -> bool:
     return avg > 25
 
 
+def _table_rect_covers_body_text(
+    lines: list[Line],
+    page_no: int,
+    rect: pymupdf.Rect,
+    page_height: float,
+    page_area: float,
+) -> bool:
+    """整页大框是否其实是正文被 find_tables 误判成表。
+
+    发布包缺少 ``pymupdf.layout`` 时 find_tables 会退回旧算法，把整页正文
+    框成一张覆盖一半以上页面的「表」；建块阶段对表格区逐行成块，于是整页
+    段落被拆成一行一块（表现为图注之后所有文字一行一段）。合法整页大表以
+    短单元格行为主，正文页以长句行为主，用长句行的数量与占比区分，避免把
+    真正的整页表格误杀。
+    """
+    big = (
+        rect.height >= page_height * 0.5
+        or rect.width * rect.height >= page_area * 0.45
+    )
+    if not big:
+        return False
+    inside = [
+        ln for ln in lines
+        if ln.page == page_no
+        and not ln.is_margin
+        and rect.x0 - 2 <= ln.cx <= rect.x1 + 2
+        and rect.y0 - 2 <= (ln.y0 + ln.y1) / 2 <= rect.y1 + 2
+    ]
+    if len(inside) < 8:
+        return False
+    # 表格特征：过半是短单元格行，不按正文处理
+    short = sum(1 for ln in inside if len(ln.text.strip()) < 40)
+    if short >= len(inside) * 0.5:
+        return False
+    prose = [
+        ln for ln in inside
+        if len(ln.text.strip()) >= 80 and not _looks_like_data_row(ln.text)
+    ]
+    chars = sum(len(ln.text.strip()) for ln in inside)
+    return len(prose) >= 6 and len(prose) >= len(inside) * 0.4 and chars >= 600
+
+
 def _table_swallows_page(page_no: int, rect: pymupdf.Rect, blocks: list[Block]) -> bool:
     """表格区域若覆盖本页大部分正文，说明是 find_tables 把正文误判成表。
 
@@ -4707,6 +4768,12 @@ def parse_pdf(
             rects = [
                 rect for rect, _html, _cols in items
                 if rect.width * rect.height <= page_area * 0.6
+                # find_tables 在缺少 pymupdf.layout 的发布包里会退回旧算法，
+                # 输出覆盖整页的伪表框；建块前必须按框内文本形态否决，否则
+                # 整页正文会被逐行成块。
+                and not _table_rect_covers_body_text(
+                    lines, page_no, rect, page.rect.height, page_area
+                )
             ]
             if rects:
                 table_rects[page_no] = rects
@@ -4717,6 +4784,42 @@ def parse_pdf(
             ordered, body_size, table_rects, page_regions, front
         )
         _classify(blocks, body_size, page_height, front)
+        if _DIAG_PATH:
+            diag_local = _local_edges(ordered)
+            _diag_dump({
+                "body_size": body_size,
+                "has_gutter": has_gutter,
+                "gutters": {str(k): v for k, v in gutters.items()},
+                "tables": {
+                    str(k): [
+                        [round(r.x0, 2), round(r.y0, 2), round(r.x1, 2), round(r.y1, 2)]
+                        for r in v
+                    ]
+                    for k, v in table_rects.items()
+                },
+                "lines": [
+                    {
+                        "page": ln.page, "col": ln.col,
+                        "x0": round(ln.x0, 2), "x1": round(ln.x1, 2),
+                        "y0": round(ln.y0, 2), "y1": round(ln.y1, 2),
+                        "size": round(ln.size, 2), "bold": ln.bold, "math": ln.math,
+                        "margin": ln.is_margin, "text": ln.text[:80],
+                    }
+                    for ln in ordered
+                ],
+                "edges": [
+                    [round(e[0], 2), round(e[1], 2)] if e else None
+                    for e in (diag_local.get(id(ln)) for ln in ordered)
+                ],
+                "blocks": [
+                    {
+                        "page": b.page, "kind": b.kind, "len": len(b.text),
+                        "bbox": [round(v, 2) for v in b.bbox],
+                        "text": b.text[:80],
+                    }
+                    for b in blocks
+                ],
+            })
         blocks = _merge_front_matter_cards(blocks, front, page_width)
         blocks = _attach_equation_numbers(blocks, doc)
         blocks = _merge_affiliations(blocks)

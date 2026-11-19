@@ -26,8 +26,8 @@ function markShown() {
 /**
  * 首次启动的浏览器插件安装向导。
  *
- * 安装包已经内置了扩展，用户不需要解压或去仓库下载；这里负责在检测到
- * 本机浏览器且尚未连接插件时弹一次，把「选浏览器 → 打开扩展页」做到一键。
+ * 安装包已经内置了扩展，用户不需要解压或去仓库下载；向导按「选浏览器 →
+ * 加载扩展 → 完成连接」三页展示，避免把状态、步骤、排查说明堆在一张长卡片里。
  */
 export function ExtensionOnboarding() {
   const [open, setOpen] = useState(false)
@@ -99,8 +99,8 @@ export function ExtensionOnboarding() {
           <div>
             <h2 id="ext-wizard-title">装一个浏览器插件</h2>
             <p>
-              装好后，在网页上看到论文或 PDF 可以直接存进 Paperead，读的时候也能顺手加批注。
-              扩展已经随安装包放在电脑里，不用下载或解压。
+              三步装好：选浏览器 → 加载扩展 → 自动连接。扩展已经随安装包放在电脑里，
+              不用下载或解压，随时可以在「设置 → 插件与连接」里重新打开。
             </p>
           </div>
           <button className="icon-btn" onClick={dismiss} title="关闭" aria-label="关闭">
@@ -111,21 +111,23 @@ export function ExtensionOnboarding() {
         <ExtensionInstaller
           variant="onboarding"
           connected={connected}
+          onDone={dismiss}
+          initialPage={previewPage()}
           onStartWait={() => {
             void startPairingWait().catch(() => undefined)
           }}
           onRefreshConnection={() => void refresh()}
         />
-
-        <div className="ext-wizard-actions">
-          <button className="btn primary" onClick={dismiss}>
-            {connected > 0 ? '完成' : '稍后再说'}
-          </button>
-          <span>也可以随时在「设置 → 插件与连接」里重新安装。</span>
-        </div>
       </div>
     </div>
   )
+}
+
+/** 开发预览：?page=1/2 直接打开指定分页，生产构建会被静态替换为 0。 */
+function previewPage(): number {
+  if (!import.meta.env.DEV) return 0
+  const value = Number(new URLSearchParams(window.location.search).get('page') || 0)
+  return Number.isFinite(value) ? Math.max(0, Math.min(2, Math.trunc(value))) : 0
 }
 
 /** 新手教程选择卡还在屏幕上时先等它关掉，避免两个弹层叠在一起。 */

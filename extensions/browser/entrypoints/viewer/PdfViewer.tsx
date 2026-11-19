@@ -10,6 +10,7 @@ interface Props {
   bytes: Uint8Array | null
   filename: string
   fileUrl: string
+  onPageChange?: (page: number) => void
 }
 
 const clamp = (value: number, min: number, max: number) =>
@@ -158,7 +159,7 @@ function Page({
   )
 }
 
-export default function PdfViewer({ doc, bytes, filename, fileUrl }: Props) {
+export default function PdfViewer({ doc, bytes, filename, fileUrl, onPageChange }: Props) {
   const [scale, setScale] = useState(1)
   const [fitWidth, setFitWidth] = useState(true)
   const [rotation, setRotation] = useState(0)
@@ -234,6 +235,10 @@ export default function PdfViewer({ doc, bytes, filename, fileUrl }: Props) {
   useEffect(() => {
     setPageInput(String(page))
   }, [page])
+
+  useEffect(() => {
+    onPageChange?.(page)
+  }, [page, onPageChange])
 
   useEffect(() => {
     if (restoreTo.current == null) return

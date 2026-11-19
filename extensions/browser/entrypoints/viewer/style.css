@@ -164,6 +164,7 @@ body {
   border-radius: 8px;
   box-shadow: 0 8px 24px rgba(17, 24, 39, 0.16);
   transform: translate(-50%, -100%);
+  white-space: nowrap;
 }
 
 .selbar button {
@@ -185,6 +186,7 @@ body {
   position: fixed;
   z-index: 30;
   width: 340px;
+  max-width: calc(100vw - 24px);
   max-height: 320px;
   overflow: auto;
   padding: 14px;
@@ -245,9 +247,14 @@ body {
   align-items: center;
   justify-content: center;
   gap: 7px;
-  cursor: pointer;
+  cursor: grab;
+  touch-action: none;
   animation: pe-breathe 4s ease-in-out infinite;
   transition: transform 0.16s ease;
+}
+
+.pe-pet:active {
+  cursor: grabbing;
 }
 
 .pe-pet:hover {
@@ -275,8 +282,8 @@ body {
 }
 
 .pe-pet-panel {
-  width: 190px;
-  margin-bottom: 10px;
+  width: 220px;
+  margin-bottom: 4px;
   padding: 10px;
   border-radius: 12px;
   background: #1f2328;
