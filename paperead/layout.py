@@ -677,6 +677,253 @@ def _caption_lines(lines: list[Line]) -> set[int]:
     return skip
 
 
+_ABSTRACT_HEAD_RE = re.compile(r"^\s*(?:Abstract|ABSTRACT|摘\s*要)\b")
+_KEYWORDS_HEAD_RE = re.compile(
+    r"^\s*(?:Keywords?|KEY\s*WORDS|Index\s+Terms|关\s*键\s*词)\b", re.IGNORECASE
+)
+_INTRO_HEAD_RE = re.compile(
+    r"^\s*(?:(?:\d+|[IVXLC]+)\.?\s+)?(?:Introduction|INTRODUCTION|引\s*言|绪\s*论)\b"
+)
+# 作者姓名前的编号/符号：1st / 2nd / 3 / * / †。IEEE 用 1st/2nd，其它期刊用
+# 上标数字或符号，统一剥掉后再判断姓名形态。
+_AUTHOR_PREFIX_RE = re.compile(
+    r"^\s*(?:\d{1,2}(?:st|nd|rd|th)|[*†‡§¶#]|\d+)\s*", re.IGNORECASE
+)
+# 国名/常见国家词不是作者姓名。地名不可能穷举，但配合「卡片首行 + 至少
+# 两个词」的约束，足以挡住 "Changsha, China" 这类地址行。
+_PLACE_RE = re.compile(
+    r"\b(?:China|USA|U\.S\.A|UK|United\s+States|Japan|Germany|France|Canada|"
+    r"Australia|India|Korea|Singapore|Italy|Spain|Netherlands|Brazil)\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass
+class FrontMatter:
+    """首页前置区（标题/作者/摘要/关键词）的版面范围。
+
+    首页不是「单栏或双栏」二选一：常见版式是**通栏标题 + 三列作者卡片 +
+    左栏摘要 + 右栏正文**同时存在。用正文的 gutter 去切前置区，会把中间
+    那一列作者当成「跨栏锚点」，作者随之被排到摘要甚至 Introduction 之后。
+    这里把前置区、摘要、关键词的 y/x 范围显式记下来，阅读顺序、建块与
+    分类三处共用同一份判断，不再各自猜。
+    """
+
+    page: int = 0
+    head_end: float = 0.0
+    abstract: tuple[float, float] | None = None
+    abstract_col: int = 0
+    # 通栏摘要的 x 范围。期刊页边的 "Check for updates" / "Article" 等
+    # 标记与摘要同 y 但不属于摘要，靠 x 重叠区分。
+    abstract_x: tuple[float, float] | None = None
+    keywords: tuple[float, float] | None = None
+    keywords_col: int = 0
+
+    def in_head(self, bbox: tuple[float, float, float, float]) -> bool:
+        # 左右栏同一行的 y0 常有 0.5~1pt 的差（Agri-SAGE 右栏正文比左栏
+        # Abstract 高 0.7pt）。留 2pt 容差，免把右栏正文首行算进作者区。
+        return self.head_end > 0 and bbox[1] < self.head_end - 2.0
+
+    def in_abstract(self, ln: Line) -> bool:
+        if self.abstract is None:
+            return False
+        y0, y1 = self.abstract
+        if not (y0 - 0.5 <= ln.y0 < y1):
+            return False
+        if self.abstract_col >= 0 and ln.col not in (self.abstract_col, -1):
+            return False
+        if self.abstract_col < 0 and self.abstract_x is not None:
+            ax0, ax1 = self.abstract_x
+            overlap = min(ln.x1, ax1) - max(ln.x0, ax0)
+            if overlap < 0.5 * max(ln.width, 1.0):
+                return False
+        return True
+
+    def is_abstract_head(self, ln: Line) -> bool:
+        return (
+            self.abstract is not None
+            and abs(ln.y0 - self.abstract[0]) < 1.0
+            and _ABSTRACT_HEAD_RE.match(ln.text) is not None
+        )
+
+    def in_keywords(self, ln: Line) -> bool:
+        if self.keywords is None:
+            return False
+        y0, y1 = self.keywords
+        return (
+            y0 - 0.5 <= ln.y0 < y1
+            and (self.keywords_col < 0 or ln.col in (self.keywords_col, -1))
+        )
+
+
+def _first_body_line_y(
+    lines: list[Line], body_size: float, page_width: float
+) -> float:
+    """没有 Abstract/Introduction 标记时，用第一段正文判定前置区结束。
+
+    只认「够长 + 正文号字号 + 写满一栏」的连续行，避免把作者卡片的学校、
+    邮箱或图注当成正文起点。作者行（含一长串逗号分隔的姓名）必须排除，
+    否则 Nature 这类「标题下方直接是摘要」的版式会把作者区划到正文里。
+    """
+    for ln in sorted(lines, key=lambda l: (l.y0, l.x0)):
+        text = ln.text.strip()
+        if len(text) < 70 or ln.width < page_width * 0.32:
+            continue
+        if body_size > 0 and not (body_size * 0.85 <= ln.size <= body_size * 1.35):
+            continue
+        if (
+            _AFFIL_RE.search(text)
+            or "@" in text
+            or _CAPTION_RE.match(text)
+            or _KEYWORDS_HEAD_RE.match(text)
+            or _looks_author_name(text)
+            or re.search(
+                r"https?://|doi:|received:|accepted:|published|open\s+access",
+                text,
+                re.IGNORECASE,
+            )
+        ):
+            continue
+        # 正文是连续的：标题行、作者行、期刊栏目名常常也够长，但下面
+        # 紧跟的不是同字号的正文行。要求后面 1~2 行里至少有一行同样是
+        # 正文特征，避免把大字号标题当成正文起点。
+        following = [
+            x
+            for x in sorted(lines, key=lambda l: (l.y0, l.x0))
+            if x is not ln
+            and x.page == ln.page
+            and 0 < x.y0 - ln.y0 < max(3.0 * max(ln.height, 1.0), 40.0)
+        ][:2]
+        if not any(
+            len(x.text.strip()) >= 50
+            and (body_size <= 0 or body_size * 0.85 <= x.size <= body_size * 1.35)
+            and not _AFFIL_RE.search(x.text)
+            and "@" not in x.text
+            and not _looks_author_name(x.text)
+            for x in following
+        ):
+            continue
+        return ln.y0
+    return 0.0
+
+
+def _body_flow_start(lines: list[Line], start_y: float, page_width: float) -> float:
+    """在首页前置区之后找「正文流」的起点（双栏/半栏宽的文字行）。
+
+    Nature 等版式的摘要常是通栏宽行，正文则是半栏宽的双栏。用「宽度
+    明显小于页宽 + 同栏连续」找得到正文起点，就能把摘要和正文分开，
+    而不会把后面的参考文献/表格说明一起吞进摘要。
+    """
+    half = page_width * 0.55
+    candidates = sorted(
+        [ln for ln in lines if ln.y0 > start_y + 1], key=lambda l: l.y0
+    )
+    for i, ln in enumerate(candidates):
+        if ln.width >= half or ln.col not in (0, 1):
+            continue
+        following = [
+            x
+            for x in candidates[i + 1: i + 4]
+            if x.col == ln.col and x.y0 - ln.y0 < 40
+        ]
+        if any(x.width < half for x in following):
+            return ln.y0
+    return 0.0
+
+
+def _detect_front_matter(
+    lines: list[Line], body_size: float, page_height: float, page_width: float
+) -> FrontMatter:
+    """识别首页前置区与摘要/关键词范围。"""
+    front = FrontMatter()
+    page_lines = sorted(
+        [ln for ln in lines if ln.page == 1 and not ln.is_margin and ln.text.strip()],
+        key=lambda l: (l.y0, l.x0),
+    )
+    if len(page_lines) < 6:
+        return front
+    line_h = median([ln.height for ln in page_lines]) or max(body_size * 1.2, 1.0)
+    top = page_lines[0].y0
+    head_candidates = [ln for ln in page_lines if ln.y0 < page_height * 0.8]
+    abs_ln = next((ln for ln in head_candidates if _ABSTRACT_HEAD_RE.match(ln.text)), None)
+    kw_ln = next((ln for ln in head_candidates if _KEYWORDS_HEAD_RE.match(ln.text)), None)
+    intro_ln = next((ln for ln in head_candidates if _INTRO_HEAD_RE.match(ln.text)), None)
+    if intro_ln is not None and intro_ln.y0 <= top + line_h:
+        intro_ln = None
+
+    def _range_end(start: Line, col: int, stops: list[Line | None]) -> float:
+        ends = [ln.y0 for ln in stops if ln is not None and ln.y0 > start.y0 + 1]
+        same_col = sorted(
+            [
+                ln
+                for ln in page_lines
+                if ln.y0 > start.y0 + 1
+                and (col < 0 or ln.col in (col, -1))
+            ],
+            key=lambda l: l.y0,
+        )
+        prev = start
+        for ln in same_col:
+            gap = ln.y0 - prev.y1
+            if gap > max(line_h * 1.9, 7.0) or abs(ln.size - start.size) > max(
+                2.0, start.size * 0.25
+            ):
+                ends.append(ln.y0)
+                break
+            prev = ln
+        ends.append(start.y0 + page_height)
+        return min(ends)
+
+    body_y = _first_body_line_y(page_lines, body_size, page_width)
+
+    if abs_ln is not None:
+        col = abs_ln.col if abs_ln.col in (0, 1) else -1
+        end = _range_end(abs_ln, col, [kw_ln, intro_ln])
+        front.page = 1
+        front.head_end = min(abs_ln.y0, body_y) if body_y > 0 else abs_ln.y0
+        if end > abs_ln.y0 + 1:
+            front.abstract = (abs_ln.y0, end)
+            front.abstract_col = col
+    elif intro_ln is not None:
+        front.page = 1
+        front.head_end = min(intro_ln.y0, body_y) if body_y > 0 else intro_ln.y0
+    elif kw_ln is not None:
+        front.page = 1
+        front.head_end = min(kw_ln.y0, body_y) if body_y > 0 else kw_ln.y0
+    elif body_y > top + line_h * 2 and body_y < page_height * 0.65:
+        # 没有 Abstract/Introduction/Keywords 标记时，只切出「标题+作者区」，
+        # 不自动把后面的第一段文字当摘要：有的论文首页直接是正文/参考文献，
+        # 自动造 abstract 会把引用条目、表格说明一起吞掉。
+        front.page = 1
+        front.head_end = body_y
+        # Nature 类版式：标题下有作者区、摘要通栏、正文双栏。只有确认
+        # 「有作者区 + 能找到半栏正文起点」才把中间这段标成摘要。
+        author_zone = any(
+            _looks_author_name(ln.text) or _AFFIL_RE.search(ln.text)
+            for ln in page_lines
+            if ln.y0 < body_y - 1
+        )
+        flow_y = _body_flow_start(page_lines, body_y, page_width)
+        if author_zone and flow_y > body_y + line_h * 2:
+            front.abstract = (body_y, flow_y)
+            front.abstract_col = -1
+            first = min(
+                (ln for ln in page_lines if ln.y0 >= body_y - 0.5),
+                key=lambda l: l.y0,
+                default=None,
+            )
+            if first is not None:
+                front.abstract_x = (first.x0, first.x1)
+
+    if kw_ln is not None:
+        col = kw_ln.col if kw_ln.col in (0, 1) else -1
+        front.keywords = (kw_ln.y0, _range_end(kw_ln, col, [intro_ln]))
+        front.keywords_col = col
+        if front.page:
+            front.head_end = min(front.head_end, kw_ln.y0)
+    return front
+
+
 def _detect_gutter(lines: list[Line]) -> float | None:
     """检测双栏之间的空白带，返回 gutter 中心 x；单栏返回 None。
 
@@ -1004,8 +1251,42 @@ def _merge_visual_rows(
     return [r for r in rows if r.text.strip()]
 
 
-def _reading_order(lines: list[Line], gutter: float | None) -> list[Line]:
-    """按阅读顺序返回行序列。"""
+def _band_major(lines: list[Line]) -> list[Line]:
+    """按「视觉带」输出：同一基线的碎片整组按 x 排序，再进入下一带。
+
+    不能只按 (y0, x0) 排序：同一行的左右栏、三列作者卡片的 y0 常有
+    0.0x pt 的量化差，严格按 y0 会把中间列排到左右列前面。
+    """
+    if not lines:
+        return []
+    ordered = sorted(lines, key=lambda l: ((l.baseline or l.y0), l.x0))
+    bands: list[tuple[float, list[Line]]] = []
+    for ln in ordered:
+        base = ln.baseline or ln.y0
+        tol = max(2.0, 0.45 * max(ln.size, 1.0))
+        if bands and abs(base - bands[-1][0]) <= tol:
+            bands[-1][1].append(ln)
+        else:
+            bands.append((base, [ln]))
+    out: list[Line] = []
+    for _, band in bands:
+        band.sort(key=lambda l: (l.x0, l.y0))
+        out.extend(band)
+    return out
+
+
+def _reading_order(
+    lines: list[Line],
+    gutter: float | None,
+    front: FrontMatter | None = None,
+    page_width: float = 0.0,
+) -> list[Line]:
+    """按阅读顺序返回行序列。
+
+    首页前置区（标题/多列作者卡片/单位）不适用正文的双栏模型：
+    它内部按「视觉带」逐带、带内按 x 排序，这样三列作者是 1→2→3
+    而不是中列先出；进入摘要/正文之后才按栏排序。
+    """
     body = [ln for ln in lines if not ln.is_margin]
     if gutter is None:
         # 原生流顺序（LaTeX 通常已是正确顺序）
@@ -1015,28 +1296,60 @@ def _reading_order(lines: list[Line], gutter: float | None) -> list[Line]:
     pages = sorted({ln.page for ln in body})
     for page in pages:
         plines = [ln for ln in body if ln.page == page]
-        spanning = sorted([ln for ln in plines if ln.col == -1], key=lambda l: l.y0)
-        col_lines = sorted(
-            [ln for ln in plines if ln.col in (0, 1)], key=lambda l: (l.y0, l.x0)
-        )
+        head: list[Line] = []
+        if front is not None and front.page == page and front.head_end > 0:
+            head = [ln for ln in plines if front.in_head(ln.bbox)]
+            plines = [ln for ln in plines if not front.in_head(ln.bbox)]
+        ordered.extend(_band_major(head))
 
-        # 以跨栏元素为锚点切分 y 区间：锚点之上按 左栏→右栏 输出，再输出锚点本身
-        prev_y = float("-inf")
+        # 摘要/关键词是独立的一段阅读流：通栏摘要的某些行比页宽 55% 窄，
+        # 若交给下面的锚点/归栏逻辑，摘要末行会被当成右栏文字排到正文后面。
+        # 先按 y 逐行输出摘要区，再从正文里移除这些行。
+        if front is not None and front.page == page:
+            front_lines = [
+                ln for ln in plines
+                if front.in_abstract(ln) or front.in_keywords(ln)
+            ]
+            if front_lines:
+                ordered.extend(_band_major(front_lines))
+                front_ids = {id(ln) for ln in front_lines}
+                plines = [ln for ln in plines if id(ln) not in front_ids]
+
+        # 只有真正横跨两栏的行才是「通栏锚点」。作者卡片中列这类只压住
+        # gutter 的短行在前置区已经按视觉带排好，不会走到这里；正文里的
+        # 居中短行保持 col=-1，交给下面的锚点逻辑，避免打乱图注/表格。
+
+        spanning = sorted(
+            [ln for ln in plines if ln.col == -1],
+            key=lambda l: (l.baseline or l.y0),
+        )
+        col_lines = [ln for ln in plines if ln.col in (0, 1)]
+
+        # 以跨栏元素为锚点切分 y 区间：锚点之上按 左栏→右栏 输出，再输出锚点本身。
+        # 区间上限带一个基线容差，让与锚点同基线的左右栏文字归入锚点之前，
+        # 不会因 0.0x pt 的 y0 差被切到锚点之后。
+        prev_base = float("-inf")
         for sp in spanning:
-            region = [ln for ln in col_lines if prev_y <= ln.y0 < sp.y0]
+            sp_base = sp.baseline or sp.y0
+            tol = max(1.0, 0.3 * max(sp.size, 1.0))
+            region = [
+                ln
+                for ln in col_lines
+                if prev_base <= (ln.baseline or ln.y0) <= sp_base + tol
+            ]
             ordered.extend(_col_major(region))
             ordered.append(sp)
-            prev_y = sp.y0
-        tail = [ln for ln in col_lines if ln.y0 >= prev_y]
+            prev_base = sp_base + tol
+        tail = [ln for ln in col_lines if (ln.baseline or ln.y0) > prev_base]
         ordered.extend(_col_major(tail))
     return ordered
 
 
 def _col_major(lines: list[Line]) -> list[Line]:
-    """同区内：先左栏（按 y），再右栏（按 y）。"""
-    left = sorted([ln for ln in lines if ln.col == 0], key=lambda l: (l.y0, l.x0))
-    right = sorted([ln for ln in lines if ln.col == 1], key=lambda l: (l.y0, l.x0))
-    return left + right
+    """同区内：先左栏（按视觉带），再右栏（按视觉带）。"""
+    left = [ln for ln in lines if ln.col == 0]
+    right = [ln for ln in lines if ln.col == 1]
+    return _band_major(left) + _band_major(right)
 
 
 # ── 行 → 段落重组 ──────────────────────────────────────────────────────
@@ -1290,6 +1603,7 @@ def _build_blocks(
     body_size: float,
     table_rects: dict[int, list[pymupdf.Rect]] | None = None,
     regions: dict[int, PageRegions] | None = None,
+    front: FrontMatter | None = None,
 ) -> list[Block]:
     blocks: list[Block] = []
     cur: dict | None = None
@@ -1356,7 +1670,7 @@ def _build_blocks(
             )
         cur = None
 
-    def start(ln: Line, text: str | None = None) -> dict:
+    def start(ln: Line, text: str | None = None, kind: str = "para") -> dict:
         value = text if text is not None else ln.text
         shift = len(ln.text) - len(value) if text is not None and ln.text.endswith(value) else 0
         inline_math = []
@@ -1369,7 +1683,7 @@ def _build_blocks(
         ref_left, ref_right = local.get(id(ln), (ln.x0, ln.x1))
         return {
             "text": value,
-            "page": ln.page, "kind": "para", "bbox": ln.bbox, "level": 0,
+            "page": ln.page, "kind": kind, "bbox": ln.bbox, "level": 0,
             "size": ln.size, "bold": ln.bold, "col": ln.col, "mixed": False,
             "bboxes": [[ln.page, ln.bbox[0], ln.bbox[1], ln.bbox[2], ln.bbox[3]]],
             "last_y1": ln.y1, "last_x0": ln.x0, "last_x1": ln.x1,
@@ -1400,6 +1714,27 @@ def _build_blocks(
         return ln.y0 - state["last_y1"]
 
     for ln in ordered:
+        # 通栏摘要带里的期刊页边标记（"Check for updates" 等）不是摘要，
+        # 也不该打断摘要段的合并；按 x 重叠判定后直接跳过这一行。
+        if (
+            front is not None
+            and front.page == ln.page
+            and front.abstract is not None
+            and front.abstract_col < 0
+            and front.abstract[0] - 0.5 <= ln.y0 < front.abstract[1]
+            and not front.in_abstract(ln)
+            and len(ln.text.strip()) <= 40
+        ):
+            continue
+
+        # 摘要/关键词是「成段的正文」，不是章节标题。期刊常把摘要排成粗体
+        # （IEEEtran 的 abstract 就是 \bfseries），如果继续套「粗体短行=标题」
+        # 的规则，摘要会一行一个 heading 块，前端渲染成一串小标题。
+        abs_head = bool(front and front.page == ln.page and front.is_abstract_head(ln))
+        in_abs = bool(front and front.page == ln.page and front.in_abstract(ln))
+        in_kw = bool(front and front.page == ln.page and front.in_keywords(ln))
+        para_kind = "abstract" if in_abs else ("keywords" if in_kw else "para")
+
         # ── 区域过滤：行号栏与图内文字在建块前就排除 ──
         # 这一步必须在公式/标题判定之前：图里的 `100%`、`Step 3 pool`
         # 既像短段落又像公式碎片，放任它们进入后续规则会同时污染
@@ -1450,8 +1785,11 @@ def _build_blocks(
         flush_eq()
 
         # 表格区里的短行（「3.2 分（1～5 分）」）会被中文编号标题规则误判，
-        # 表格行一律按表格数据处理，不参与标题判定。
-        head_level = 0 if in_table(ln) else _is_heading(ln, body_size)
+        # 表格行一律按表格数据处理，不参与标题判定。摘要正文与关键词常是
+        # 粗体、行尾无标点，同样不能当标题；只有 Abstract 标题行本身例外。
+        head_level = 0 if (
+            in_table(ln) or (in_abs and not abs_head) or in_kw
+        ) else _is_heading(ln, body_size)
         split = _split_line_heading(ln, body_size) if head_level else None
 
         if split:
@@ -1463,7 +1801,7 @@ def _build_blocks(
                     text=head, bbox=ln.bbox, level=1, size=ln.size,
                 )
             )
-            cur = start(ln, rest)
+            cur = start(ln, rest, para_kind)
             continue
 
         if head_level:
@@ -1476,8 +1814,12 @@ def _build_blocks(
             )
             continue
 
+        # 摘要 → 关键词 → 正文的切换必须断开段落；否则关键词会被并进摘要
+        # 末段，摘要译文里多出一串关键词。
+        if cur is not None and cur["kind"] != para_kind:
+            flush()
         if cur is None:
-            cur = start(ln)
+            cur = start(ln, kind=para_kind)
             continue
 
         # 表格区/大间距碎片逐行成块：既不让表格行彼此合并，也不让
@@ -1500,14 +1842,14 @@ def _build_blocks(
             caps = len(re.findall(r"\b[A-Z]{2,}\b", t))
             return digits >= 2 or caps >= 2
 
-        if (
+        if not (in_abs or in_kw) and (
             in_table(ln)
             or cur["in_table"]
             or small_row(ln.text, ln.size)
             or small_row(cur["text"], cur["size"])
         ):
             flush()
-            cur = start(ln)
+            cur = start(ln, kind=para_kind)
             continue
 
         # 上一行是否写满，要用「上一行附近几行」的宽度判断，而不是整页
@@ -1543,23 +1885,29 @@ def _build_blocks(
             and (not same_page_cross or strong_cross)
         )
 
-        new_para = (not continuation) and (
-            ln.col != cur["col"]
-            or gap > max(line_h * 1.55, 6)
-            or not same_style
-            or prev_short
-            or indented
-            # 图注比正文短，局部宽度下末行容易被判成「写满」而把紧随的
-            # 作者脚注、版权行吞进 caption。只有明确的续行证据才允许合并，
-            # 图注以句号结尾或下一行以 ∗ / ‡ / 数字开头时一律断开。
-            or (_is_caption_text(cur["text"]) and not _caption_continuation(cur["text"], ln.text))
-            # 同栏里上一行「写满」时，紧接的表注会被当成正文续行并进
-            # 表格末行，`Table 2:` 随之失去锚点，整张表识别不出来。
-            or _is_caption_text(ln.text)
-        )
+        if (in_abs or in_kw) and cur is not None and cur["kind"] == para_kind:
+            # 摘要/关键词是一段连续文字，不受正文的「是否写满/首行缩进/
+            # 换栏」规则影响。Nature 这类通栏摘要经 _reading_order 归栏后
+            # 相邻行 col 会变，若沿用正文断段规则会被拆成一行一块。
+            new_para = not (same_style and gap <= max(line_h * 1.9, 8.0))
+        else:
+            new_para = (not continuation) and (
+                ln.col != cur["col"]
+                or gap > max(line_h * 1.55, 6)
+                or not same_style
+                or prev_short
+                or indented
+                # 图注比正文短，局部宽度下末行容易被判成「写满」而把紧随的
+                # 作者脚注、版权行吞进 caption。只有明确的续行证据才允许合并，
+                # 图注以句号结尾或下一行以 ∗ / ‡ / 数字开头时一律断开。
+                or (_is_caption_text(cur["text"]) and not _caption_continuation(cur["text"], ln.text))
+                # 同栏里上一行「写满」时，紧接的表注会被当成正文续行并进
+                # 表格末行，`Table 2:` 随之失去锚点，整张表识别不出来。
+                or _is_caption_text(ln.text)
+            )
         if new_para:
             flush()
-            cur = start(ln)
+            cur = start(ln, kind=para_kind)
         else:
             lead = len(ln.text) - len(ln.text.lstrip())
             cur["text"], offset = _append_line_text(cur["text"], ln.text)
@@ -1608,6 +1956,13 @@ _FOOTNOTE_RE = re.compile(
     r"copyright\s*©|all rights reserved|contributed equally|"
     r"permission to make digital|^proceedings of the|^arxiv:\s*\d|"
     r"under review|^doi:",
+    re.IGNORECASE,
+)
+# 首页/次页底部的作者脚注：单位、邮箱、通讯作者。它们是元数据，不是正文，
+# 不能参与翻译；有些期刊没有 affiliation 标签，靠这些短语识别。
+_AUTHOR_NOTE_RE = re.compile(
+    r"(?:is\s+with\s+the|are\s+with\s+the|Corresponding\s+author|"
+    r"E-?mail\s*[:：]|@)",
     re.IGNORECASE,
 )
 
@@ -1670,6 +2025,174 @@ def _merge_title_lines(blocks: list[Block], idx: int | None) -> None:
         del blocks[j]
 
 
+def _looks_author_name(text: str) -> bool:
+    """是不是一行作者姓名（而不是单位/邮箱/城市/正文）。
+
+    面向通用版式，不写死某套模板：
+    - 先剥掉 1st/2nd、上标数字、† 等作者序号；
+    - 单位/邮箱/网址/国家城市直接排除；
+    - 英文要求至少两个词且首字母大写（挡住 "Technology" 这类单词），
+      中文要求 2~6 个汉字。
+    """
+    raw = _AUTHOR_PREFIX_RE.sub("", text.strip()).strip(" ,;*†‡§¶#")
+    if not raw or len(raw) > 400:
+        return False
+    if (
+        _AFFIL_RE.search(raw)
+        or "@" in raw
+        or re.search(r"https?://|www\.|doi:", raw, re.IGNORECASE)
+        or _PLACE_RE.search(raw)
+        or re.search(r"\d{4,}", raw)
+        or re.search(r":|：", raw)
+        # 期刊栏目名（R E V I E W / REVIEW / ARTICLE）不是作者
+        or re.fullmatch(r"(?:[A-Z]\s*){2,}", raw)
+        or re.fullmatch(
+            r"(?i)(?:review|article|letter|communication|editorial|perspective|"
+            r"comment|original\s+research|short\s+communication)",
+            raw,
+        )
+        or re.search(
+            r"\b(?:Received|Accepted|Published|Revised|Online|Open\s+access|"
+            r"January|February|March|April|May|June|July|August|September|"
+            r"October|November|December)\b",
+            raw,
+            re.IGNORECASE,
+        )
+    ):
+        return False
+    cjk = re.findall(r"[\u3400-\u9fff]", raw)
+    if cjk:
+        return 2 <= len(cjk) <= 6 and not re.search(r"[A-Za-z]{3,}", raw)
+
+    # 一行多位作者（Nature/Science 常见）：按逗号/and 分段，只要过半片段
+    # 是「首字母大写的人名」，整行就是作者行。不要因为行很长就放弃。
+    parts = [
+        p.strip()
+        for p in re.split(r"\s*(?:,|、|;|&|\band\b)\s*", raw)
+        if p.strip()
+    ]
+    if len(parts) >= 2:
+        name_like = 0
+        for part in parts:
+            if re.search(
+                r"\b(?:Member|Student|IEEE|ACM|Fellow|Editor|Corresponding)\b",
+                part,
+                re.IGNORECASE,
+            ):
+                continue
+            ws = re.findall(r"[A-Za-z][A-Za-z'’\-.]*", part)
+            if not (1 <= len(ws) <= 5):
+                continue
+            caps = sum(1 for w in ws if w[:1].isupper() or w.isupper())
+            if caps >= len(ws) - 1:
+                name_like += 1
+        if name_like >= 2:
+            return True
+
+    words: list[str] = []
+    for part in parts:
+        words.extend(re.findall(r"[A-Za-z][A-Za-z'’\-.]*", part))
+    if not (2 <= len(words) <= 8):
+        return False
+    if re.search(
+        r"\b(?:School|Department|University|Institute|College|Laborator|Center|Lab)\b",
+        raw,
+        re.IGNORECASE,
+    ):
+        return False
+    caps = sum(1 for w in words if w[:1].isupper() or w.isupper())
+    return caps >= len(words) - 1
+
+
+def _card_block(card: list[Block]) -> Block:
+    """把同一张作者卡片的多行合并成一个块（姓名 + 单位 + 邮箱）。"""
+    text = card[0].text
+    bbox = card[0].bbox
+    bboxes = list(card[0].bboxes)
+    for b in card[1:]:
+        text = _join_text(text, b.text)
+        bbox = (
+            min(bbox[0], b.bbox[0]), min(bbox[1], b.bbox[1]),
+            max(bbox[2], b.bbox[2]), max(bbox[3], b.bbox[3]),
+        )
+        bboxes = _merge_bbox_lists(bboxes, b.bboxes)
+    kind = "author" if any(_looks_author_name(b.text) for b in card) else "affiliation"
+    return Block(
+        id="", order=0, page=card[0].page, kind=kind, text=text,
+        bbox=bbox, size=max(b.size for b in card), bboxes=bboxes,
+        translatable=False,
+    )
+
+
+def _merge_front_matter_cards(
+    blocks: list[Block], front: FrontMatter | None, page_width: float
+) -> list[Block]:
+    """把首页前置区按「作者卡片」聚合，而不是按阅读顺序逐行合并。
+
+    三列作者卡片在阅读顺序里是 1st/2nd/3rd、4th/5th 逐带输出；如果直接
+    按顺序合并同 kind 块，会把 1st 的邮箱和 4th 的姓名粘在一起。这里先按
+    x 位置分列、列内按 y 与姓名行分卡，再按卡片在原序列中的首个位置放回。
+    """
+    if front is None or front.head_end <= 0:
+        return blocks
+    idx = [
+        i
+        for i, b in enumerate(blocks)
+        if b.page == front.page
+        and b.kind in ("author", "affiliation")
+        and b.bbox[1] < front.head_end - 0.5
+    ]
+    if len(idx) < 2:
+        return blocks
+    items = [blocks[i] for i in idx]
+
+    # 一维 x 聚类：作者列心之间通常隔着明显空白，列内的姓名/单位/邮箱
+    # 只是几百 pt 内的左右摆动。阈值随页宽缩放，窄页也不会把两列并成一列。
+    threshold = max(50.0, page_width * 0.1)
+    ordered = sorted(items, key=lambda b: (b.bbox[0] + b.bbox[2]) / 2)
+    columns: list[list[Block]] = [[ordered[0]]]
+    for b in ordered[1:]:
+        prev = columns[-1][-1]
+        prev_cx = (prev.bbox[0] + prev.bbox[2]) / 2
+        cx = (b.bbox[0] + b.bbox[2]) / 2
+        if cx - prev_cx > threshold:
+            columns.append([b])
+        else:
+            columns[-1].append(b)
+
+    line_h = max(max((b.size for b in items), default=10.0) * 1.2, 8.0)
+    cards: list[list[Block]] = []
+    for col in columns:
+        col.sort(key=lambda b: (b.bbox[1], b.bbox[0]))
+        cur = [col[0]]
+        for b in col[1:]:
+            gap = b.bbox[1] - cur[-1].bbox[3]
+            if _looks_author_name(b.text) or gap > max(line_h * 2.2, 8.0):
+                cards.append(cur)
+                cur = [b]
+            else:
+                cur.append(b)
+        cards.append(cur)
+
+    pos = {id(b): i for i, b in zip(idx, items)}
+    first_at: dict[int, Block] = {}
+    remove: set[int] = set()
+    for card in cards:
+        positions = sorted(pos[id(b)] for b in card)
+        first_at[positions[0]] = _card_block(card)
+        remove.update(positions[1:])
+
+    out: list[Block] = []
+    for i, b in enumerate(blocks):
+        if i in remove:
+            continue
+        out.append(first_at.get(i, b))
+    for i, b in enumerate(out):
+        b.order = i
+        b.id = f"b{i:04d}"
+    return out
+
+
 def _merge_affiliations(blocks: list[Block]) -> list[Block]:
     """合并连续的单位/作者块（大型论文的作者单位列表常横跨整页）。"""
     out: list[Block] = []
@@ -1682,6 +2205,10 @@ def _merge_affiliations(blocks: list[Block]) -> list[Block]:
             # 只合并同一栏里的作者/单位行；双栏首页的侧栏单位与右栏摘要
             # 横向不重叠，按「同页同 kind」合并会把两栏文字拼成一段
             and _x_overlap(out[-1].bbox, b.bbox) >= 0.3
+            # 同一张卡片内行距很小；跨过一整段空白说明是下一位作者，不能并。
+            and b.bbox[1] - out[-1].bbox[3] <= max(
+                2.2 * max(out[-1].size, b.size, 1.0), 8.0
+            )
         ):
             prev = out[-1]
             prev.text = _join_text(prev.text, b.text)
@@ -1714,7 +2241,12 @@ def _looks_reference_entry(text: str) -> bool:
     )
 
 
-def _classify(blocks: list[Block], body_size: float, page_height: float = 792.0) -> None:
+def _classify(
+    blocks: list[Block],
+    body_size: float,
+    page_height: float = 792.0,
+    front: FrontMatter | None = None,
+) -> None:
     """按位置与文本特征标注块类型，并确定「不翻译」的块。"""
     in_refs = False
     section = ""
@@ -1742,6 +2274,26 @@ def _classify(blocks: list[Block], body_size: float, page_height: float = 792.0)
             b.translatable = True
             continue
 
+        # 前置区（标题下方、摘要之前）是作者卡片，不是正文。用显式的
+        # FrontMatter 范围判定，覆盖三列卡片 / 通栏作者行等版式；姓名行
+        # 才是 author，单位、邮箱、城市等归 affiliation。
+        if (
+            front is not None
+            and front.page == b.page
+            and front.in_head(b.bbox)
+            and b.kind not in ("equation", "figure", "table")
+        ):
+            b.kind = "author" if _looks_author_name(t) else "affiliation"
+            b.translatable = False
+            b.level = 0
+            continue
+
+        # 摘要/关键词在 _build_blocks 里已定 kind，这里只补 section 与翻译标记。
+        if b.kind in ("abstract", "keywords"):
+            b.section = "Abstract"
+            b.translatable = True
+            continue
+
         if b.kind == "heading":
             # 页码（如参考文献页顶部的 "27"）常因字号/粗体被判成 heading。
             # 它既不是章节标题，也不能结束参考文献状态——否则跨页后的
@@ -1751,7 +2303,12 @@ def _classify(blocks: list[Block], body_size: float, page_height: float = 792.0)
                 b.translatable = False
                 continue
             # 首页 Abstract 之前的大字号块是作者/单位，不是章节标题
-            if front_matter and b.page == 1 and not re.match(r"^(Abstract|摘\s*要)", t, re.IGNORECASE):
+            if (
+                front_matter
+                and b.page == 1
+                and (front is None or front.page == 0)
+                and not re.match(r"^(Abstract|摘\s*要)", t, re.IGNORECASE)
+            ):
                 if _NAME_RE.search(t) and len(t) < 300:
                     b.kind = "author"
                 else:
@@ -1782,6 +2339,17 @@ def _classify(blocks: list[Block], body_size: float, page_height: float = 792.0)
         if b.kind in ("equation", "figure", "table"):
             continue
 
+        # 首页/次页底部的作者脚注（单位、邮箱、通讯作者）是元数据，不翻译。
+        if (
+            b.page <= 2
+            and b.kind == "para"
+            and len(t) < 320
+            and _AUTHOR_NOTE_RE.search(t)
+        ):
+            b.kind = "affiliation"
+            b.translatable = False
+            continue
+
         # Introduction 之前、长得像机构的块 → 作者单位（大型论文的单位列表会横跨两三页）。
         # 限制在前两页：有些期刊没有 Introduction 标题，后面的正文一旦出现
         # "laboratory / Institute" 会被误判成单位，整段就不再翻译。
@@ -1806,7 +2374,7 @@ def _classify(blocks: list[Block], body_size: float, page_height: float = 792.0)
             b.translatable = False
             continue
 
-        if front_matter and b.page == 1:
+        if front_matter and b.page == 1 and (front is None or front.page == 0):
             # 首页底部的摘要经常没有 "Abstract" 标题，字号是正文字号、长度很长；
             # 不能当成作者单位，否则摘要不翻译、导读也拿不到内容。
             if b.size >= body_size * 0.95 and len(t) > 260:
@@ -2107,6 +2675,8 @@ def _merge_caption_continuations(
             i += 1
             continue
         num_only = bool(_CAPTION_NUM_ONLY_RE.match(b.text.strip()))
+        base_x0 = b.bbox[0]
+        last_bbox = b.bbox
         j = i + 1
         while j < len(blocks):
             n = blocks[j]
@@ -2119,7 +2689,7 @@ def _merge_caption_continuations(
             if _block_in_table_rects(n, table_rects):
                 break
             gap = n.bbox[1] - b.bbox[3]
-            if gap > (10 if num_only else 8) or len(b.text) > 600 or len(n.text) > 400:
+            if gap > (10 if num_only else 8) or len(b.text) > 800 or len(n.text) > 400:
                 break
             # 中文图注/表注的第一行通常就是完整标题，紧跟的长正文段不能
             # 并进 caption（否则正文会被吞掉、也不再参与翻译）。
@@ -2131,14 +2701,28 @@ def _merge_caption_continuations(
                 # 真章节标题通常更长或字号更大，用长度 + 字号挡住。
                 if not num_only or len(n.text.strip()) > 120 or not same_size:
                     break
-            elif not num_only and abs(n.bbox[0] - b.bbox[0]) > 14:
+            elif not num_only and (
+                abs(n.bbox[0] - base_x0) > 14 or not same_size
+            ):
+                # 图注之后紧贴的正文常常左边界一致、行距也紧，但字号不同
+                # （图注 8pt、正文 10pt）。字号是区分「续行」与「正文」的
+                # 可靠信号，必须在普通图注这里一起检查。
                 break
+            # 普通图注按「上一行是否写满」判断段落是否结束。只靠紧贴/左边界
+            # 会把图注下方紧挨着的正文一起吞掉（实测 Fig. 4 后两段正文被并
+            # 进 caption）；而按句号判断又会把图注里正常的大写续句截断
+            # （"… Hallmark / enrichment analysis …"）。写满才是可靠的续行信号。
+            if not num_only:
+                span = max(b.bbox[2] - b.bbox[0], 1.0)
+                if (last_bbox[2] - last_bbox[0]) < 0.72 * span:
+                    break
             b.text = _join_text(b.text, n.text)
             b.bboxes = _merge_bbox_lists(b.bboxes, n.bboxes)
             b.bbox = (
                 min(b.bbox[0], n.bbox[0]), min(b.bbox[1], n.bbox[1]),
                 max(b.bbox[2], n.bbox[2]), max(b.bbox[3], n.bbox[3]),
             )
+            last_bbox = n.bbox
             j += 1
         out.append(b)
         i = j
@@ -4103,9 +4687,16 @@ def parse_pdf(
             _assign_columns(page_lines, page_gutter)
         has_gutter = any(g is not None for g in gutters.values())
         rows = _merge_visual_rows(lines, gutters)      # 行内公式碎片并回正文行
-        ordered = _reading_order(rows, 0.0 if has_gutter else None)
+        page_width = doc[0].rect.width
+        page_height = doc[0].rect.height
+        body_size = _guess_body_size(rows)
+        # 首页前置区（标题/作者卡片/摘要/关键词）先单独建模：它的版式
+        # 与正文「单栏/双栏」不同，三列作者卡片不能交给正文 gutter 排序。
+        front = _detect_front_matter(rows, body_size, page_height, page_width)
+        ordered = _reading_order(
+            rows, 0.0 if has_gutter else None, front, page_width
+        )
 
-        body_size = _guess_body_size(ordered)
         # 表格区域要先于段落重组拿到：表格行一旦被合并成大段，
         # 兜底切表就拿不到「多行短块」，整张表会漏识别。
         detected = _find_page_tables(doc)
@@ -4122,8 +4713,11 @@ def parse_pdf(
         page_regions = build_page_regions(
             doc, lines, body_size, table_rects, _is_caption_text,
         )
-        blocks = _build_blocks(ordered, body_size, table_rects, page_regions)
-        _classify(blocks, body_size, doc[0].rect.height)
+        blocks = _build_blocks(
+            ordered, body_size, table_rects, page_regions, front
+        )
+        _classify(blocks, body_size, page_height, front)
+        blocks = _merge_front_matter_cards(blocks, front, page_width)
         blocks = _attach_equation_numbers(blocks, doc)
         blocks = _merge_affiliations(blocks)
         blocks = _drop_noise(blocks)

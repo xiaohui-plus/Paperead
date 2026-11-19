@@ -7,6 +7,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react'
+
 import type {
   Annotation,
   AnnotationColor,
@@ -27,7 +28,14 @@ import { readyModel, loadModelSettings, toPayload } from '../lib/settings'
 import { langLabel, loadTargetLang } from '../lib/translation'
 import { canRunLocally, serverReachable } from '../lib/connectivity'
 import { streamLocalChat } from '../lib/localLlm'
-import { IconChat, IconComment, IconHighlighter, IconTranslate } from './icons'
+import {
+  IconChat,
+  IconComment,
+  IconHighlighter,
+  IconPin,
+  IconPinOff,
+  IconTranslate,
+} from './icons'
 
 /** 自动重点的中文名，正文 tooltip 和「阅读重点」面板共用。 */
 export const HIGHLIGHT_LABELS: Record<HighlightCategory, string> = {
@@ -460,11 +468,17 @@ const DRAG_IGNORE = 'button, a, input, textarea, select, .hl-translate-text'
 function useFloatDrag(
   base: { left: number; top: number; width: number },
   resetKey?: string,
+  options?: {
+    /** 固定到 PDF 内容时：left/top 是文档坐标，随页面滚动，不钳制在视口内 */
+    documentMode?: boolean
+    onDragEnd?: (pos: { left: number; top: number }) => void
+  },
 ) {
   const ref = useRef<HTMLDivElement>(null)
   const [size, setSize] = useState({ width: base.width, height: 0 })
   const [dragPos, setDragPos] = useState<{ left: number; top: number } | null>(null)
   const [dragging, setDragging] = useState(false)
+  const documentMode = Boolean(options?.documentMode)
 
   // 卡片高度会随内容变化（骨架 → 译文、译文长短、textarea 拉伸），用实测值做边界钳制
   useLayoutEffect(() => {
@@ -487,6 +501,7 @@ function useFloatDrag(
     baseTop: number
     moved: boolean
   } | null>(null)
+  const posRef = useRef<{ left: number; top: number } | null>(null)
   const suppressClick = useRef(false)
 
   const zoom = uiZoom()
@@ -495,8 +510,14 @@ function useFloatDrag(
   const height = size.height
   const left = dragPos?.left ?? base.left
   const top = dragPos?.top ?? base.top
-  const maxLeft = Math.max(pad, window.innerWidth / zoom - width - pad)
-  const maxTop = Math.max(pad, window.innerHeight / zoom - height - pad)
+  posRef.current = { left, top }
+  // 钉在内容上时卡片属于文档流，不应被视口边界钳制；拖动范围交给页面本身
+  const maxLeft = documentMode
+    ? Number.MAX_SAFE_INTEGER
+    : Math.max(pad, window.innerWidth / zoom - width - pad)
+  const maxTop = documentMode
+    ? Number.MAX_SAFE_INTEGER
+    : Math.max(pad, window.innerHeight / zoom - height - pad)
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return
@@ -544,6 +565,8 @@ function useFloatDrag(
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
+    const final = posRef.current
+    if (final) options?.onDragEnd?.(final)
   }
 
   // 拖拽结束浏览器会补发 click，不能让它落到「复制译文 / 保存」等按钮上
@@ -559,6 +582,7 @@ function useFloatDrag(
     dragging,
     left,
     top,
+    setDragPos,
     handlers: {
       onPointerDown,
       onPointerMove,
@@ -599,15 +623,19 @@ export function SelectionToolbar({
   onAsk?: () => void
   onClose: () => void
 }) {
+  const [pinned, setPinned] = useState(false)
+
   useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {
+      // 固定到 PDF 内容后不能再被点的别处顺手关掉；只允许卡片上的关闭按钮结束。
+      if (pinned) return
       const target = event.target as HTMLElement
       // 翻译卡片属于同一个浮层，点它内部不关闭
       if (!target.closest('.hl-toolbar, .hl-translate')) onClose()
     }
     document.addEventListener('pointerdown', onPointerDown)
     return () => document.removeEventListener('pointerdown', onPointerDown)
-  }, [onClose])
+  }, [onClose, pinned])
 
   const [hlColor, setHlColor] = useState(() => lastAnnotationColor('highlight'))
   const [cmColor, setCmColor] = useState(() => lastAnnotationColor('comment'))
@@ -617,11 +645,12 @@ export function SelectionToolbar({
   useEffect(() => {
     if (translation.status === 'idle') return
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setTranslation({ status: 'idle' })
+      // 固定后只有主动关闭；ESC 不再自动消失
+      if (event.key === 'Escape' && !pinned) setTranslation({ status: 'idle' })
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [translation.status])
+  }, [translation.status, pinned])
 
   const apply = (kind: 'highlight' | 'comment', color: AnnotationColor) => {
     rememberAnnotationColor(kind, color)
@@ -814,6 +843,7 @@ export function SelectionToolbar({
 
   return (
     <>
+      {!pinned && (
       <div
         ref={toolbarRef}
         className={`hl-toolbar${dragging ? ' is-dragging' : ''}`}
@@ -862,13 +892,19 @@ export function SelectionToolbar({
           </button>
         )}
       </div>
+      )}
       {translation.status !== 'idle' && (
         <TranslateCard
           anchor={{ left, top, width }}
           state={translation}
           target={targetName}
           resetKey={rectKey}
-          onClose={() => setTranslation({ status: 'idle' })}
+          pinned={pinned}
+          onTogglePin={setPinned}
+          onClose={() => {
+            setTranslation({ status: 'idle' })
+            setPinned(false)
+          }}
           onRetry={() => void translate()}
         />
       )}
@@ -882,6 +918,8 @@ function TranslateCard({
   state,
   target,
   resetKey,
+  pinned,
+  onTogglePin,
   onClose,
   onRetry,
 }: {
@@ -891,6 +929,9 @@ function TranslateCard({
   target: string
   /** 选区变化时丢弃手动拖到的位置 */
   resetKey?: string
+  /** 固定到 PDF 内容：卡片停在此处，随页面滚动上移；不再自动消失 */
+  pinned: boolean
+  onTogglePin: (next: boolean) => void
   onClose: () => void
   onRetry: () => void
 }) {
@@ -912,7 +953,83 @@ function TranslateCard({
       ? below
       : clampPosition(anchor.top - estimated - FLOAT_GAP / zoom, pad, maxTop)
 
-  const drag = useFloatDrag({ left, top, width }, resetKey)
+  const [pinBase, setPinBase] = useState<{ left: number; top: number } | null>(null)
+  const [scrollShift, setScrollShift] = useState(0)
+  const pinRef = useRef<{ top: number; scroll: number; scroller: HTMLElement | null } | null>(null)
+
+  const base = pinned && pinBase ? { ...pinBase, width } : { left, top, width }
+  const drag = useFloatDrag(base, pinned ? 'pinned' : resetKey, {
+    onDragEnd: (pos) => {
+      if (!pinned) return
+      setPinBase({ left: pos.left, top: pos.top })
+      const scroller = pinRef.current?.scroller ?? null
+      if (scroller) pinRef.current = { top: pos.top, scroll: scroller.scrollTop, scroller }
+      setScrollShift(0)
+    },
+  })
+
+  const findScroller = (node: HTMLElement | null): HTMLElement | null => {
+    // PDF 模式的滚动容器 `.pdf-view` 与划词浮层不在同一棵子树里（浮层是
+    // 页面级浮层），只向上找 parentElement 会漏掉它；先按已知容器找。
+    for (const selector of ['.pdf-view', '.main-scroll']) {
+      const candidate = document.querySelector<HTMLElement>(selector)
+      if (
+        candidate &&
+        /(auto|scroll)/.test(window.getComputedStyle(candidate).overflowY) &&
+        candidate.scrollHeight > candidate.clientHeight
+      ) {
+        return candidate
+      }
+    }
+    let current = node?.parentElement ?? null
+    while (current) {
+      const style = window.getComputedStyle(current)
+      if (/(auto|scroll)/.test(style.overflowY) && current.scrollHeight > current.clientHeight) {
+        return current
+      }
+      current = current.parentElement
+    }
+    return null
+  }
+
+  // 阅读页的滚动发生在 `.main-scroll` 内部，不是 window。固定后监听真实
+  // 滚动容器，按滚动量把卡片往上推，视觉上就与 PDF 正文一起滑动。
+  useEffect(() => {
+    if (!pinned) {
+      setScrollShift(0)
+      return
+    }
+    const scroller = pinRef.current?.scroller ?? findScroller(drag.ref.current)
+    if (!scroller) return
+    if (!pinRef.current) {
+      pinRef.current = { top: drag.top, scroll: scroller.scrollTop, scroller }
+    }
+    const onScroll = () => {
+      const baseInfo = pinRef.current
+      if (!baseInfo) return
+      setScrollShift(scroller.scrollTop - baseInfo.scroll)
+    }
+    scroller.addEventListener('scroll', onScroll, { passive: true })
+    onScroll()
+    return () => scroller.removeEventListener('scroll', onScroll)
+  }, [pinned, zoom, drag.ref, drag.top])
+
+  const togglePin = () => {
+    if (pinned) {
+      setPinBase(null)
+      pinRef.current = null
+      setScrollShift(0)
+      onTogglePin(false)
+      return
+    }
+    const scroller = findScroller(drag.ref.current)
+    pinRef.current = scroller
+      ? { top: drag.top, scroll: scroller.scrollTop, scroller }
+      : null
+    setScrollShift(0)
+    setPinBase({ left: drag.left, top: drag.top })
+    onTogglePin(true)
+  }
 
   const copy = async () => {
     const value = state.value
@@ -937,19 +1054,33 @@ function TranslateCard({
     }
   }
 
+  const renderedTop = drag.top - (pinned ? scrollShift : 0)
+
   return (
     <div
       ref={drag.ref}
-      className={`hl-translate${drag.dragging ? ' is-dragging' : ''}`}
-      style={{ left: drag.left, top: drag.top, width }}
+      className={`hl-translate${drag.dragging ? ' is-dragging' : ''}${pinned ? ' is-pinned' : ''}`}
+      style={{ left: drag.left, top: renderedTop, width }}
       onMouseDown={(e) => e.stopPropagation()}
       {...drag.handlers}
     >
       <div className="hl-translate-head">
         <span className="hl-translate-lang">EN → {target}</span>
-        <button type="button" className="icon-btn" title="关闭翻译" onClick={onClose}>
-          ×
-        </button>
+        <span className="hl-translate-head-actions">
+          <button
+            type="button"
+            className={`icon-btn hl-translate-pin${pinned ? ' is-active' : ''}`}
+            title={pinned ? '取消固定' : '固定到 PDF 内容（随页面滚动）'}
+            aria-label={pinned ? '取消固定' : '固定翻译卡片'}
+            aria-pressed={pinned}
+            onClick={togglePin}
+          >
+            {pinned ? <IconPinOff /> : <IconPin />}
+          </button>
+          <button type="button" className="icon-btn" title="关闭翻译" onClick={onClose}>
+            ×
+          </button>
+        </span>
       </div>
 
       {state.status === 'loading' && !state.partial && (

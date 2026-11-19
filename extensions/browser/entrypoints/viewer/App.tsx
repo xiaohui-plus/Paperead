@@ -3,6 +3,7 @@ import { browser } from 'wxt/browser'
 import * as pdfjsLib from 'pdfjs-dist'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
+import PdfViewer from './PdfViewer'
 import {
   askSelection,
   discoverBase,
@@ -16,6 +17,7 @@ import type { PaperMetadata } from '../../lib/types'
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
 
 type Phase = 'loading' | 'permission' | 'ready' | 'error'
+type Mode = 'pdf' | 'reader'
 
 interface Selection {
   text: string
@@ -40,91 +42,6 @@ const isPdfBytes = (bytes: Uint8Array) =>
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
-function PdfPage({ doc, index }: { doc: PDFDocumentProxy; index: number }) {
-  const wrapRef = useRef<HTMLDivElement>(null)
-  const [visible, setVisible] = useState(index <= 2)
-
-  useEffect(() => {
-    if (visible) return
-    const element = wrapRef.current
-    if (!element) return
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
-          setVisible(true)
-          observer.disconnect()
-        }
-      },
-      { rootMargin: '800px' },
-    )
-    observer.observe(element)
-    return () => observer.disconnect()
-  }, [visible])
-
-  useEffect(() => {
-    if (!visible) return
-    const element = wrapRef.current
-    if (!element) return
-    let cancelled = false
-
-    void (async () => {
-      const page = await doc.getPage(index)
-      if (cancelled) return
-      const base = page.getViewport({ scale: 1 })
-      const target = Math.min(window.innerWidth - 48, 960)
-      const scale = Math.max(0.8, Math.min(2, target / base.width))
-      const viewport = page.getViewport({ scale })
-
-      element.style.width = `${viewport.width}px`
-      element.style.height = `${viewport.height}px`
-      element.replaceChildren()
-
-      const canvas = document.createElement('canvas')
-      const ratio = window.devicePixelRatio || 1
-      canvas.width = Math.floor(viewport.width * ratio)
-      canvas.height = Math.floor(viewport.height * ratio)
-      canvas.style.width = `${viewport.width}px`
-      canvas.style.height = `${viewport.height}px`
-      element.appendChild(canvas)
-
-      const context = canvas.getContext('2d')
-      if (!context) return
-      await page.render({
-        canvasContext: context,
-        viewport,
-        transform: ratio === 1 ? undefined : [ratio, 0, 0, ratio, 0, 0],
-      }).promise
-      if (cancelled) return
-
-      const textLayerDiv = document.createElement('div')
-      textLayerDiv.className = 'textLayer'
-      textLayerDiv.style.setProperty('--scale-factor', String(viewport.scale))
-      element.appendChild(textLayerDiv)
-
-      const textContent = await page.getTextContent()
-      if (cancelled) return
-      const layer = new pdfjsLib.TextLayer({
-        textContentSource: textContent,
-        container: textLayerDiv,
-        viewport,
-      })
-      await layer.render()
-    })()
-
-    return () => {
-      cancelled = true
-    }
-  }, [doc, index, visible])
-
-  return (
-    <div
-      className="page-wrap"
-      ref={wrapRef}
-      style={{ height: 1200, width: 'min(860px, calc(100vw - 48px))' }}
-    />
-  )
-}
-
 export default function App() {
   const fileUrl = useMemo(() => {
     const value = new URLSearchParams(location.search).get('file') || ''
@@ -146,6 +63,9 @@ export default function App() {
   const [paperId, setPaperId] = useState('')
   const [paperReady, setPaperReady] = useState(false)
   const [modelLabel, setModelLabel] = useState('')
+  const [mode, setMode] = useState<Mode>('pdf')
+  const [readerUrl, setReaderUrl] = useState('')
+  const [readerKey, setReaderKey] = useState(0)
   const [selection, setSelection] = useState<Selection | null>(null)
   const [popover, setPopover] = useState<Popover | null>(null)
   const [petOpen, setPetOpen] = useState(false)
@@ -267,9 +187,33 @@ export default function App() {
   }, [doc, runIngest])
 
   useEffect(() => {
+    if (!paperId) {
+      setReaderUrl('')
+      return
+    }
+    let cancelled = false
+    void discoverBase()
+      .then((base) => {
+        if (!cancelled) setReaderUrl(`${base}/?p=${paperId}`)
+      })
+      .catch(() => {
+        if (!cancelled) setReaderUrl('')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [paperId])
+
+  // 解析完成前 iframe 里可能只看到“解析中”。解析完成时强制重载一次，
+  // 让完整阅读直接用最终的 blocks.json 渲染。
+  useEffect(() => {
+    if (paperReady) setReaderKey((value) => value + 1)
+  }, [paperReady])
+
+  useEffect(() => {
     const onMouseUp = (event: MouseEvent) => {
       const target = event.target as HTMLElement | null
-      if (target?.closest('.popover, .selbar')) return
+      if (target?.closest('.popover, .selbar, .pdf-toolbar, .pdf-search')) return
       window.setTimeout(() => {
         const current = window.getSelection()
         const text = current?.toString().trim() || ''
@@ -296,16 +240,17 @@ export default function App() {
 
   const openPaper = useCallback(async () => {
     if (!paperId) return
+    if (readerUrl) {
+      window.open(readerUrl, '_blank', 'noopener')
+      return
+    }
     const base = await discoverBase()
-    window.open(`${base}/?p=${paperId}`, '_blank')
-  }, [paperId])
+    window.open(`${base}/?p=${paperId}`, '_blank', 'noopener')
+  }, [paperId, readerUrl])
 
-  const openReflow = useCallback(async () => {
-    if (!paperId || !paperReady) return
-    const base = await discoverBase()
-    // 同一标签页进入重排阅读；浏览器后退即可回到 PDF 原版面。
-    window.location.assign(`${base}/?p=${paperId}`)
-  }, [paperId, paperReady])
+  const openReaderTab = useCallback(() => {
+    if (readerUrl) window.open(readerUrl, '_blank', 'noopener')
+  }, [readerUrl])
 
   const openAssistant = useCallback(async () => {
     setPetBusy(true)
@@ -371,6 +316,12 @@ export default function App() {
     }
   }, [selection, paperId, paperReady])
 
+  const readerStatus = paperReady
+    ? '完整阅读已就绪'
+    : paperId
+      ? '解析中，完成后自动刷新'
+      : '正在准备…'
+
   return (
     <div className="viewer">
       <div className="topbar">
@@ -382,18 +333,27 @@ export default function App() {
           {status || (modelLabel ? `模型 ${modelLabel}` : '未配置模型')}
         </span>
         <div className="mode-switch" role="group" aria-label="阅读模式">
-          <button className="mode active" type="button" aria-pressed="true">
+          <button
+            className={`mode${mode === 'pdf' ? ' active' : ''}`}
+            type="button"
+            aria-pressed={mode === 'pdf'}
+            onClick={() => setMode('pdf')}
+          >
             PDF 原版
           </button>
           <button
-            className="mode"
+            className={`mode${mode === 'reader' ? ' active' : ''}`}
             type="button"
-            aria-pressed="false"
-            disabled={!paperReady}
-            title={paperReady ? '同一标签页打开重排阅读，浏览器后退可回到 PDF 原版面' : '解析完成后可切换重排阅读'}
-            onClick={() => void openReflow()}
+            aria-pressed={mode === 'reader'}
+            disabled={!paperId}
+            title={
+              paperId
+                ? '显示 Paperead 解析后的完整阅读视图（翻译、图表、问答、标注）'
+                : '解析开始后即可进入完整阅读'
+            }
+            onClick={() => setMode('reader')}
           >
-            重排阅读
+            完整阅读
           </button>
         </div>
       </div>
@@ -425,15 +385,51 @@ export default function App() {
         </div>
       )}
 
-      {phase === 'ready' && doc && (
-        <div className="pages">
-          {Array.from({ length: doc.numPages }, (_, index) => (
-            <PdfPage key={index} doc={doc} index={index + 1} />
-          ))}
+      {phase === 'ready' && doc && mode === 'pdf' && (
+        <PdfViewer
+          doc={doc}
+          bytes={bytesRef.current}
+          filename={filename}
+          fileUrl={fileUrl}
+        />
+      )}
+
+      {mode === 'reader' && paperId && (
+        <div className="reader-pane">
+          <div className="reader-bar">
+            <span className={paperReady ? 'reader-ready' : 'reader-wait'}>{readerStatus}</span>
+            <button type="button" className="button" onClick={openReaderTab} disabled={!readerUrl}>
+              在新标签页打开
+            </button>
+            <button
+              type="button"
+              className="button"
+              onClick={() => setReaderKey((value) => value + 1)}
+              disabled={!readerUrl}
+            >
+              刷新
+            </button>
+            <button type="button" className="button" onClick={() => setMode('pdf')}>
+              返回 PDF 原版
+            </button>
+          </div>
+          {readerUrl ? (
+            <iframe
+              key={readerKey}
+              className="reader-frame"
+              src={readerUrl}
+              title="Paperead 完整阅读"
+            />
+          ) : (
+            <div className="center">
+              <h1>正在准备完整阅读…</h1>
+              <p>请确认桌面端 Paperead 正在运行。</p>
+            </div>
+          )}
         </div>
       )}
 
-      {selection && (
+      {selection && mode === 'pdf' && (
         <div
           className="selbar"
           style={{ left: selection.left, top: selection.top }}

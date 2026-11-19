@@ -14,6 +14,8 @@ import {
   LayoutTemplate,
   Lightbulb,
   Network,
+  Pin,
+  PinOff,
   Settings2,
   Star,
   Wrench,
@@ -468,6 +470,10 @@ export const IconFlower = lucideIcon(Flower2)
 export const IconCoffee = lucideIcon(Coffee)
 /** 打赏：给仓库一颗星 */
 export const IconStar = lucideIcon(Star)
+/** 划词翻译卡片：固定在原位置（随 PDF 内容滚动） */
+export const IconPin = lucideIcon(Pin)
+/** 划词翻译卡片：取消固定 */
+export const IconPinOff = lucideIcon(PinOff)
 
 export function IconPlug() {
   return (

@@ -340,3 +340,219 @@ body {
   .pe-pet { animation: none; transition: none; }
   .pe-pet-panel { transition: none; }
 }
+/* PDF 原版阅读：完整工具栏（页码 / 缩放 / 搜索 / 下载 / 打印 / 原生查看器） */
+.pdf-viewer {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.pdf-toolbar {
+  position: sticky;
+  top: 49px;
+  z-index: 9;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  background: rgba(251, 252, 253, 0.96);
+  border-bottom: 1px solid #e5e9ef;
+  backdrop-filter: blur(6px);
+}
+
+.pdf-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.pdf-group + .pdf-group {
+  padding-left: 10px;
+  border-left: 1px solid #e5e9ef;
+}
+
+.pdf-toolbar button {
+  min-width: 28px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #344054;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.pdf-toolbar button:hover {
+  background: #eef2f6;
+}
+
+.pdf-toolbar button.active {
+  border-color: #cfd8e3;
+  background: #fff;
+  color: #14508c;
+  box-shadow: 0 1px 2px rgba(17, 24, 39, 0.06);
+}
+
+.pdf-page-input {
+  width: 46px;
+  padding: 3px 4px;
+  border: 1px solid #d7dde5;
+  border-radius: 5px;
+  background: #fff;
+  color: #17181a;
+  font: inherit;
+  font-size: 12px;
+  text-align: center;
+  -moz-appearance: textfield;
+}
+
+.pdf-page-input::-webkit-outer-spin-button,
+.pdf-page-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.pdf-scale,
+.pdf-muted {
+  color: #667085;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.pdf-scale {
+  min-width: 44px;
+  text-align: center;
+}
+
+.pdf-search {
+  position: sticky;
+  top: 94px;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 16px;
+  background: #f6f8fa;
+  border-bottom: 1px solid #e5e9ef;
+}
+
+.pdf-search input {
+  width: min(320px, 46vw);
+  padding: 5px 9px;
+  border: 1px solid #d7dde5;
+  border-radius: 6px;
+  background: #fff;
+  color: #17181a;
+  font: inherit;
+  font-size: 13px;
+}
+
+.pdf-search button {
+  padding: 4px 9px;
+  border: 1px solid #d7dde5;
+  border-radius: 6px;
+  background: #fff;
+  color: #344054;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.pdf-search button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.textLayer span.pdf-hit {
+  background: rgba(250, 204, 21, 0.55);
+  border-radius: 2px;
+}
+
+.pdf-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-50%);
+  z-index: 40;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: rgba(31, 35, 40, 0.9);
+  color: #fff;
+  font-size: 12px;
+  pointer-events: none;
+}
+
+/* 插件内的「网页端解析完整预览」：复用本地 Paperead 阅读页 */
+.reader-pane {
+  height: calc(100vh - 49px);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: #fff;
+}
+
+.reader-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 16px;
+  border-bottom: 1px solid #e5e9ef;
+  background: #fbfcfd;
+}
+
+.reader-bar .reader-ready {
+  color: #067647;
+  font-size: 12px;
+}
+
+.reader-bar .reader-wait {
+  color: #b54708;
+  font-size: 12px;
+}
+
+.reader-frame {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  background: #fff;
+}
+
+@media (max-width: 820px) {
+  .pdf-toolbar {
+    gap: 6px;
+    padding: 6px 10px;
+  }
+  .pdf-group + .pdf-group {
+    padding-left: 6px;
+  }
+  .pdf-toolbar button {
+    padding: 4px 6px;
+  }
+}
+
+@media print {
+  .topbar,
+  .pdf-toolbar,
+  .pdf-search,
+  .pdf-toast,
+  .selbar,
+  .popover,
+  .pe-pet-wrap {
+    display: none !important;
+  }
+  .pages {
+    padding: 0;
+  }
+  .page-wrap {
+    margin: 0;
+    box-shadow: none;
+    break-after: page;
+  }
+}

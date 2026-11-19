@@ -8321,6 +8321,22 @@ body.is-dialog-dragging * {
   cursor: pointer;
 }
 
+.hl-translate-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* 固定在 PDF 内容上的翻译卡片：保持浮层层级，位置由滚动补偿计算 */
+.hl-translate.is-pinned {
+  z-index: 90;
+  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.16);
+}
+
+.hl-translate-pin.is-active {
+  color: var(--blue);
+}
+
 .hl-translate-lang {
   padding: 1px 7px;
   border-radius: 99px;

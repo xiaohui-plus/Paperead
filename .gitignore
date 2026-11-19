@@ -64,3 +64,5 @@ release/
 .trae/
 # WXT 生成的缓存
 .wxt/
+# 发版/验证临时审计目录（重解析备份、临时脚本，不入库）
+/reparse-work/
