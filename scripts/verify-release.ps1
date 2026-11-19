@@ -58,6 +58,12 @@ if (-not (Test-Path "src-tauri\resources\agent\src\bin.mjs")) {
 if (-not (Test-Path "src-tauri\resources\agent\node.exe")) {
     $errors += "agent 缺少内置 node.exe"
 }
+if (-not (Test-Path "src-tauri\resources\browser-extension\chrome-mv3\manifest.json")) {
+    $errors += "缺少内置浏览器扩展（先运行 scripts\stage-extension.ps1）"
+}
+if (-not (Test-Path "src-tauri\resources\browser-extension\firefox-mv2\manifest.json")) {
+    $errors += "缺少 Firefox 扩展产物（先运行 scripts\stage-extension.ps1）"
+}
 
 if (Test-Path $installer) {
     $actual = (Get-Item $installer).VersionInfo.FileVersion

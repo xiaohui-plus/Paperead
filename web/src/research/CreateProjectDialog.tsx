@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { IconClose, IconFolder } from '../components/icons'
 import { isDesktopApp } from '../lib/update'
+import { useDialogDrag } from '../lib/useDialogDrag'
 import { LocalFolderBrowser } from './LocalFolderBrowser'
 
 interface Props {
@@ -28,6 +29,7 @@ function errorText(error: unknown): string {
  * agent 后续都在这个目录里读写；浏览器预览没有系统选择器时回退到目录浏览器。
  */
 export function CreateProjectDialog({ open, busy = false, onClose, onCreate }: Props) {
+  const drag = useDialogDrag<HTMLDivElement>()
   const [name, setName] = useState('')
   const [folder, setFolder] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -96,11 +98,13 @@ export function CreateProjectDialog({ open, busy = false, onClose, onCreate }: P
     }}>
       <section
         className="create-project-dialog"
+        ref={drag.ref}
+        {...drag.props}
         role="dialog"
         aria-modal="true"
         aria-label="创建本地项目"
       >
-        <header className="create-project-head">
+        <header className="create-project-head" data-drag-handle>
           <h2>创建本地项目</h2>
           <button
             className="create-project-close"

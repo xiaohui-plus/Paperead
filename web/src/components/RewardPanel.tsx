@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useDialogDrag } from '../lib/useDialogDrag'
 import {
   addRewardRecord,
   clearRewardRecords,
@@ -62,6 +63,7 @@ function tierIcon(tier: Tier, size = 18) {
 
 /** 设置 → 打赏：先选档位，点支付再展示收款码；打赏记录只存本机。 */
 export function RewardPanel() {
+  const drag = useDialogDrag<HTMLDivElement>()
   const [tier, setTier] = useState<Tier | null>(null)
   const [channel, setChannel] = useState<Channel>('wechat')
   const [payOpen, setPayOpen] = useState(false)
@@ -297,6 +299,8 @@ export function RewardPanel() {
           <div
             className="reward-sheet"
             data-tone={selected.id}
+            ref={drag.ref}
+            {...drag.props}
             role="dialog"
             aria-modal
             aria-label={`${selected.title} ${rewardAmountText(selected.price)}`}
@@ -312,7 +316,7 @@ export function RewardPanel() {
               <IconClose />
             </button>
 
-            <div className="reward-sheet-head">
+            <div className="reward-sheet-head" data-drag-handle>
               <span className="reward-sheet-icon" data-tone={selected.id}>
                 {tierIcon(selected.id, 22)}
               </span>

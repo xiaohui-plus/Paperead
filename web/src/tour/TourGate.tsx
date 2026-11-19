@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { useDialogDrag } from '../lib/useDialogDrag'
 import { tourSteps } from './tourSteps'
 
 interface Props {
@@ -9,6 +10,7 @@ interface Props {
 /** 桌面端首次启动的唯一一次选择卡；网页端不会加载这个组件。 */
 export function TourGate({ onStart, onSkip }: Props) {
   const primary = useRef<HTMLButtonElement>(null)
+  const drag = useDialogDrag<HTMLDivElement>()
 
   useEffect(() => {
     primary.current?.focus()
@@ -21,7 +23,7 @@ export function TourGate({ onStart, onSkip }: Props) {
 
   return (
     <div className="tour-gate" role="dialog" aria-modal aria-labelledby="tour-gate-title">
-      <div className="tour-gate-card">
+      <div className="tour-gate-card" ref={drag.ref} {...drag.props} data-drag-handle>
         <div className="tour-gate-brand">
           <span className="tour-gate-mark">P</span>
           <span>Paperead</span>

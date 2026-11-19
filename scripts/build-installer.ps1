@@ -28,6 +28,10 @@ if ($LASTEXITCODE -ne 0) { throw "sidecar 构建失败" }
 & (Join-Path $PSScriptRoot "stage-agent.ps1")
 if ($LASTEXITCODE -ne 0) { throw "agent 打包失败" }
 
+# 浏览器扩展随安装包一起分发：用户不需要自己构建或解压。
+& (Join-Path $PSScriptRoot "stage-extension.ps1")
+if ($LASTEXITCODE -ne 0) { throw "浏览器扩展打包失败" }
+
 # pandoc 不再进安装包（116MB 会顶破 Gitee 附件上限）：这里只准备下载源，
 # 应用首次启动会自己去下载；便携版则由 build-portable.ps1 带上。
 & (Join-Path $PSScriptRoot "stage-tools.ps1")

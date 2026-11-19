@@ -1604,6 +1604,25 @@ body.col-resizing * {
   overflow: hidden;
 }
 
+/* ── 弹窗拖动：所有居中卡片弹窗都可按住标题栏移动 ───────── */
+[data-dialog-drag] [data-drag-handle] {
+  cursor: grab;
+  touch-action: none;
+}
+
+[data-dialog-drag='dragging'] {
+  cursor: grabbing;
+  box-shadow: 0 26px 70px rgba(17, 24, 39, 0.3);
+  transition: none;
+  animation: none;
+}
+
+body.is-dialog-dragging,
+body.is-dialog-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
 .modal-head {
   display: flex;
   align-items: flex-start;
@@ -10799,7 +10818,7 @@ html[data-scanning='1'] #root .scan-overlay * {
 /* ── 文件同步：统一大弹窗 ─────────────────────────────── */
 .file-sync-modal {
   width: min(1040px, 95vw);
-  height: min(760px, 90vh);
+  height: min(760px, calc(var(--app-h) * 0.9));
   display: flex;
   flex-direction: column;
   padding: 0;
@@ -11308,7 +11327,7 @@ html[data-scanning='1'] #root .scan-overlay * {
 /* ── 独立同步弹窗与卡片预览 ───────────────────────────── */
 .sync-modal {
   width: min(1040px, 94vw);
-  height: min(740px, 88vh);
+  height: min(740px, calc(var(--app-h) * 0.88));
   padding: 0;
   overflow: hidden;
   border-radius: 16px;
@@ -11977,7 +11996,7 @@ html[data-scanning='1'] #root .scan-overlay * {
   display: flex;
   flex-direction: column;
   width: min(980px, 100%);
-  height: min(88vh, 900px);
+  height: min(calc(var(--app-h) * 0.88), 900px);
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -12578,6 +12597,355 @@ input.input.feedback-title {
 .plugin-manual .link-btn {
   margin-top: 8px;
 }
+
+.plugin-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.plugin-hint {
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+/* ── 设置：浏览器扩展安装中心 ───────────────────────── */
+.ext-installer {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.ext-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-soft);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+.ext-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+  flex: none;
+}
+
+.ext-status[data-state='ok'] .ext-status-dot {
+  background: var(--green);
+}
+
+.ext-status b {
+  color: var(--blue-ink);
+}
+
+.ext-hint,
+.ext-empty p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+
+.ext-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px dashed var(--line-2);
+  border-radius: var(--radius-sm);
+}
+
+.ext-browser-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ext-browser {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.ext-browser[data-selected='true'] {
+  border-color: var(--blue-line);
+  background: var(--bg-soft);
+}
+
+.ext-browser-icon {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  object-fit: contain;
+}
+
+.ext-browser-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.ext-browser-text b {
+  font-size: 13.5px;
+  color: var(--ink);
+}
+
+.ext-browser-text span {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.ext-browser-btn {
+  flex: none;
+  min-width: 92px;
+}
+
+.ext-guide {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+}
+
+.ext-guide-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ext-guide-head b {
+  font-size: 13.5px;
+  color: var(--ink);
+}
+
+.ext-guide-head span {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.ext-steps {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--ink-2);
+}
+
+.ext-steps li::marker {
+  color: var(--blue);
+}
+
+.ext-steps code,
+.ext-path code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--blue-ink);
+  overflow-wrap: anywhere;
+}
+
+.ext-steps kbd {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 5px;
+  border: 1px solid var(--line-2);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--ink-2);
+}
+
+.ext-path {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ext-path code {
+  flex: 1;
+  min-width: 220px;
+  padding: 7px 9px;
+  white-space: normal;
+}
+
+.ext-small-btn {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.ext-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+
+.ext-error {
+  margin: 0;
+  font-size: 12px;
+  color: #c0392b;
+}
+
+.ext-faq {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ext-faq summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.ext-faq ul {
+  margin: 8px 0 6px;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  line-height: 1.65;
+}
+
+.ext-installer.is-onboarding .ext-browser {
+  padding: 13px 14px;
+}
+
+.ext-installer.is-onboarding .ext-browser-icon {
+  width: 30px;
+  height: 30px;
+}
+
+.ext-installer.is-onboarding .ext-browser-btn {
+  min-width: 108px;
+  padding: 8px 14px;
+}
+
+.ext-wizard {
+  position: fixed;
+  inset: 0;
+  z-index: 9300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  overflow: hidden;
+  background: rgba(23, 24, 26, 0.34);
+  backdrop-filter: blur(2px);
+}
+
+.ext-wizard-card {
+  width: min(680px, 100%);
+  /* 全站 html 带 zoom:1.2，100vh 会被再放大一次；先折算回布局高度，
+     否则矮窗口下卡片会顶出视口、上下按钮都看不到。 */
+  max-height: calc((100vh / var(--ui-zoom)) - 48px);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 22px 24px;
+  border-radius: 14px;
+  background: var(--bg);
+  box-shadow: var(--shadow-2);
+}
+
+.ext-wizard-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.ext-wizard-head h2 {
+  margin: 0 0 6px;
+  font-size: 17px;
+  color: var(--ink);
+}
+
+.ext-wizard-head p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+
+.ext-wizard-head .icon-btn {
+  flex: none;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.ext-wizard-actions {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  /* 负边距让底栏铺满卡片宽度，滚动时不会从左右内边距里透出内容。 */
+  margin: 0 -24px -22px;
+  padding: 14px 24px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.ext-wizard-actions span {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+@media (max-width: 640px) {
+  .ext-browser {
+    flex-wrap: wrap;
+  }
+
+  .ext-browser-text {
+    flex-basis: calc(100% - 42px);
+  }
+
+  .ext-browser-btn {
+    margin-left: 38px;
+  }
+
+  .ext-wizard {
+    padding: 12px;
+  }
+
+  .ext-wizard-card {
+    padding: 18px;
+  }
+
+  .ext-wizard-actions {
+    margin: 0 -18px -18px;
+    padding: 14px 18px 14px;
+  }
+}
 /* ── 设置：打赏 ─────────────────────────────────────── */
 .reward-panel {
   --reward-flower: #c96288;
@@ -13054,7 +13422,7 @@ button.reward-tile {
 .reward-sheet {
   position: relative;
   width: min(390px, 100%);
-  max-height: min(86vh, 720px);
+  max-height: min(calc(var(--app-h) * 0.86), 720px);
   overflow-y: auto;
   padding: 20px 20px 16px;
   border: 1px solid var(--line);
@@ -13262,7 +13630,7 @@ button.reward-tile {
 
   .reward-sheet {
     width: 100%;
-    max-height: 88vh;
+    max-height: calc(var(--app-h) * 0.88);
     padding: 20px 18px 22px;
     border-bottom: 0;
     border-radius: 18px 18px 0 0;

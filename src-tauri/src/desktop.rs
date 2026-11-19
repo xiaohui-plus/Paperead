@@ -5,6 +5,8 @@
 mod agent_sidecar;
 #[path = "api.rs"]
 mod api;
+#[path = "browser_ext.rs"]
+mod browser_ext;
 #[path = "feedback.rs"]
 mod feedback;
 #[path = "paths.rs"]
@@ -53,7 +55,10 @@ pub fn run_desktop() {
             install_update,
             check_desktop_update,
             restart_app,
-            save_pdf_file
+            save_pdf_file,
+            browser_ext::browser_extension_setup,
+            browser_ext::open_browser_extensions,
+            browser_ext::open_extension_folder
         ])
         .on_window_event(|window, event| {
             if window.label() != "main" {

@@ -28,6 +28,7 @@ import pymupdf.table as _pymupdf_table
 
 from .inline_math import MATH_FONTS as _INLINE_MATH_FONTS
 from .inline_math import build_inline_math, spans_with_offsets
+from .regions import PageRegions, build_page_regions
 from .textnorm import (
     has_dot_leader,
     is_dot_leader_only,
@@ -1288,6 +1289,7 @@ def _build_blocks(
     ordered: list[Line],
     body_size: float,
     table_rects: dict[int, list[pymupdf.Rect]] | None = None,
+    regions: dict[int, PageRegions] | None = None,
 ) -> list[Block]:
     blocks: list[Block] = []
     cur: dict | None = None
@@ -1398,6 +1400,21 @@ def _build_blocks(
         return ln.y0 - state["last_y1"]
 
     for ln in ordered:
+        # ── 区域过滤：行号栏与图内文字在建块前就排除 ──
+        # 这一步必须在公式/标题判定之前：图里的 `100%`、`Step 3 pool`
+        # 既像短段落又像公式碎片，放任它们进入后续规则会同时污染
+        # 断段、公式合并与图注配对。图注本身要留下——它是配图的锚点，
+        # 也要参与翻译。
+        page_regions = regions.get(ln.page) if regions else None
+        if page_regions is not None:
+            if page_regions.is_line_number(ln.bbox):
+                continue
+            if (
+                page_regions.figure_at(ln.bbox) is not None
+                and not _is_caption_text(ln.text)
+            ):
+                continue
+
         # ── 公式：连续数学行合成一个公式块，不参与正文合并、不翻译 ──
         math_ratio = ln.math_chars / max(ln.total_chars, 1)
         # 紧贴在公式下方/上方、又短的片段，一律算作同一个公式的一部分：
@@ -3139,6 +3156,7 @@ def _extract_figures(
     out_dir: Path,
     body_size: float = 0.0,
     detected: dict[int, list[tuple[pymupdf.Rect, str, int]]] | None = None,
+
 ) -> list[Block]:
     """把每页图片区域裁成 PNG，并按「图注」配对插入阅读顺序。"""
     insert_before: dict[str, list[Block]] = {}
@@ -3171,6 +3189,10 @@ def _extract_figures(
                     combined.append(inter)
             table_rects = _merge_rects(combined) if combined else trusted
         rects = _figure_rects(page)
+        # 这里不并入区域层的图区：区域层是按「矢量簇」给的，一张流程图常被
+        # cluster_drawings 拆成左右两列（间距 40pt），直接并进来会裁出多张
+        # 切片。带文字标注的矢量图仍交给 `_extract_vector_text_figures` 按
+        # 图注锚定成一张；区域层的作用是先把图内文字挡在正文流之外。
         if not rects:
             continue
 
@@ -3296,6 +3318,7 @@ def _extract_figures(
         b.order = i
         b.id = f"b{i:04d}"
     return result
+
 
 
 def _is_text_paragraph(b: Block, page: pymupdf.Page) -> bool:
@@ -3465,6 +3488,7 @@ def _extract_vector_text_figures(
     blocks: list[Block],
     out_dir: Path,
     body_size: float = 0.0,
+    page_regions: dict[int, PageRegions] | None = None,
 ) -> list[Block]:
     """带文字标注的矢量图：按图注裁出图形区域，正文块保持原样。
 
@@ -3492,12 +3516,19 @@ def _extract_vector_text_figures(
         if len(drawings) < 3:
             continue
 
+        page_region = (page_regions or {}).get(page_no)
+        region_figures = (
+            [pymupdf.Rect(r.bbox) for r in page_region.figures]
+            if page_region is not None else []
+        )
         texts = [
             b for _, b in items
             if b.kind not in ("figure", "table", "reference", "footnote")
             and b.text.strip()
         ]
-        if len(texts) < 4:
+        # 图内标注已被区域层剔出正文流时，texts 会很少；只要有区域图区
+        # 就不能因此放弃这一页。
+        if len(texts) < 4 and not region_figures:
             continue
         disclaim = lambda b: _is_small_float_text(b, body_size)  # noqa: E731
         fig_rects = [
@@ -3522,6 +3553,17 @@ def _extract_vector_text_figures(
             key=lambda b: b.bbox[1],
         )
         if not caps:
+            # 整页图的图注常被排到下一页，页面上只留「See next page」。
+            nxt = [
+                b for b in blocks
+                if b.page == page_no + 1
+                and b.kind == "caption"
+                and b.text.strip()
+                and not _is_table_caption(b.text)
+            ]
+            if nxt:
+                caps = nxt[:1]
+        if not caps:
             continue
 
         # 图注锚定的大块图形区域（矢量簇 + 位图）。图内文字可能和正文
@@ -3536,17 +3578,25 @@ def _extract_vector_text_figures(
         except Exception:
             images = []
         page_area = page.rect.width * page.rect.height
-        regions = [
-            r for r in _merge_figure_regions(
-                [
-                    r for r in [*clusters, *images]
-                    if r.width * r.height > 4000 and r.height > 40
-                ],
-                gap_x=40.0,
-                gap_y=40.0,
-            )
-            if r.width * r.height < page_area * 0.75
-        ]
+        if region_figures:
+            # 区域层已按视觉单元把图区分好（含图内标注）。这里直接拿它
+            # 当候选，不再依赖 cluster_drawings 的二次聚类与图内文字生长；
+            # 锚定这一步只负责把它和图注配对。
+            regions = [
+                r for r in region_figures if r.width * r.height < page_area * 0.75
+            ]
+        else:
+            regions = [
+                r for r in _merge_figure_regions(
+                    [
+                        r for r in [*clusters, *images]
+                        if r.width * r.height > 4000 and r.height > 40
+                    ],
+                    gap_x=40.0,
+                    gap_y=40.0,
+                )
+                if r.width * r.height < page_area * 0.75
+            ]
         anchors: list[pymupdf.Rect] = []
         for r in regions:
             for cap in caps:
@@ -3554,7 +3604,10 @@ def _extract_vector_text_figures(
                 overlap_x = min(r.x1, cb.x1) - max(r.x0, cb.x0)
                 if overlap_x <= min(r.width, cb.width) * 0.3:
                     continue
-                if -30 <= cb.y0 - r.y1 <= 90 or -30 <= r.y0 - cb.y1 <= 90:
+                # 图注可能排在整页图的下方很远（Figure S2 这类补充材料，
+                # 图本体到图注常超过 90pt）。区域层已经保证图区不含正文，
+                # 放宽距离只影响「配哪条图注」，不会再吞正文。
+                if -30 <= cb.y0 - r.y1 <= 200 or -30 <= r.y0 - cb.y1 <= 200:
                     anchors.append(r | cb)
                     break
 
@@ -3681,12 +3734,12 @@ def _extract_vector_text_figures(
                 # 表格簇和热图簇只隔 20 多 pt，先合并会把表格一起框进图区，
                 # 随后被「图不能压表格」整张否掉（Figure 4 就是这样丢的）。
                 near = [
-                    r for r in [*clusters, *images]
+                    r for r in [*clusters, *images, *region_figures]
                     if r.width * r.height > 4000 and r.height > 40
                     and min(r.x1, cb.x1) - max(r.x0, cb.x0) > min(r.width, cb.width) * 0.3
                     and (
-                        -30 <= cb.y0 - r.y1 <= 110
-                        or -30 <= r.y0 - cb.y1 <= 110
+                        -30 <= cb.y0 - r.y1 <= 200
+                        or -30 <= r.y0 - cb.y1 <= 200
                     )
                 ]
                 if not near:
@@ -3826,6 +3879,7 @@ def _collapse_vector_figure_pages(
     blocks: list[Block],
     out_dir: Path,
     body_size: float = 0.0,
+    page_regions: dict[int, PageRegions] | None = None,
 ) -> list[Block]:
     """把纯矢量图表页收敛成一张整页图，避免把图里的标注拆成一句一块。
 
@@ -3838,11 +3892,21 @@ def _collapse_vector_figure_pages(
     for i, b in enumerate(blocks):
         by_page.setdefault(b.page, []).append((i, b))
 
+    # 整页插图在建块后可能一个块都不剩（图内标注被区域层剔除、图注在
+    # 下一页），这样的页在 by_page 里根本不存在。必须把「区域层认出的
+    # 图页」也纳入遍历，否则整张图连同它的兜底路径一起消失。
+    page_numbers = sorted(set(by_page) | {
+        p for p, region in (page_regions or {}).items() if region.figures
+    })
+
     replacements: dict[int, tuple[int, Block]] = {}
-    for page_no, items in by_page.items():
+    inserts: dict[int, list[Block]] = {}
+    for page_no in page_numbers:
         if page_no < 1 or page_no > len(doc):
             continue
+        items = by_page.get(page_no, [])
         page = doc[page_no - 1]
+        page_region = (page_regions or {}).get(page_no)
         # 已经有位图/表格块的页面交给原来的图表抽取逻辑，避免重复
         if any(b.kind in ("figure", "table") for _, b in items):
             continue
@@ -3853,6 +3917,60 @@ def _collapse_vector_figure_pages(
             (i, b) for i, b in items
             if b.kind not in ("figure", "table", "reference") and b.text.strip()
         ]
+        # 区域层兜底：整页插图（Figure S2 这类）在建块后可能只剩一个小节
+        # 标题和图注——图内标注已经被区域层剔出正文流，既凑不够「至少 8 个
+        # 短文本块」，也没有图内文字可供锚定生长，兜底路径会整张漏掉。
+        #
+        # 关键：裁的是**图区 bbox**，不是整页渲染。整页渲染会把同页两张图
+        # 合并成一张、把页眉页码一起裁进来，正是用户看到的「整页切片」。
+        # 这条分支只在其他抽图路径都没产出 figure 时才生效，避免重复裁图。
+        page_area = page.rect.width * page.rect.height
+        region_fig = None
+        if (
+            page_region is not None
+            and page_region.figures
+            and not any(b.kind == "figure" for _, b in items)
+        ):
+            para_chars = sum(len(b.text.strip()) for _, b in items if b.kind == "para")
+            if para_chars <= 80:
+                candidate = max(page_region.figures, key=lambda r: r.area)
+                if candidate.area >= page_area * 0.35:
+                    region_fig = candidate
+
+        if region_fig is not None:
+            rect = pymupdf.Rect(region_fig.bbox)
+            img = _crop(page, rect, out_dir / f"p{page_no:03d}_region.png")
+            if img:
+                caps = [
+                    b.text.strip() for _, b in items
+                    if b.kind == "caption" and b.text.strip()
+                ]
+                if not caps or all("next page" in c.lower() for c in caps):
+                    nxt = [
+                        b.text.strip() for b in blocks
+                        if b.page == page_no + 1
+                        and b.kind == "caption"
+                        and b.text.strip()
+                        and not _is_table_caption(b.text)
+                    ]
+                    if nxt:
+                        caps = nxt[:1]
+                fig = Block(
+                    id="", order=0, page=page_no, kind="figure", text="",
+                    bbox=tuple(region_fig.bbox), image_path=img,
+                    caption=caps[0] if caps else f"第 {page_no} 页图",
+                    translatable=False,
+                )
+                anchor = (
+                    items[0][0] + 1 if items
+                    else min(
+                        (i for i, b in enumerate(blocks) if b.page > page_no),
+                        default=len(blocks),
+                    )
+                )
+                inserts.setdefault(anchor, []).append(fig)
+            continue
+
         if len(texts) < 8:
             continue
         short = sum(1 for _, b in texts if len(b.text.strip()) <= 70)
@@ -3866,7 +3984,21 @@ def _collapse_vector_figure_pages(
         # 一起吞进图片（引言、附录说明、图下的分析段都遇到过）。交给常规的
         # 图表抽取，只把矢量图形裁成 figure，正文继续按段落渲染。
         # 字号明显小于正文的块是图内标注，不算「成段正文」。
-        if any(
+        #
+        # 旧判据是「存在单个 >80 字的正文块」，它依赖段落至少有一个长块。
+        # 而段落被上游规则拆碎时这个条件恰好不成立，于是「段落拆碎 → 长块
+        # 消失 → 守卫失效 → 整页图化」形成闭环，正文被整页裁进图片。
+        # 改为先看「非图区正文的字符总量」：碎成多个短块也照样达标。
+        body_chars = sum(
+            len(b.text.strip()) for _, b in texts
+            if b.kind in ("para", "heading")
+            and not _is_small_float_text(b, body_size)
+            and not (
+                page_region is not None
+                and page_region.figure_at(b.bbox) is not None
+            )
+        )
+        if body_chars > 240 or any(
             b.kind in ("para", "heading")
             and len(b.text.strip()) > 80
             and not _is_small_float_text(b, body_size)
@@ -3877,7 +4009,7 @@ def _collapse_vector_figure_pages(
         out_dir.mkdir(parents=True, exist_ok=True)
         img = out_dir / f"page_{page_no:03d}.png"
         page.get_pixmap(dpi=_dpi_for(page.rect, CROP_TARGET_PX, 300)).save(str(img))
-        first = min(i for i, _ in texts)
+        first = min((i for i, _ in texts), default=min((i for i, _ in items), default=0))
         # 用页面上真实的图注，而不是笼统的「第 N 页图表」；没有图注才兜底
         caps = [b.text.strip() for _, b in items if b.kind == "caption" and b.text.strip()]
         # 整页图常把「See next page for caption」印在图底，真正的图注在下一页；
@@ -3892,32 +4024,41 @@ def _collapse_vector_figure_pages(
             ]
             if nxt:
                 caps = nxt[:1]
-        replacements[page_no] = (
-            first,
-            Block(
-                id="",
-                order=0,
-                page=page_no,
-                kind="figure",
-                text="",
-                bbox=(0.0, 0.0, page.rect.width, page.rect.height),
-                image_path=str(img),
-                caption=caps[0] if caps else f"第 {page_no} 页图表",
-                translatable=False,
-            ),
+        fig = Block(
+            id="",
+            order=0,
+            page=page_no,
+            kind="figure",
+            text="",
+            bbox=(0.0, 0.0, page.rect.width, page.rect.height),
+            image_path=str(img),
+            caption=caps[0] if caps else f"第 {page_no} 页图表",
+            translatable=False,
         )
+        if items:
+            replacements[page_no] = (first, fig)
+        else:
+            # 整页图在建块后没有留下任何块，无法「替换首块」，只能按页码
+            # 找到它在阅读顺序里的插入点。
+            anchor = min(
+                (i for i, b in enumerate(blocks) if b.page > page_no),
+                default=len(blocks),
+            )
+            inserts.setdefault(anchor, []).append(fig)
 
-    if not replacements:
+    if not replacements and not inserts:
         return blocks
 
     out: list[Block] = []
     for i, b in enumerate(blocks):
+        out.extend(inserts.get(i, []))
         repl = replacements.get(b.page)
         if repl is not None:
             if i == repl[0]:
                 out.append(repl[1])
             continue
         out.append(b)
+    out.extend(inserts.get(len(blocks), []))
     for i, b in enumerate(out):
         b.order = i
         b.id = f"b{i:04d}"
@@ -3978,7 +4119,10 @@ def parse_pdf(
             ]
             if rects:
                 table_rects[page_no] = rects
-        blocks = _build_blocks(ordered, body_size, table_rects)
+        page_regions = build_page_regions(
+            doc, lines, body_size, table_rects, _is_caption_text,
+        )
+        blocks = _build_blocks(ordered, body_size, table_rects, page_regions)
         _classify(blocks, body_size, doc[0].rect.height)
         blocks = _attach_equation_numbers(blocks, doc)
         blocks = _merge_affiliations(blocks)
@@ -3993,10 +4137,15 @@ def parse_pdf(
                 out = out / paper_id
             blocks = _extract_tables(doc, blocks, out / "tables", detected)
             blocks = _extract_figures(doc, blocks, out / "figures", body_size, detected)
-            # 带文字标注的矢量图先按图注裁出图形区域，避免后面的整页图化
-            # 把同一页的正文一起吞进图片
-            blocks = _extract_vector_text_figures(doc, blocks, out / "figures", body_size)
-            blocks = _collapse_vector_figure_pages(doc, blocks, out / "figures", body_size)
+            # 区域层的图区作为「带标注矢量图」的候选来源：图内标注已被建块
+            # 阶段剔出正文流，原路径的文字生长失效，改由区域层提供图区，
+            # 图注锚定负责配对与几何校验（图不压正文/表格）。
+            blocks = _extract_vector_text_figures(
+                doc, blocks, out / "figures", body_size, page_regions,
+            )
+            blocks = _collapse_vector_figure_pages(
+                doc, blocks, out / "figures", body_size, page_regions,
+            )
             # 图表裁好之后再清一次：图里的坐标轴/标注不该再作为公式出现
             blocks = _drop_equations_inside_floats(blocks)
             blocks = _crop_equations(doc, blocks, out / "equations")

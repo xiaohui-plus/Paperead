@@ -8,6 +8,7 @@ import {
   type ZoteroWebStatus,
 } from '../lib/library'
 import { IconCheck, IconClose, IconRefresh } from './icons'
+import { useDialogDrag } from '../lib/useDialogDrag'
 import { ScholarReadPanel } from './ScholarReadPanel'
 
 type SyncSource = 'zotero' | 'scholaread'
@@ -29,6 +30,7 @@ function syncTime(value: number): string {
 
 /** 文献同步：下拉框选择同步来源（Zotero / 学术阅读）。 */
 export function ZoteroSyncDialog({ open, onClose, onSynced }: Props) {
+  const drag = useDialogDrag<HTMLDivElement>()
   const [source, setSource] = useState<SyncSource>('zotero')
   const [status, setStatus] = useState<ZoteroWebStatus | null>(null)
   const [loading, setLoading] = useState(false)
@@ -152,11 +154,13 @@ export function ZoteroSyncDialog({ open, onClose, onSynced }: Props) {
       <div
         className="modal zotero-modal"
         onMouseDown={(event) => event.stopPropagation()}
+        ref={drag.ref}
+        {...drag.props}
         role="dialog"
         aria-modal
         aria-label="文献同步"
       >
-        <header className="modal-head">
+        <header className="modal-head" data-drag-handle>
           <div>
             <h2>文献同步</h2>
             <p>

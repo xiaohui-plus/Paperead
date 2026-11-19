@@ -14,6 +14,9 @@
     "allow-check-desktop-update",
     "allow-install-update",
     "allow-restart-app",
-    "allow-save-pdf-file"
+    "allow-save-pdf-file",
+    "allow-browser-extension-setup",
+    "allow-open-browser-extensions",
+    "allow-open-extension-folder"
   ]
 }

@@ -16,6 +16,7 @@ import {
   type ZoteroWebReport,
   type ZoteroWebStatus,
 } from '../lib/library'
+import { useDialogDrag } from '../lib/useDialogDrag'
 import {
   formatSyncTime,
   listScholarReadPapers,
@@ -105,6 +106,7 @@ function SyncShell({
   tone: SyncTone
   children: React.ReactNode
 }) {
+  const drag = useDialogDrag<HTMLDivElement>()
   if (!open) return null
   const meta = SYNC_META[tone]
   return (
@@ -112,11 +114,13 @@ function SyncShell({
       <div
         className={`modal sync-modal sync-modal--${tone}`}
         onMouseDown={(event) => event.stopPropagation()}
+        ref={drag.ref}
+        {...drag.props}
         role="dialog"
         aria-modal
         aria-label={meta.title}
       >
-        <header className="sync-modal-head">
+        <header className="sync-modal-head" data-drag-handle>
           <div className="sync-modal-title">
             <span
               className="sync-brand"
@@ -324,6 +328,7 @@ function PhoneSyncPane({ onSynced }: { onSynced: () => void }) {
 // ── Zotero ──────────────────────────────────────────────
 
 function ZoteroSyncPane({ onSynced }: { onSynced: () => void }) {
+  const previewDrag = useDialogDrag<HTMLDivElement>()
   const [direction, setDirection] = useState<ZoteroDirection>('pull')
   const [web, setWeb] = useState<ZoteroWebStatus | null>(null)
   const [loading, setLoading] = useState(true)
@@ -842,12 +847,14 @@ function ZoteroSyncPane({ onSynced }: { onSynced: () => void }) {
         <div className="zotero-preview-backdrop" onClick={() => setPreview(null)}>
           <div
             className="zotero-preview"
+            ref={previewDrag.ref}
+            {...previewDrag.props}
             role="dialog"
             aria-modal="true"
             aria-label="Zotero PDF 预览"
             onClick={(event) => event.stopPropagation()}
           >
-            <header className="zotero-preview-head">
+            <header className="zotero-preview-head" data-drag-handle>
               <div>
                 <h3>{preview.title}</h3>
                 <span>

@@ -22,6 +22,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/package-lock.json
+            extensions/browser/package-lock.json
 
       - uses: astral-sh/setup-uv@v6
         with:
@@ -43,6 +47,7 @@ jobs:
         run: |
           npm ci
           npm ci --prefix web
+          npm ci --prefix extensions/browser
 
       - name: Install agent dependencies
         run: pnpm --dir agent install --frozen-lockfile
@@ -69,6 +74,10 @@ jobs:
       - name: Stage bundled tools (pandoc)
         shell: pwsh
         run: .\scripts\stage-tools.ps1
+
+      - name: Stage browser extension resources
+        shell: pwsh
+        run: .\scripts\stage-extension.ps1
 
       - name: Sync version from tag
         shell: pwsh

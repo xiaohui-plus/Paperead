@@ -7,6 +7,7 @@ $res = Join-Path $root "src-tauri\resources"
 if (-not (Test-Path $exe)) { throw "缺少 release exe，先运行 npm run build:installer" }
 if (-not (Test-Path (Join-Path $res "paperead-server\paperead-server.exe"))) { throw "缺少 sidecar resources" }
 if (-not (Test-Path (Join-Path $res "agent\src\bin.mjs"))) { throw "缺少 agent resources，先运行 scripts\stage-agent.ps1" }
+if (-not (Test-Path (Join-Path $res "browser-extension\chrome-mv3\manifest.json"))) { throw "缺少浏览器扩展资源，先运行 scripts\stage-extension.ps1" }
 
 $config = Get-Content (Join-Path $root "src-tauri\tauri.conf.json") -Raw | ConvertFrom-Json
 $version = $config.version

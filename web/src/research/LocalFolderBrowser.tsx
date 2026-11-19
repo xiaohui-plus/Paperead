@@ -6,6 +6,7 @@ import {
   IconRefresh,
 } from '../components/icons'
 import { FileTypeIcon } from '../components/fileTypeIcons'
+import { useDialogDrag } from '../lib/useDialogDrag'
 import {
   formatSize,
   researchApi,
@@ -33,6 +34,7 @@ export function LocalFolderBrowser({
   onClose,
   onSelect,
 }: Props) {
+  const drag = useDialogDrag<HTMLDivElement>()
   const [listing, setListing] = useState<FsListing | null>(null)
   const [roots, setRoots] = useState<FsEntry[]>([])
   const [draft, setDraft] = useState('')
@@ -98,12 +100,14 @@ export function LocalFolderBrowser({
     <div className="folder-browser-backdrop" onClick={onClose}>
       <div
         className="folder-browser"
+        ref={drag.ref}
+        {...drag.props}
         role="dialog"
         aria-modal="true"
         aria-label={title}
         onClick={(event) => event.stopPropagation()}
       >
-        <header className="folder-browser-head">
+        <header className="folder-browser-head" data-drag-handle>
           <div>
             <h2>{title}</h2>
             <p>选择电脑上的文件夹作为项目工作目录</p>

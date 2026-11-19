@@ -1,7 +1,7 @@
 {
   "name": "paperead-desktop",
   "private": true,
-  "version": "0.2.23",
+  "version": "0.2.24",
   "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
@@ -21,7 +21,8 @@
     "build:android": "powershell -ExecutionPolicy Bypass -File scripts/build-android.ps1",
     "verify:release": "powershell -ExecutionPolicy Bypass -File scripts/verify-release.ps1",
     "release:publish": "powershell -ExecutionPolicy Bypass -File scripts/release-publish.ps1",
-    "stage:sidecar": "powershell -ExecutionPolicy Bypass -File scripts/stage-sidecar.ps1"
+    "stage:sidecar": "powershell -ExecutionPolicy Bypass -File scripts/stage-sidecar.ps1",
+    "stage:extension": "powershell -ExecutionPolicy Bypass -File scripts/stage-extension.ps1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.12.4"

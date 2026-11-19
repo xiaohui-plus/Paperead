@@ -24,6 +24,13 @@ const TourRoot = lazy(() =>
   import('./tour/TourRoot').then((module) => ({ default: module.TourRoot })),
 )
 
+// 安装包已内置浏览器扩展；首次启动时把「选浏览器 → 打开扩展页」做成向导。
+const ExtensionOnboarding = lazy(() =>
+  import('./components/ExtensionOnboarding').then((module) => ({
+    default: module.ExtensionOnboarding,
+  })),
+)
+
 const mobile = isMobileShell()
 if (mobile) {
   // Android 采用 edge-to-edge，给状态栏留出安全区
@@ -73,6 +80,11 @@ async function boot() {
         {isDesktopApp() && (
           <Suspense fallback={null}>
             <TourRoot />
+          </Suspense>
+        )}
+        {isDesktopApp() && (
+          <Suspense fallback={null}>
+            <ExtensionOnboarding />
           </Suspense>
         )}
       </ErrorBoundary>

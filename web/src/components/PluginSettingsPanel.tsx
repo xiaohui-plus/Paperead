@@ -7,6 +7,7 @@ import {
   type PairingCode,
   type PluginInfo,
 } from '../lib/plugins'
+import { ExtensionInstaller } from './ExtensionInstaller'
 
 function formatTime(value: number) {
   if (!value) return '—'
@@ -36,16 +37,7 @@ export function PluginSettingsPanel() {
   }, [])
 
   useEffect(() => {
-    void refresh().then((rows) => {
-      if (rows.length) return
-      // 还没连接过插件：自动开一个等待窗口，扩展会在后台认领。
-      void startPairingWait()
-        .then(({ expires_at }) => {
-          setKnownIds([])
-          setWaitingExpires(expires_at)
-        })
-        .catch(() => undefined)
-    })
+    void refresh()
   }, [refresh])
 
   // 等待扩展认领：轮询插件列表，出现新插件即视为连接成功
@@ -92,7 +84,7 @@ export function PluginSettingsPanel() {
     return () => window.clearInterval(timer)
   }, [pairing])
 
-  const startWait = async () => {
+  const startWait = useCallback(async () => {
     setLoading(true)
     setNotice('')
     setPairing(null)
@@ -106,7 +98,7 @@ export function PluginSettingsPanel() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [plugins])
 
   const generate = async () => {
     setLoading(true)
@@ -142,46 +134,48 @@ export function PluginSettingsPanel() {
         </div>
         <p className="model-empty">
           Paperead Connector 只读取当前网页的论文信息和 PDF，并通过本机接口存入文献库。
-          插件不能访问模型配置、研究项目或文件系统。
-          安装好扩展后，后台会自动连接，不需要输入配对码或手动点连接。
+          插件不能访问模型配置、研究项目或文件系统，也不会上传任何数据。
+          扩展已经随安装包内置在电脑里，不需要下载、解压或去仓库找构建包。
         </p>
-        <div className="plugin-install-links">
-          <span>安装：</span>
-          <a href="https://github.com/xiaohui-plus/Paperead" target="_blank" rel="noreferrer">
-            Chrome / Edge 构建说明 ↗
-          </a>
-        </div>
+        <ExtensionInstaller
+          connected={plugins.length}
+          onStartWait={() => void startWait()}
+          onRefreshConnection={() => void refresh()}
+        />
       </section>
 
       <section className="model-section">
         <div className="section-head">
-          <h3>连接浏览器插件</h3>
-          <span>后台自动连接</span>
+          <h3>连接状态</h3>
+          <span>{waitingExpires ? '等待中' : plugins.length ? '已就绪' : '未连接'}</span>
         </div>
         {waitingExpires ? (
           <div className="plugin-pair-box">
             <b className="plugin-waiting">等待扩展连接…</b>
             <span>
-              扩展会在后台自动连接，无需打开弹窗；剩余 {secondsLeft} 秒
+              装好扩展后会在后台自动连接，无需打开弹窗；剩余 {secondsLeft} 秒
             </span>
             <button className="link-btn" onClick={() => setWaitingExpires(0)}>
               取消
             </button>
           </div>
         ) : (
-          <button className="btn primary" onClick={() => void startWait()} disabled={loading}>
-            {loading ? '准备中…' : '连接浏览器插件'}
-          </button>
+          <div className="plugin-actions">
+            <button className="btn primary" onClick={() => void startWait()} disabled={loading}>
+              {loading ? '准备中…' : '连接浏览器插件'}
+            </button>
+            <span className="plugin-hint">装完扩展后点这里，扩展会自动认领；也可以直接等它自己连上。</span>
+          </div>
         )}
         {notice && <p className="plugin-notice">{notice}</p>}
         {error && <p className="plugin-error">{error}</p>}
 
         <details className="plugin-manual">
-          <summary>手动输入配对码</summary>
+          <summary>自动连接失败？用 6 位配对码</summary>
           {pairing ? (
             <div className="plugin-pair-box">
               <b className="plugin-pair-code">{pairing.code}</b>
-              <span>在插件弹窗中输入这 6 位数字，剩余 {secondsLeft} 秒</span>
+              <span>在扩展侧边栏的配对入口输入这 6 位数字，剩余 {secondsLeft} 秒</span>
             </div>
           ) : (
             <button className="link-btn" onClick={() => void generate()} disabled={loading}>
@@ -198,7 +192,7 @@ export function PluginSettingsPanel() {
         </div>
         {plugins.length === 0 ? (
           <p className="model-empty">
-            还没有插件连接。安装扩展并保持 Paperead 打开，扩展会在后台自动连接。
+            还没有插件连接。按上面的引导装好扩展并保持 Paperead 打开，扩展会自动连接。
           </p>
         ) : (
           <div className="plugin-list">

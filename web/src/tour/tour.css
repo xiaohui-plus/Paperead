@@ -13,6 +13,8 @@
 
 .tour-gate-card {
   width: min(440px, 94vw);
+  max-height: calc(var(--app-h) - 48px);
+  overflow-y: auto;
   padding: 28px;
   border: 1px solid var(--line);
   border-radius: 16px;

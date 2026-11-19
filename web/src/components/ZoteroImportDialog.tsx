@@ -10,6 +10,7 @@ import {
   type ZoteroStatus,
 } from '../lib/library'
 import { IconClose } from './icons'
+import { useDialogDrag } from '../lib/useDialogDrag'
 
 interface Props {
   open: boolean
@@ -23,6 +24,7 @@ const PAGE_SIZE = 50
 type Result = { imported: number; skipped: number; errors: string[] }
 
 export function ZoteroImportDialog({ open, onClose, onImported }: Props) {
+  const drag = useDialogDrag<HTMLDivElement>()
   const [status, setStatus] = useState<ZoteroStatus | null>(null)
   const [checking, setChecking] = useState(false)
   const [collections, setCollections] = useState<ZoteroCollection[]>([])
@@ -215,11 +217,13 @@ export function ZoteroImportDialog({ open, onClose, onImported }: Props) {
       <div
         className="modal zotero-modal"
         onMouseDown={(e) => e.stopPropagation()}
+        ref={drag.ref}
+        {...drag.props}
         role="dialog"
         aria-modal
         aria-label="从 Zotero 导入"
       >
-        <header className="modal-head">
+        <header className="modal-head" data-drag-handle>
           <div>
             <h2>从 Zotero 导入</h2>
             <p>读取本机 Zotero 文献库，只导入带 PDF 附件的条目，导入后自动解析。</p>
