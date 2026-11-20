@@ -12,20 +12,25 @@ import pymupdf
 from paperead.layout import (
     Block,
     Line,
+    _absorb_table_notes,
     _build_blocks,
     _caption_continuation,
+    _collect_rotated_caption_blocks,
     _drop_noise,
     _is_caption_text,
     _is_heading,
     _is_table_caption,
     _join_text,
     _line_from_dict,
+    _looks_like_text_table,
     _merge_across_pages,
     _merge_caption_continuations,
     _merge_math_fragments,
+    _merge_small_caption_continuations,
     _merge_visual_rows,
     _normalize_text,
     _split_row_runs,
+    _table_text_rotation,
     parse_pdf,
 )
 from paperead.inline_math import build_inline_math, spans_with_offsets
@@ -392,6 +397,28 @@ def test_chinese_section_heading_is_recognized():
     assert _is_heading(cell, 10.0) == 0
 
 
+def test_aastex_plain_font_section_headings_are_recognized():
+    """AASTeX 章节标题是正文字号 + 正体（CMR10），旧规则会全部漏成正文。"""
+    intro = Line("1. INTRODUCTION", bbox=(124.1, 265.9, 218.8, 275.9), page=2, size=10.0)
+    data = Line("2. DATA", bbox=(420.7, 101.9, 461.8, 111.8), page=3, size=10.0)
+    subsection = Line(
+        "2.1. NIRCam Observations & Data Reduction",
+        bbox=(340.0, 203.2, 542.5, 213.2), page=3, size=10.0,
+    )
+    assert _is_heading(intro, 10.0) == 1
+    assert _is_heading(data, 10.0) == 1
+    assert _is_heading(subsection, 10.0) == 2
+    # 正文引用行以 `T.` 开头，不能被字母编号规则当成附录标题
+    citation = Line(
+        "T. A. Thompson & T. M. Heckman (2024) and F. R. Donnan",
+        bbox=(59.7, 500, 470, 510), page=3, size=10.0,
+    )
+    assert _is_heading(citation, 10.0) == 0
+    # 图内方位/仪器短标签不是标题
+    assert _is_heading(Line("N", bbox=(0, 0, 8, 10), page=4, size=10.0), 10.0) == 0
+    assert _is_heading(Line("MIRI", bbox=(0, 0, 30, 10), page=4, size=10.0), 10.0) == 0
+
+
 def test_chinese_paragraph_continues_across_page():
     a = Block(
         "b0", 0, 3, "para",
@@ -455,3 +482,79 @@ def test_table_rows_are_not_merged_into_caption():
         tables,
     )
     assert len(merged) == 2
+
+def test_single_word_and_declaration_headings_are_recognized():
+    # BMC 的三级标题 `Simulations` 只有 9.2pt + 粗体
+    sim = Line("Simulations", bbox=(117.6, 86.5, 164.7, 97.8), page=7, size=9.2, bold=True)
+    assert _is_heading(sim, 9.8) == 3
+    # 后置声明区标题常常不加粗、与正文同字号
+    fund = Line("Funding", bbox=(117.6, 349.7, 144.6, 358.8), page=16, size=9.8)
+    assert _is_heading(fund, 9.8) == 3
+    # 图内 8pt 重复标签不是标题
+    task = Line("Task Task", bbox=(0, 0, 60, 10), page=4, size=8.0, bold=True)
+    assert _is_heading(task, 9.8) == 0
+
+
+def test_rotated_table_caption_is_collected(tmp_path):
+    def draw(page):
+        page.insert_text(
+            (300, 100),
+            "Table 3 The predictive ability of four basic methods",
+            fontsize=10,
+            rotate=90,
+        )
+        page.insert_text((280, 100), "0.8879", fontsize=8, rotate=90)
+
+    pdf = _pdf(tmp_path / "rotated-table.pdf", [(612, 792, draw)])
+    doc = pymupdf.open(pdf)
+    caps = _collect_rotated_caption_blocks(doc)
+    assert len(caps) == 1
+    assert caps[0].text.startswith("Table 3")
+    assert _table_text_rotation(doc[0], pymupdf.Rect(0, 0, 612, 792)) in (90, 270)
+    doc.close()
+
+
+def test_many_column_rotated_table_is_not_text_table():
+    html = "<table><tr>" + "".join(
+        f"<td>0.8879 ± 0.0008 {i}</td>" for i in range(10)
+    ) + "</tr></table>"
+    assert _looks_like_text_table(html, 10) is False
+
+
+def test_table_notes_are_absorbed_into_caption():
+    cap = Block("c", 0, 1, "caption", "Table 1: demo", (100, 90, 300, 99))
+    table = Block(
+        "t", 1, 1, "table", "", (100, 100, 400, 300),
+        caption="Table 1: demo", translatable=False,
+    )
+    note = Block(
+        "n", 2, 1, "para", "— Represents no explicit result was found in this method",
+        (100, 301, 350, 310), size=7.0,
+    )
+    out = _absorb_table_notes([cap, table, note], 10.0)
+    assert len(out) == 2
+    assert "— Represents" in out[0].text
+    assert "— Represents" in out[1].caption
+
+
+def test_table_note_does_not_absorb_normal_body_paragraph():
+    cap = Block("c", 0, 1, "caption", "Table 1: demo", (100, 90, 300, 99))
+    table = Block("t", 1, 1, "table", "", (100, 100, 400, 300), caption="Table 1: demo")
+    body = Block(
+        "b", 2, 1, "para",
+        "This is a normal body paragraph after the table that must stay separate.",
+        (100, 301, 400, 320), size=10.0,
+    )
+    out = _absorb_table_notes([cap, table, body], 10.0)
+    assert len(out) == 3
+    assert out[2].text.startswith("This is a normal")
+
+
+def test_short_line_requires_new_paragraph_evidence():
+    a = _body_line("the first line is deliberately long but stops short here", 60, 250, 100)
+    lower = _body_line("and continues with lowercase words", 60, 300, 112)
+    upper = _body_line("New paragraph begins here", 60, 300, 112)
+    same = _build_blocks([a, lower], 10.0, {})
+    new = _build_blocks([a, upper], 10.0, {})
+    assert len(same) == 1
+    assert len(new) == 2

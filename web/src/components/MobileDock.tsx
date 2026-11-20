@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   PANEL_TABS,
   PanelBody,
@@ -28,6 +28,7 @@ function readNarrow(): boolean {
 export function MobileDock(props: Props) {
   const [open, setOpen] = useState<TabKey | null>(null)
   const [narrow, setNarrow] = useState(readNarrow)
+  const lastFocus = useRef(props.focusAnnotation)
   const active = PANEL_TABS.find((t) => t.key === open)
 
   useEffect(() => {
@@ -38,11 +39,30 @@ export function MobileDock(props: Props) {
     return () => mq.removeEventListener('change', onChange)
   }, [])
 
+  // 拉宽到桌面宽度后抽屉已不可见，下次缩窄时不应再自动弹出来
+  useEffect(() => {
+    if (!narrow) setOpen(null)
+  }, [narrow])
+
   // 双击正文里的标注：只有手机端没有左侧栏时才展开底部「批注」面板；
   // 桌面端只切左侧栏，不能把面板再叠到正文下方。
+  // 只在 focus 真的更新时展开：窗口刚缩窄时不能拿上次双击的旧目标自动弹抽屉。
   useEffect(() => {
-    if (!narrow) return
-    if (props.focusAnnotation) setOpen('comments')
+    if (!narrow) {
+      lastFocus.current = props.focusAnnotation
+      return
+    }
+    if (!props.focusAnnotation || props.focusAnnotation === lastFocus.current) return
+    lastFocus.current = props.focusAnnotation
+    setOpen('comments')
+    // 抽屉有入场动画，等它落定后再滚一次，确保目标卡片真的进入可视区
+    const id = props.focusAnnotation.id
+    const timer = window.setTimeout(() => {
+      document
+        .getElementById(`note-${id}`)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 260)
+    return () => window.clearTimeout(timer)
   }, [props.focusAnnotation, narrow])
 
   // 双击自动阅读重点：同上，桌面端只切左侧「阅读重点」

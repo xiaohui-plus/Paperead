@@ -136,6 +136,8 @@ def _use_fake_paper(main, monkeypatch):
     monkeypatch.setattr(main.web_search, "search_many", fake_search_many)
     monkeypatch.setattr(main.web_search, "search_academic", fake_academic)
     monkeypatch.setattr(main.web_search, "fetch", fake_fetch)
+    # agent 模式现在默认关闭（改走论文档案直供）；本文件专门测 agent，显式打开
+    monkeypatch.setenv("PAPEREAD_TUTOR_AGENT", "1")
 
 
 def _events(body: str) -> list[dict]:
@@ -210,7 +212,7 @@ def test_agent_disabled_falls_back_to_fixed_pipeline(monkeypatch, tmp_path):
     assert res.status_code == 200
     events = _events(res.text)
     names = [e["name"] for e in events if e["type"] == "tool" and e.get("phase") == "end"]
-    assert names == ["paper_search"]
+    assert names == ["paper_context"]
 
 
 def test_agent_failure_before_output_falls_back(monkeypatch, tmp_path):

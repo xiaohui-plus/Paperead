@@ -23,6 +23,7 @@ import { mediaUrl } from '../lib/mobile'
 import { lastAnnotationColor, rememberAnnotationColor } from '../lib/annotationPrefs'
 import { CITE_RE, hasCitation } from '../lib/citationMark'
 import { stripDotLeaders } from '../lib/text'
+import { normalizeMath } from '../lib/math'
 import { translateText } from '../lib/library'
 import { readyModel, loadModelSettings, toPayload } from '../lib/settings'
 import { langLabel, loadTargetLang } from '../lib/translation'
@@ -36,6 +37,7 @@ import {
   IconPinOff,
   IconTranslate,
 } from './icons'
+import { MathText } from './MathText'
 
 /** 自动重点的中文名，正文 tooltip 和「阅读重点」面板共用。 */
 export const HIGHLIGHT_LABELS: Record<HighlightCategory, string> = {
@@ -675,7 +677,8 @@ export function SelectionToolbar({
           role: 'system' as const,
           content:
             `你是学术论文翻译专家，把用户选中的文字翻译成${langLabel(lang)}。` +
-            '只输出译文正文，不要解释、不要加引号或 Markdown 代码块。',
+            '只输出译文正文，不要解释、不要加引号或 Markdown 代码块。' +
+            '数学公式、引用编号与 URL 请原样保留，不要改写。',
         },
         { role: 'user' as const, content: stripDotLeaders(source) },
       ],
@@ -1096,7 +1099,14 @@ function TranslateCard({
           <span className="hl-translate-caret" aria-hidden />
         </p>
       )}
-      {state.status === 'done' && <p className="hl-translate-text">{state.value}</p>}
+      {state.status === 'done' && (
+        <p className="hl-translate-text hl-translate-math">
+          <MathText
+            text={normalizeMath(state.value ?? '')}
+            renderText={(text) => <span className="hl-translate-plain">{text}</span>}
+          />
+        </p>
+      )}
       {state.status === 'error' && (
         <p className="hl-translate-error">
           {state.message}
@@ -1166,12 +1176,15 @@ function ToolAction({
 export function AnnotationPopover({
   annotation,
   rect,
+  autoFocus = true,
   onSave,
   onDelete,
   onClose,
 }: {
   annotation: Annotation
   rect: DOMRect
+  /** 新建标注时自动聚焦输入；单击已有标注查看时不抢焦点 */
+  autoFocus?: boolean
   onSave: (patch: { color: AnnotationColor; note: string }) => void
   onDelete: () => void
   onClose: () => void
@@ -1247,7 +1260,7 @@ export function AnnotationPopover({
       <textarea
         className="hl-editor-note"
         value={note}
-        autoFocus
+        autoFocus={autoFocus}
         placeholder={
           isComment ? '写下你的批注…' : '写点笔记…（可不填，直接关闭也保留荧光笔）'
         }

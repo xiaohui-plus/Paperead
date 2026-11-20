@@ -366,7 +366,7 @@ export function BlockView({
     b.inline_math,
   )
   return (
-    <div className="block" id={b.id} data-block-id={b.id}>
+    <div className="block" id={b.id} data-block-id={b.id} data-block-kind={b.kind}>
       <div className="para" onMouseUp={onParagraphMouseUp}>
         <RichText
           text={b.text}

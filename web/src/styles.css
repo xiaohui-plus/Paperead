@@ -39,8 +39,12 @@ html {
     "Helvetica Neue", Arial, sans-serif;
   --mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
   --read-scale: 1;
-  /* 阅读正文正文字体：设置 → 阅读界面 → 正文字体可切换 */
-  --reader-font: var(--serif);
+  /* 阅读正文正文字体：设置 → 阅读界面 → 原文字体 / 译文字体分别可切换。
+     默认 Georgia 负责英文与数字，中文回退宋体。 */
+  --reader-font-source: Georgia, "Times New Roman", "Songti SC", "SimSun", "宋体",
+    "Noto Serif CJK SC", "Source Han Serif SC", serif;
+  --reader-font-target: Georgia, "Times New Roman", "Songti SC", "SimSun", "宋体",
+    "Noto Serif CJK SC", "Source Han Serif SC", serif;
   /* 阅读页原文/译文字号倍率，设置里可分别调整 */
   --en-font-scale: 1;
   --zh-font-scale: 1;
@@ -1221,7 +1225,8 @@ body.col-resizing * {
 
 .para-en {
   margin: 0;
-  font-family: var(--reader-font, var(--serif));
+  font-family: var(--reader-font-source, var(--serif));
+  font-variant-numeric: lining-nums;
   font-size: calc(0.95em * var(--en-font-scale, 1));
   line-height: 1.72;
   color: var(--ink);
@@ -1233,7 +1238,8 @@ body.col-resizing * {
   margin: 9px 0 0;
   padding-left: 13px;
   border-left: 2px solid var(--blue-line);
-  font-family: var(--reader-font, var(--serif));
+  font-family: var(--reader-font-target, var(--serif));
+  font-variant-numeric: lining-nums;
   font-size: calc(1em * var(--zh-font-scale, 1));
   line-height: 1.9;
   color: var(--ink-2);
@@ -6144,6 +6150,162 @@ body.is-dialog-dragging * {
   flex-direction: column;
   align-items: center;
   gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+/* 审阅模式：页面与右侧批注栏并排；阅读区太窄时同一行改成上下排列 */
+.pdf-page-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.pdf-page-row.is-stacked {
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  gap: 12px;
+}
+
+.pdf-margin-notes {
+  position: relative;
+  flex: 0 0 280px;
+  width: 280px;
+}
+
+.pdf-page-row.is-stacked .pdf-margin-notes {
+  position: static;
+  flex: none;
+  width: 100%;
+  height: auto !important;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 批注卡片：左侧细线指向页面，纵向位置对应批注在页内的位置 */
+.pdf-margin-card {
+  position: absolute;
+  left: 0;
+  right: 0;
+  padding: 8px 9px 7px;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--line-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  box-shadow: 0 1px 3px rgba(17, 24, 39, 0.06);
+  transition: box-shadow 0.15s ease;
+}
+
+.pdf-margin-card:hover {
+  box-shadow: var(--shadow-2);
+}
+
+.pdf-margin-card[data-color='yellow'] {
+  border-left-color: #d4a200;
+}
+
+.pdf-margin-card[data-color='green'] {
+  border-left-color: #3f9e63;
+}
+
+.pdf-margin-card[data-color='blue'] {
+  border-left-color: #1e5a99;
+}
+
+.pdf-margin-card[data-color='pink'] {
+  border-left-color: #e0558c;
+}
+
+.pdf-margin-card::before {
+  content: '';
+  position: absolute;
+  left: -17px;
+  top: 14px;
+  width: 15px;
+  height: 1px;
+  background: var(--line-2);
+}
+
+.pdf-page-row.is-stacked .pdf-margin-card {
+  position: static;
+}
+
+.pdf-page-row.is-stacked .pdf-margin-card::before {
+  display: none;
+}
+
+.pdf-margin-card.is-flash {
+  animation: note-flash 0.6s ease-in-out 2;
+}
+
+.pdf-margin-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--faint);
+  font-size: 10.5px;
+}
+
+.pdf-margin-index {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--blue-soft);
+  color: var(--blue-ink);
+  font-size: 9.5px;
+  font-weight: 650;
+}
+
+.pdf-margin-type {
+  color: var(--muted);
+}
+
+.pdf-margin-page {
+  margin-left: auto;
+  font-size: 10px;
+}
+
+.pdf-margin-delete {
+  margin-left: 4px;
+  font-size: 10.5px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.pdf-margin-card:hover .pdf-margin-delete {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .pdf-margin-delete {
+    opacity: 1;
+  }
+}
+
+.pdf-margin-quote {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  margin: 6px 0;
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.pdf-margin-input {
+  resize: none;
+  padding: 5px 6px;
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 
 .pdf-page-frame {
@@ -6250,6 +6412,11 @@ body.is-dialog-dragging * {
 }
 
 .pdf-toggle[data-active='true'] {
+  background: var(--blue-soft);
+  color: var(--blue-ink);
+}
+
+.pdf-review-toggle[data-active='true'] {
   background: var(--blue-soft);
   color: var(--blue-ink);
 }
@@ -8356,6 +8523,28 @@ body.is-dialog-dragging * {
   line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* 译文含公式时交给 KaTeX：KaTeX 节点不能继承 pre-wrap，否则公式内部空白会乱；
+   普通文本仍用 .hl-translate-plain 保留换行。 */
+.hl-translate-math {
+  white-space: normal;
+}
+
+.hl-translate-plain {
+  white-space: pre-wrap;
+}
+
+.hl-translate-math .katex {
+  font-size: 1.02em;
+  white-space: normal;
+}
+
+.hl-translate-math .katex-display {
+  margin: 6px 0;
+  padding: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .hl-translate-caret {
@@ -10650,13 +10839,13 @@ select.input.reading-select {
 
 .reading-preview-en {
   color: var(--ink-2);
-  font-family: var(--reader-font, var(--serif));
+  font-family: var(--reader-font-source, var(--serif));
   line-height: 1.5;
 }
 
 .reading-preview-zh {
   color: var(--muted);
-  font-family: var(--reader-font, var(--serif));
+  font-family: var(--reader-font-target, var(--serif));
   line-height: 1.65;
 }
 

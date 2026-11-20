@@ -21,7 +21,7 @@ import {
 import { buildAnswer, type AskKind } from '../lib/assistant'
 import { canRunLocally, serverReachable } from '../lib/connectivity'
 import { streamLocalChat } from '../lib/localLlm'
-import { buildLocalContext, buildLocalIndex, retrieveLocal } from '../lib/localSearch'
+import { buildLocalDossier, historyCurve } from '../lib/localSearch'
 import { appendLocalChat, loadLocalChat } from '../lib/offlineStore'
 import { tourBus } from '../tour/tourBus'
 import { Markdown, balanceMarkdown } from './Markdown'
@@ -73,16 +73,17 @@ interface Turn {
   memoryId?: string
 }
 
-/** 本机问答的系统提示：和电脑端 `paperead/tutor/qa.py` 保持一致。 */
-const LOCAL_ANSWER_SYS = `你是论文助教。结合【材料】回答问题，用中文，简洁、分点、不要客套。
+/** 本机问答的系统提示：与电脑端 `paperead/tutor/qa.py` 的 ANSWER_SYS 对齐。 */
+const LOCAL_ANSWER_SYS = `你是论文助教。材料按可信度分层：用户引用与论文档案优先，对话历史只用于承接语境。
 
 规则：
-1. 优先用论文材料回答；论文没写、或用户问的是论文之外的知识时，可以补充必要的领域常识与定义，不要因为论文没写就拒答；
-2. 绝对不要编造论文里没有的页码、数据、实验结论；
-3. 来自论文材料的论断标 [P3]；来自你自己领域常识的，句末标「（通识）」；
-4. 论文材料与常识冲突时，指出各自说法，不要强行统一；
-5. 材料完全不足以回答时，说明缺什么，再给出基于常识的最佳解释，不要只回一句"论文中没有提到"；
-6. 不要复述问题，直接给答案。`
+1. 先直接回答问题本身，再补充依据；不要答非所问、不要复述问题；
+2. 论文有依据的结论标 [P页码]；自己的领域常识标「（通识）」；
+3. 绝对不要编造论文里没有的页码、数据、实验结论、方法名；材料只到首句时说明「论文该段只看到开头」，不要脑补；
+4. 论文确实没写时，可以用领域常识回答，但要明确这不是论文原文；
+5. 【用户引用】非空时，本次问题优先针对引用：先解释引用内容，再补充上下文；引用里没有的内容不要硬塞；
+6. 【历史对话】越近越完整，指代（「它」「这个方法」「上面说的」）按最近对话理解；早期对话只当背景，不能当作论文事实；
+7. 中文，简洁、分点、不要客套。`
 
 const ENGINE_LABEL: Record<string, string> = {
   tavily: 'Tavily',
@@ -100,7 +101,10 @@ function webMetaText(webStatus?: AskWebStatus, usedWeb?: boolean): string {
         .map((e) => ENGINE_LABEL[e] ?? e)
         .filter(Boolean)
       const suffix = names.length ? `（${names.join(' / ')}）` : ''
-      return ` · 联网检索 ${webStatus.count} 条${suffix}`
+      const deep = webStatus.depth === 'deep' && (webStatus.fetched ?? 0) > 0
+      return ` · 联网检索 ${webStatus.count} 条${suffix}${
+        deep ? ` · 深读 ${webStatus.fetched} 篇正文` : ''
+      }`
     }
     return ' · 联网无结果，已用领域常识补充'
   }
@@ -114,10 +118,10 @@ function toolsFromSources(sources: AskSource[], usedWeb: boolean): AskToolCall[]
   const out: AskToolCall[] = []
   if (paper.length > 0) {
     out.push({
-      callId: 'paper_search',
-      name: 'paper_search',
+      callId: 'paper_context',
+      name: 'paper_context',
       status: 'done',
-      summary: `命中 ${paper.length} 段`,
+      summary: `已载入论文档案 · 定位 ${paper.length} 段`,
       items: paper.map((s) => ({
         label: s.label,
         page: s.page,
@@ -507,17 +511,14 @@ export function ChatPanel({
         if (!canRunLocally()) {
           throw new Error('电脑端服务不可达，本机也没有可用的模型通道')
         }
-        const index = buildLocalIndex(paper)
-        const hits = retrieveLocal(index, question)
-        // 总结/大纲这类问题可能一个关键词都命中不了：退化为取前几段
-        const chosen = hits.length
-          ? hits
-          : index.docs.slice(0, 6).map((doc) => ({ doc, score: 0 }))
-        const context = buildLocalContext(index, chosen)
+        // 本机链路同样走「整篇档案直供」：不用每次提问重新检索命中段落
+        const dossier = buildLocalDossier(paper, question)
+        const hits = dossier.hits
+        const context = dossier.text
         // 划词引用没有块检索结果兜底：直接放进材料最前面，保证模型一定看得到
         const quoteBlock =
           sentQuotes.length > 0
-            ? `【用户选中的片段】\n${sentQuotes
+            ? `【用户引用】本次问题优先针对下面的片段：\n${sentQuotes
                 .map(
                   (q) =>
                     `- ${q.page ? `第 ${q.page} 页：` : ''}${q.text.replace(/\s+/g, ' ')}`,
@@ -539,10 +540,9 @@ export function ChatPanel({
         }))
 
         const history = await loadLocalChat(paperId).catch(() => [])
-        const recent = history
-          .slice(-6)
-          .map((row) => `用户：${row.question}\n助手：${row.answer.slice(0, 300)}`)
-          .join('\n')
+        const recent = historyCurve(
+          history.map((row) => ({ question: row.question, answer: row.answer })),
+        )
         const started = performance.now()
         const answer = await streamLocalChat({
           config: { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model: cfg.model },
@@ -550,9 +550,9 @@ export function ChatPanel({
             { role: 'system', content: LOCAL_ANSWER_SYS },
             {
               role: 'user',
-              content: `${recent ? `【最近对话】\n${recent}\n\n` : ''}【材料】\n${quoteBlock}${
-                context || '（没有检索到相关段落）'
-              }\n\n【问题】${question}`,
+              content: `${recent ? `${recent}\n\n` : ''}【关于读者】\n读者是正在精读这篇论文的研究者；未提供更多个人背景，不要臆测其领域与目标。\n\n${quoteBlock}【材料】\n${
+                context || '（论文材料为空）'
+              }\n\n【本次问题】${question}`,
             },
           ],
           temperature: 0.2,

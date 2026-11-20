@@ -64,6 +64,7 @@ from paperead.layout import Block, parse_pdf
 from paperead.llm import LLMConfig, OpenAICompatBackend
 from paperead.tutor import build_guide
 from paperead.tutor.guide import GUIDE_VERSION
+from paperead.tutor import dossier as dossier_engine
 from paperead.tutor import memory as memory_engine
 from paperead.tutor import qa as qa_engine
 from paperead.tutor import web as web_search
@@ -1291,7 +1292,10 @@ async def make_guide(paper_id: str, req: GuideReq | None = None) -> dict:
 
     _guiding.add(paper_id)
     try:
-        objs = [Block(**{**b, "bbox": tuple(b["bbox"])}) for b in blocks]
+        objs = [
+            Block(**{**b, "bbox": tuple(b.get("bbox") or (0, 0, 0, 0))})
+            for b in blocks
+        ]
         guide = await build_guide(objs, row.get("glossary") or {})
         path.write_text(json.dumps(guide, ensure_ascii=False, indent=1), encoding="utf-8")
         store.update(paper_id, guide_status=guide.get("status", "ready"))
@@ -1366,7 +1370,10 @@ async def block_provenance(paper_id: str, block_id: str) -> dict:
     if not cites:
         return {"block_id": block_id, "citations": [], "unresolved": [], "truncated": False}
 
-    objs = [Block(**{**b, "bbox": tuple(b["bbox"])}) for b in blocks]
+    objs = [
+            Block(**{**b, "bbox": tuple(b.get("bbox") or (0, 0, 0, 0))})
+            for b in blocks
+        ]
     refs = parse_references(objs)
     all_resolved = resolve_citations(cites, refs)
     truncated = len(all_resolved) > PROV_MAX
@@ -1779,7 +1786,10 @@ async def make_lineage(paper_id: str, req: GuideReq | None = None) -> dict:
 
     _lineaging.add(paper_id)
     try:
-        objs = [Block(**{**b, "bbox": tuple(b["bbox"])}) for b in blocks]
+        objs = [
+            Block(**{**b, "bbox": tuple(b.get("bbox") or (0, 0, 0, 0))})
+            for b in blocks
+        ]
         data = await build_lineage(objs, pdf_path=store.pdf_path(paper_id))
         path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
         return data
@@ -2084,7 +2094,405 @@ def _quote_context(quotes: list[AskQuoteIn]) -> str:
     )
 
 
-async def _prepare_ask_events(
+# ── 论文档案直供：一次构建、逐轮复用，不再每次重新检索 ──
+
+_dossier_cache: dict[str, tuple[tuple, dossier_engine.Dossier]] = {}
+_dossier_lock = threading.Lock()
+_DOSSIER_CACHE_LIMIT = 16
+
+
+def _paper_dossier(paper_id: str) -> dossier_engine.Dossier:
+    """按 blocks 文件的 mtime/size 缓存档案；论文重新解析后自动失效。"""
+    try:
+        stat = store.blocks_path(paper_id).stat()
+        signature = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        signature = (0, 0)
+    cached = _dossier_cache.get(paper_id)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    built = dossier_engine.build_dossier(
+        paper_id,
+        store.get(paper_id) or {},
+        store.read_blocks(paper_id) or [],
+    )
+    with _dossier_lock:
+        if len(_dossier_cache) >= _DOSSIER_CACHE_LIMIT:
+            _dossier_cache.pop(next(iter(_dossier_cache)))
+        _dossier_cache[paper_id] = (signature, built)
+    return built
+
+
+WEB_FETCH_LIMIT = 2
+WEB_FETCH_CHARS = 2_400
+WEB_FETCH_TIMEOUT = 6.0
+
+
+async def _fetch_web_bodies(results: list[dict]) -> list[dict]:
+    """材料不足时抓取前几条网页正文。
+
+    只作为「档案 + 摘要都不够」时的补充：并发抓取、单篇 6 秒上限，
+    失败（CSDN 521 / 知乎 403 等）直接跳过，绝不让联网把回答卡住。
+    """
+    picked = [
+        item
+        for item in results
+        if (item.get("url") or "").startswith(("http://", "https://"))
+    ][:WEB_FETCH_LIMIT]
+    if not picked:
+        return []
+
+    async def one(item: dict) -> dict | None:
+        try:
+            got = await asyncio.wait_for(
+                web_search.fetch(item["url"], WEB_FETCH_CHARS),
+                timeout=WEB_FETCH_TIMEOUT,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.info("联网正文抓取跳过 %s：%s", item.get("url"), e)
+            return None
+        content = (got.get("content") or "").strip()
+        if got.get("error") or not content:
+            return None
+        return {
+            "url": item["url"],
+            "title": got.get("title") or item.get("title") or item["url"],
+            "content": content[:WEB_FETCH_CHARS],
+            "truncated": bool(got.get("truncated")),
+        }
+
+    out = await asyncio.gather(*(one(item) for item in picked))
+    return [item for item in out if item]
+
+
+async def _prepare_dossier_events(
+    paper_id: str,
+    req: AskReq,
+    standalone: str,
+    expanded: list[str],
+    web_task: asyncio.Task | None = None,
+) -> AsyncIterator[tuple[str, object]]:
+    """论文档案直供：整篇材料一次拼好，本地 BM25 只用于出处与重点段落。
+
+    产出 `("tool", {...})`（档案载入 / 联网检索）与最终 `("prep", _AskPrep)`。
+    与旧检索管道的区别：不调用模型改写检索词、不让模型逐轮调工具找段落。
+    """
+    tools: list[dict] = []
+    paper_started = time.time()
+    yield (
+        "tool",
+        {
+            "type": "tool",
+            "phase": "start",
+            "callId": "paper_context",
+            "name": "paper_context",
+            "input": {"question": standalone, "quotes": len(req.quotes)},
+            "startedAt": paper_started,
+        },
+    )
+
+    dossier = _paper_dossier(paper_id)
+    quote_texts = [q.text for q in req.quotes if (q.text or "").strip()]
+    context, hits = dossier.render(standalone, quote_texts)
+    excerpt = "节选模式" in context
+
+    quote_block = dossier_engine.format_quotes(
+        [
+            {"text": q.text, "page": q.page, "block_id": q.block_id, "source": q.source}
+            for q in req.quotes
+        ]
+    )
+    if quote_block:
+        context = f"{quote_block}\n\n{context}"
+
+    attachment_block = _attachment_context(paper_id, req.attachments)
+    if attachment_block:
+        context = f"{context}\n\n{attachment_block}" if context else attachment_block
+    block_block = _block_context(paper_id, req.block_ids)
+    if block_block:
+        context = f"{context}\n\n{block_block}" if context else block_block
+
+    # 出处：引用片段优先，其次是本地定位到的段落与解析出的参考文献
+    sources: list[dict] = []
+    seen: set[str] = set()
+    for quote in req.quotes:
+        block_id = quote.block_id or ""
+        if not block_id or block_id in seen:
+            continue
+        chunk = next((c for c in dossier.chunks if c.block_id == block_id), None)
+        if chunk is None:
+            continue
+        seen.add(block_id)
+        sources.append(
+            {
+                "type": "paper",
+                "label": f"P{chunk.page}",
+                "page": chunk.page,
+                "blockId": chunk.block_id,
+                "snippet": (chunk.translated or chunk.text)[:90],
+            }
+        )
+
+    paper_items: list[dict] = []
+    for hit in hits:
+        if hit.block_id in seen:
+            continue
+        seen.add(hit.block_id)
+        paper_items.append(
+            {
+                "label": hit.label,
+                "page": hit.page,
+                "blockId": hit.block_id,
+                "snippet": hit.snippet,
+            }
+        )
+        sources.append(
+            {
+                "type": "paper",
+                "label": hit.label,
+                "page": hit.page,
+                "blockId": hit.block_id,
+                "snippet": hit.snippet,
+            }
+        )
+
+    refs: dict[int, str] = {}
+    if hits:
+        blocks = store.read_blocks(paper_id) or []
+        objs = [
+            Block(**{**b, "bbox": tuple(b.get("bbox") or (0, 0, 0, 0))})
+            for b in blocks
+        ]
+        references = parse_references(objs)
+        hit_ids = {hit.block_id for hit in hits[:3]}
+        for doc in (d for d in objs if d.id in hit_ids):
+            for item in resolve_citations(find_citations(doc.text), references)[:2]:
+                refs[item["ref"]["index"]] = item["ref"]["title"]
+            if len(refs) >= 4:
+                break
+        refs = dict(list(refs.items())[:4])
+        for idx, title in refs.items():
+            sources.append({"type": "ref", "label": f"R{idx}", "index": idx, "title": title})
+        ref_block = "\n".join(f"[R{idx}] {title}" for idx, title in refs.items())
+        context = f"{context}\n\n【命中的参考文献】\n{ref_block}"
+
+    top_score = hits[0].score if hits else 0.0
+    if paper_items:
+        pages = "/".join(list(dict.fromkeys(str(i["page"]) for i in paper_items))[:4])
+        paper_summary = (
+            f"已载入全篇 {len(dossier.body)} 段（{'节选覆盖' if excerpt else '全文'}）"
+            f" · 定位 {len(paper_items)} 段 · 第 {pages} 页"
+        )
+    else:
+        paper_summary = f"已载入全篇 {len(dossier.body)} 段（{'节选覆盖' if excerpt else '全文'}）"
+
+    paper_tool = {
+        "type": "tool",
+        "phase": "end",
+        "callId": "paper_context",
+        "name": "paper_context",
+        "status": "done",
+        "summary": paper_summary,
+        "items": paper_items,
+        "meta": {
+            "elapsedMs": int((time.time() - paper_started) * 1000),
+            "hits": len(paper_items),
+            "chunks": len(dossier.body),
+            "excerpt": excerpt,
+        },
+        "startedAt": paper_started,
+        "endedAt": time.time(),
+    }
+    tools.append(paper_tool)
+    yield ("tool", paper_tool)
+
+    web_results: list[dict] = []
+    web_status = {"attempted": False, "engine": "", "engines": [], "count": 0}
+    web_started = time.time()
+    web_failed = False
+    try:
+        if req.web:
+            web_status["attempted"] = True
+            yield (
+                "tool",
+                {
+                    "type": "tool",
+                    "phase": "start",
+                    "callId": "web_search",
+                    "name": "web_search",
+                    "input": {"query": standalone, "keywords": expanded[:6]},
+                    "startedAt": web_started,
+                },
+            )
+            try:
+                base = await web_task if web_task is not None else await web_search.search(
+                    standalone, 4
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                log.info("联网检索失败：%s", e)
+                base = []
+                web_failed = True
+            base = base or []
+            web_results.extend(base)
+
+            insufficient = qa_engine.needs_external(standalone, top_score) or not hits
+            need_more = insufficient
+            if need_more or len(web_results) < 2:
+                zh_words = [w for w in expanded if re.search(r"[\u4e00-\u9fff]", w)]
+                en_words = [w for w in expanded if not re.search(r"[\u4e00-\u9fff]", w)]
+                extra_queries = [standalone]
+                if zh_words and zh_words[0] != standalone:
+                    extra_queries.append(" ".join(zh_words[:8]))
+                en_query = " ".join(en_words[:6])
+                extra = await web_search.search_many(
+                    extra_queries,
+                    limit=4,
+                    total_limit=5,
+                    academic=need_more or len(web_results) < 2,
+                    academic_query=en_query or " ".join(expanded[:6]) or standalone,
+                )
+                web_results = web_search.dedupe([*base, *extra])
+
+            web_results = web_results[:6]
+            engines = sorted({w.get("engine", "") for w in web_results if w.get("engine")})
+            web_status["count"] = len(web_results)
+            web_status["engines"] = engines
+            web_status["engine"] = engines[0] if engines else ""
+
+            web_items = [
+                {
+                    "label": f"W{i}",
+                    "title": item.get("title", ""),
+                    "url": item.get("url", ""),
+                    "snippet": (item.get("content") or "")[:120],
+                    "engine": item.get("engine", ""),
+                }
+                for i, item in enumerate(web_results, 1)
+            ]
+            web_tool = {
+                "type": "tool",
+                "phase": "end",
+                "callId": "web_search",
+                "name": "web_search",
+                "status": "error" if web_failed and not web_items else "done",
+                "summary": (
+                    f"联网检索 {len(web_items)} 条" if web_items else "未获取到网络结果"
+                ),
+                "items": web_items,
+                "meta": {
+                    "elapsedMs": int((time.time() - web_started) * 1000),
+                    "count": len(web_items),
+                    "engines": engines,
+                },
+                "startedAt": web_started,
+                "endedAt": time.time(),
+            }
+            tools.append(web_tool)
+            yield ("tool", web_tool)
+            for i, w in enumerate(web_results, 1):
+                sources.append(
+                    {
+                        "type": "web",
+                        "label": f"W{i}",
+                        "title": w.get("title", ""),
+                        "url": w.get("url", ""),
+                        "engine": w.get("engine", ""),
+                        "snippet": (w.get("content") or "")[:90],
+                    }
+                )
+    finally:
+        if web_task is not None and not web_task.done():
+            web_task.cancel()
+
+    body_block = ""
+    # 论文档案不足（没命中、问题指向论文之外）且联网可用时，再深读几篇正文
+    insufficient = not hits or qa_engine.needs_external(standalone, top_score)
+    if web_results and insufficient:
+        fetch_started = time.time()
+        yield (
+            "tool",
+            {
+                "type": "tool",
+                "phase": "start",
+                "callId": "web_fetch",
+                "name": "web_fetch",
+                "input": {"count": min(WEB_FETCH_LIMIT, len(web_results))},
+                "startedAt": fetch_started,
+            },
+        )
+        fetched = await _fetch_web_bodies(web_results)
+        fetch_items = [
+            {
+                "label": f"W{i}",
+                "title": item["title"],
+                "url": item["url"],
+                "snippet": item["content"][:120],
+            }
+            for i, item in enumerate(fetched, 1)
+        ]
+        fetch_tool = {
+            "type": "tool",
+            "phase": "end",
+            "callId": "web_fetch",
+            "name": "web_fetch",
+            "status": "done" if fetched else "error",
+            "summary": (
+                f"深读 {len(fetched)} 篇正文" if fetched else "正文抓取失败，继续用搜索摘要"
+            ),
+            "items": fetch_items,
+            "meta": {
+                "elapsedMs": int((time.time() - fetch_started) * 1000),
+                "count": len(fetched),
+            },
+            "startedAt": fetch_started,
+            "endedAt": time.time(),
+        }
+        tools.append(fetch_tool)
+        yield ("tool", fetch_tool)
+        web_status["depth"] = "deep" if fetched else "search"
+        web_status["fetched"] = len(fetched)
+        if fetched:
+            by_url = {item["url"]: item for item in fetched}
+            lines: list[str] = []
+            for i, item in enumerate(web_results, 1):
+                body = by_url.get(item.get("url", ""))
+                if body is None:
+                    continue
+                lines.append(
+                    f"[W{i} 正文] {body['title']}（{body['url']}）\n{body['content']}"
+                )
+            if lines:
+                body_block = (
+                    "【联网正文补充（论文材料不足时的深读）】\n" + "\n\n".join(lines)
+                )
+
+    if web_results:
+        # refs 已经在档案材料里单独列过，这里只拼网络结果，避免重复
+        web_block = qa_engine.build_context([], None, web_results, None)
+    else:
+        web_block = ""
+    if web_block:
+        context = f"{context}\n\n{web_block}" if context else web_block
+    if body_block:
+        context = f"{context}\n\n{body_block}" if context else body_block
+
+    yield (
+        "prep",
+        _AskPrep(
+            context=context,
+            sources=sources,
+            used_web=bool(web_results),
+            web_status=web_status,
+            tools=tools,
+        ),
+    )
+
+
+# 旧「检索管道」：每次提问重建索引、用模型改写检索词再检索命中段落。
+# 现已由 _prepare_dossier_events 取代，只在排查回归时保留对照，不在请求路径上。
+async def _prepare_ask_events_legacy(
     paper_id: str,
     req: AskReq,
     standalone: str,
@@ -2113,7 +2521,10 @@ async def _prepare_ask_events(
     )
 
     blocks = store.read_blocks(paper_id) or []
-    objs = [Block(**{**b, "bbox": tuple(b["bbox"])}) for b in blocks]
+    objs = [
+            Block(**{**b, "bbox": tuple(b.get("bbox") or (0, 0, 0, 0))})
+            for b in blocks
+        ]
     docs, en, zh = qa_engine.build_index(objs)
 
     query = " ".join([standalone, *expanded])
@@ -2201,7 +2612,8 @@ async def _prepare_ask_events(
             web_results.extend(base)
 
             # 论文没直接写、或概念题、或基础结果太少 → 扩大检索
-            need_more = qa_engine.needs_external(standalone, top_score)
+            insufficient = qa_engine.needs_external(standalone, top_score) or not hits
+            need_more = insufficient
             if need_more or len(web_results) < 2:
                 zh_words = [w for w in expanded if re.search(r"[\u4e00-\u9fff]", w)]
                 en_words = [w for w in expanded if not re.search(r"[\u4e00-\u9fff]", w)]
@@ -2319,7 +2731,7 @@ async def _prepare_ask(
     web_task: asyncio.Task | None = None,
 ) -> _AskPrep:
     """非流式调用：把事件流跑完，只取最终结果。"""
-    async for kind, payload in _prepare_ask_events(
+    async for kind, payload in _prepare_dossier_events(
         paper_id, req, standalone, expanded, web_task
     ):
         if kind == "prep":
@@ -2616,7 +3028,10 @@ async def _ask_agent_events(
 ) -> AsyncIterator[tuple[str, object]]:
     """产出 `("sse", payload)` 与最后的 `("result", {...})`。"""
     blocks = store.read_blocks(paper_id) or []
-    objs = [Block(**{**b, "bbox": tuple(b["bbox"])}) for b in blocks]
+    objs = [
+            Block(**{**b, "bbox": tuple(b.get("bbox") or (0, 0, 0, 0))})
+            for b in blocks
+        ]
     docs, en, zh = qa_engine.build_index(objs)
     state = {
         "docs": docs,
@@ -2756,7 +3171,7 @@ async def ask_paper(paper_id: str, req: AskReq) -> dict:
         if cached is not None:
             return _cached_answer(user_msg, cached)
 
-        recent = mem.recent_before(paper_id, user_msg["id"], 6)
+        recent = mem.recent_before(paper_id, user_msg["id"], 40)
         # 联网检索与问题改写并行，几乎不额外增加等待时间
         web_task = (
             asyncio.create_task(web_search.search(req.question, 4)) if req.web else None
@@ -2864,10 +3279,11 @@ async def ask_stream(paper_id: str, req: AskReq) -> StreamingResponse:
         web_task: asyncio.Task | None = None
         try:
             yield _sse({"type": "status", "stage": "retrieving", "web": req.web})
-            recent = mem.recent_before(paper_id, user_msg["id"], 6)
-            # agent 模式由模型自己决定搜什么；固定管道才预启动搜索并并行改写
+            recent = mem.recent_before(paper_id, user_msg["id"], 40)
+            # 默认走「论文档案直供」：材料一次拼好，不让模型逐轮检索；
+            # 需要模型自主多轮检索时显式设 PAPEREAD_TUTOR_AGENT=1。
             use_agent = (
-                env("PAPEREAD_TUTOR_AGENT", "1") != "0" and llm_mod.supports_tools()
+                env("PAPEREAD_TUTOR_AGENT", "0") != "0" and llm_mod.supports_tools()
             )
             web_task = (
                 asyncio.create_task(web_search.search(req.question, 4))
@@ -2937,7 +3353,7 @@ async def ask_stream(paper_id: str, req: AskReq) -> StreamingResponse:
                     log.info("agent 工具模式不可用，回退固定检索：%s", e)
 
             prep: _AskPrep | None = None
-            async for kind, payload in _prepare_ask_events(
+            async for kind, payload in _prepare_dossier_events(
                 paper_id, req, standalone, expanded, web_task
             ):
                 if kind == "tool":

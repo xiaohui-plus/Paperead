@@ -9,7 +9,9 @@ const AUTO_TRANSLATE_KEY = 'paperead.autoTranslate'
 /** 按论文记住用户手动切换过的自动翻译；未记录时按论文语种给默认值 */
 const PAPER_AUTO_TRANSLATE_KEY = 'paperead.autoTranslate.byPaper'
 const FONTS_KEY = 'paperead.readingFonts'
-const READER_FONT_KEY = 'paperead.readerFont'
+/** 原文/译文字体分开存储；旧版只有一个 readerFont 键，读取时做迁移 */
+const READER_FONT_PAIR_KEY = 'paperead.readerFontPair'
+const LEGACY_READER_FONT_KEY = 'paperead.readerFont'
 const MODE_KEY = 'paperead.readingMode'
 
 export interface ReadingFonts {
@@ -26,11 +28,30 @@ export interface ReaderFontOption {
   stack: string
 }
 
-/** 常见中英文字体；名称按 Windows / macOS / Linux 依次回退。 */
+/** 原文与译文可以分别选择字体；两侧互不影响。 */
+export interface ReaderFontPair {
+  source: string
+  target: string
+}
+
+/** 中文回退到宋体：macOS 用 Songti SC，Windows 用 SimSun / 宋体。 */
+const SONG_TI = '"Songti SC", "SimSun", "宋体", "Noto Serif CJK SC", "Source Han Serif SC"'
+
+/** 常见中英文字体；西文与数字走首选拉丁字体，中文回退宋体。 */
 export const READER_FONTS: ReaderFontOption[] = [
   {
+    key: 'georgia',
+    label: 'Georgia + 宋体（英文报刊，默认）',
+    stack: `Georgia, "Times New Roman", ${SONG_TI}, serif`,
+  },
+  {
+    key: 'times',
+    label: 'Times New Roman + 宋体（学术论文）',
+    stack: `"Times New Roman", Times, ${SONG_TI}, serif`,
+  },
+  {
     key: 'serif',
-    label: '宋体 / 思源宋体（衬线）',
+    label: '宋体 / 思源宋体（纯中文衬线）',
     stack: '"Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", "SimSun", "宋体", Georgia, serif',
   },
   {
@@ -59,23 +80,14 @@ export const READER_FONTS: ReaderFontOption[] = [
     stack: '"DengXian", "等线", "Microsoft YaHei", sans-serif',
   },
   {
-    key: 'georgia',
-    label: 'Georgia（英文报刊）',
-    stack: 'Georgia, "Times New Roman", "Songti SC", "宋体", serif',
-  },
-  {
-    key: 'times',
-    label: 'Times New Roman',
-    stack: '"Times New Roman", Times, "SimSun", "宋体", serif',
-  },
-  {
     key: 'arial',
     label: 'Arial / Helvetica',
     stack: 'Arial, Helvetica, "Microsoft YaHei", "微软雅黑", sans-serif',
   },
 ]
 
-export const DEFAULT_READER_FONT = 'serif'
+/** 默认使用报刊感的 Georgia，中文自动落到宋体。 */
+export const DEFAULT_READER_FONT = 'georgia'
 
 export const FONT_MIN = 0.85
 export const FONT_MAX = 1.35
@@ -191,36 +203,72 @@ export function saveReadingFonts(fonts: ReadingFonts): void {
   )
 }
 
-export function loadReaderFont(): string {
+function normalizeReaderFontKey(key: unknown): string | null {
+  return typeof key === 'string' && READER_FONTS.some((font) => font.key === key)
+    ? key
+    : null
+}
+
+export function loadReaderFonts(): ReaderFontPair {
+  const fallback: ReaderFontPair = {
+    source: DEFAULT_READER_FONT,
+    target: DEFAULT_READER_FONT,
+  }
   try {
-    const saved = localStorage.getItem(READER_FONT_KEY)
-    if (saved && READER_FONTS.some((font) => font.key === saved)) return saved
+    const raw = localStorage.getItem(READER_FONT_PAIR_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<ReaderFontPair>
+      return {
+        source: normalizeReaderFontKey(parsed.source) ?? DEFAULT_READER_FONT,
+        target: normalizeReaderFontKey(parsed.target) ?? DEFAULT_READER_FONT,
+      }
+    }
+    // 旧版只有一个字体键：原文和译文都沿用用户之前的选择
+    const legacy = normalizeReaderFontKey(
+      localStorage.getItem(LEGACY_READER_FONT_KEY),
+    )
+    if (legacy) return { source: legacy, target: legacy }
   } catch {
     // 隐私模式读不到 localStorage：用默认字体
   }
-  return DEFAULT_READER_FONT
+  return fallback
+}
+
+export function readerFontStack(key: string): string {
+  return (
+    READER_FONTS.find((font) => font.key === key)?.stack ??
+    READER_FONTS.find((font) => font.key === DEFAULT_READER_FONT)?.stack ??
+    READER_FONTS[0].stack
+  )
 }
 
 export function readerFontLabel(key: string): string {
-  return READER_FONTS.find((font) => font.key === key)?.label ?? READER_FONTS[0].label
+  return (
+    READER_FONTS.find((font) => font.key === key)?.label ??
+    READER_FONTS.find((font) => font.key === DEFAULT_READER_FONT)?.label ??
+    READER_FONTS[0].label
+  )
 }
 
-/** 把正文字体栈写到根元素；阅读页原文/译文字号不变，只换字形。 */
-export function applyReaderFont(key: string = loadReaderFont()): void {
-  const font = READER_FONTS.find((item) => item.key === key) ?? READER_FONTS[0]
-  document.documentElement.style.setProperty('--reader-font', font.stack)
+/** 把原文/译文字体栈分别写到根元素；只换字形，不动字号与布局。 */
+export function applyReaderFonts(fonts: ReaderFontPair = loadReaderFonts()): void {
+  const root = document.documentElement
+  root.style.setProperty('--reader-font-source', readerFontStack(fonts.source))
+  root.style.setProperty('--reader-font-target', readerFontStack(fonts.target))
 }
 
-export function saveReaderFont(key: string): void {
-  const next = READER_FONTS.some((font) => font.key === key)
-    ? key
-    : DEFAULT_READER_FONT
+export function saveReaderFonts(fonts: ReaderFontPair): void {
+  const next: ReaderFontPair = {
+    source: normalizeReaderFontKey(fonts.source) ?? DEFAULT_READER_FONT,
+    target: normalizeReaderFontKey(fonts.target) ?? DEFAULT_READER_FONT,
+  }
   try {
-    localStorage.setItem(READER_FONT_KEY, next)
+    localStorage.setItem(READER_FONT_PAIR_KEY, JSON.stringify(next))
+    localStorage.removeItem(LEGACY_READER_FONT_KEY)
   } catch {
     // 写不了就只在本次会话生效
   }
-  applyReaderFont(next)
+  applyReaderFonts(next)
   window.dispatchEvent(
     new CustomEvent('paperead:reader-font-changed', { detail: next }),
   )

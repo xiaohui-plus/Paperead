@@ -18,7 +18,7 @@ import {
   restoreModelSettings,
   startAppSettingsBackup,
 } from './lib/settingsSync'
-import { applyReaderFont, applyReadingFonts } from './lib/readingPrefs'
+import { applyReaderFonts, applyReadingFonts } from './lib/readingPrefs'
 
 const TourRoot = lazy(() =>
   import('./tour/TourRoot').then((module) => ({ default: module.TourRoot })),
@@ -48,7 +48,7 @@ if (mobile && hasMobileServer()) {
 
 migrateLegacyStorage()
 applyReadingFonts()
-applyReaderFont()
+applyReaderFonts()
 
 async function boot() {
   if (!mobile) {

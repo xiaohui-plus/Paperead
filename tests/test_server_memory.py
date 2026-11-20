@@ -247,7 +247,7 @@ def test_ask_stream_includes_recent_turns(monkeypatch, tmp_path):
 
     stream_call = backend.calls[-1]
     user = stream_call[1]["content"]
-    assert "【最近对话】" in user
+    assert "【历史对话·越近越完整】" in user
     assert "first question" in user
     assert "回答正文" in user
 
@@ -286,20 +286,22 @@ def test_follow_up_rewrites_with_history_and_injects_memory(monkeypatch, tmp_pat
     finally:
         llm_mod.set_backend(None)
 
-    rewrite_call = backend.calls[2]
+    # 第一问本身完整：不再额外调用模型改写；第二问带指代才改写
+    assert len(backend.calls) == 3
+    rewrite_call = backend.calls[1]
     assert "最近对话" in rewrite_call[1]["content"]
     assert "first question" in rewrite_call[1]["content"]
 
-    answer_call = backend.calls[3]
-    assert "只用于调整讲法" in answer_call[0]["content"]
+    answer_call = backend.calls[2]
+    assert "不能当作论文事实" in answer_call[0]["content"]
     answer_user = answer_call[1]["content"]
-    assert answer_user.startswith("【背景记忆】")
-    assert "【最近对话】" in answer_user
+    assert answer_user.startswith("【历史对话·越近越完整】")
+    assert "【关于读者】" in answer_user
     assert "first question" in answer_user
     assert "回答正文" in answer_user
     assert (
-        answer_user.index("【背景记忆】")
-        < answer_user.index("【最近对话】")
+        answer_user.index("【历史对话")
+        < answer_user.index("【关于读者】")
         < answer_user.index("【材料】")
     )
 
@@ -324,13 +326,11 @@ def test_recent_dialogue_is_sanitized(monkeypatch, tmp_path):
     finally:
         llm_mod.set_backend(None)
 
-    rewrite_user = backend.calls[0][1]["content"]
-    answer_user = backend.calls[1][1]["content"]
-    for prompt in (rewrite_user, answer_user):
+    # 「追问」本身完整，不再触发模型改写：只有一次回答调用
+    answer_user = backend.calls[0][1]["content"]
+    for prompt in (answer_user,):
         assert "\x00" not in prompt
         assert "\x1b" not in prompt
-    assert "【材料】" not in rewrite_user
-    assert "［材料］" in rewrite_user
     assert answer_user.count("【材料】") == 1
     assert "［材料］" in answer_user
 

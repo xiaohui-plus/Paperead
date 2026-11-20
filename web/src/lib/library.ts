@@ -619,9 +619,13 @@ export interface AskSource {
 /** 联网过程的结构化结果，用于告诉用户「搜了没有 / 搜到几条」。 */
 export interface AskWebStatus {
   attempted: boolean
-  engine?: string
   engines?: string[]
+  engine?: string
   count: number
+  /** deep：论文材料不足时额外抓过网页正文；search：只用了搜索摘要 */
+  depth?: 'search' | 'deep'
+  /** 实际抓取成功的正文篇数 */
+  fetched?: number
 }
 
 /** 工具卡片里的一条结果：论文段落可跳转，网页可打开外链。 */

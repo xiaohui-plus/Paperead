@@ -13,6 +13,7 @@ import {
   Heart,
   LayoutTemplate,
   Lightbulb,
+  MessageSquareText,
   Network,
   Pin,
   PinOff,
@@ -474,6 +475,8 @@ export const IconStar = lucideIcon(Star)
 export const IconPin = lucideIcon(Pin)
 /** 划词翻译卡片：取消固定 */
 export const IconPinOff = lucideIcon(PinOff)
+/** 阅读：PDF 审阅模式（页面右侧批注） */
+export const IconReview = lucideIcon(MessageSquareText)
 
 export function IconPlug() {
   return (

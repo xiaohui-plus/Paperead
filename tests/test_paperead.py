@@ -62,6 +62,28 @@ def test_pua_bullet_with_long_text_is_not_equation():
     assert _looks_equation(text, is_math_font=False) is False
 
 
+def test_cmr_paragraph_with_high_inline_math_coverage_is_not_equation():
+    """CMR 正文 + 句中公式：inline_math 覆盖整行也不能把整段吞成公式。"""
+    text = "We present the first spatially resolved study of PAH evolution in the nearby galaxy."
+    inline = [{"start": 0, "end": len(text)}]
+    assert _looks_equation(text, is_math_font=False, inline_math=inline) is False
+
+
+def test_inline_equation_with_citation_is_not_equation():
+    """行内公式与文献引用同行时，这一整行仍是正文。"""
+    text = "massive (M⋆ ∼ 4 × 1010 M⊙; A. K. Leroy et al. 2021),"
+    assert _looks_equation(text, is_math_font=True) is False
+
+
+def test_numeric_range_sentence_tail_is_not_equation():
+    text = "0.05−0.35 Myr."
+    assert _looks_equation(text, is_math_font=True) is False
+
+
+def test_display_equation_without_prose_is_still_equation():
+    assert _looks_equation("H(l+1) = σ(A H(l) W(l)).", is_math_font=True) is True
+
+
 # ── 续段判定 ───────────────────────────────────────────────────────────
 
 def test_ends_sentence_ignores_abbreviation():

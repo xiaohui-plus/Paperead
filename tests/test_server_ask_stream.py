@@ -88,6 +88,25 @@ def _use_fake_paper(main, monkeypatch):
     monkeypatch.setattr(main.qa_engine, "expand_query", no_expand)
     monkeypatch.setattr(main.qa_engine, "needs_external", lambda _q, _s: False)
 
+    async def no_fetch(url, max_chars=2400):
+        return {
+            "url": url,
+            "statusCode": 0,
+            "content": "",
+            "truncated": False,
+            "title": "",
+            "error": "测试默认不抓正文",
+        }
+
+    # 深读只在论文材料不足时触发；默认关掉真实抓取，避免测试打外网
+    monkeypatch.setattr(main.web_search, "fetch", no_fetch)
+
+    async def no_many(*args, **kwargs):
+        return []
+
+    # 材料不足时会主动扩检；测试里默认不追加，需要的用例自己覆盖
+    monkeypatch.setattr(main.web_search, "search_many", no_many)
+
 
 def _events(body: str) -> list[dict]:
     return [
@@ -134,13 +153,14 @@ def test_ask_stream_event_order_and_text(monkeypatch, tmp_path):
     sources_ev = events[sources_index]
     assert sources_ev["sources"][0]["label"] == "P1"
     assert sources_ev["usedWeb"] is False
-    assert sources_ev["tools"][0]["name"] == "paper_search"
+    assert sources_ev["tools"][0]["name"] == "paper_context"
     assert sources_ev["tools"][0]["status"] == "done"
 
     paper_end = next(
         e for e in events if e["type"] == "tool" and e.get("phase") == "end"
     )
-    assert paper_end["name"] == "paper_search"
+    assert paper_end["name"] == "paper_context"
+    assert paper_end["meta"]["chunks"] >= 1
     assert paper_end["items"][0]["label"] == "P1"
 
 
@@ -244,7 +264,11 @@ def test_ask_stream_includes_web_sources_and_allows_common_sense(monkeypatch, tm
     assert sources_ev["webStatus"]["attempted"] is True
     assert sources_ev["webStatus"]["count"] == 2
     assert sources_ev["webStatus"]["engines"] == ["so360"]
-    assert [t["name"] for t in sources_ev["tools"]] == ["paper_search", "web_search"]
+    assert [t["name"] for t in sources_ev["tools"]] == [
+        "paper_context",
+        "web_search",
+        "web_fetch",
+    ]
     assert sources_ev["tools"][1]["items"][0]["url"] == "https://e.com/a"
     web_sources = [s for s in sources_ev["sources"] if s["type"] == "web"]
     assert [s["url"] for s in web_sources] == ["https://e.com/a", "https://e.com/b"]
@@ -326,3 +350,84 @@ def test_ask_stream_reports_web_attempt_without_results(monkeypatch, tmp_path):
     user_prompt = backend.seen[0][-1]["content"]
     assert "【联网状态】" in user_prompt
     assert "（通识）" in user_prompt
+
+def test_ask_stream_deep_reads_when_paper_lacks_answer(monkeypatch, tmp_path):
+    """论文材料不足且联网可用时，自动抓网页正文补充，而不是只靠摘要或拒答。"""
+    main = _load_main(monkeypatch, tmp_path)
+    _use_fake_paper(main, monkeypatch)
+
+    async def fake_search(query, limit=4):
+        return [
+            {
+                "title": "幻觉缓解综述",
+                "url": "https://e.com/a",
+                "content": "论文外的摘要 A",
+                "engine": "so360",
+            },
+            {
+                "title": "RAG 实践",
+                "url": "https://e.com/b",
+                "content": "论文外的摘要 B",
+                "engine": "so360",
+            },
+        ]
+
+    async def empty_many(*args, **kwargs):
+        return []
+
+    async def fake_fetch(url, max_chars=2400):
+        if url.endswith("/b"):
+            return {
+                "url": url,
+                "statusCode": 403,
+                "content": "",
+                "truncated": False,
+                "title": "",
+                "error": "403",
+            }
+        return {
+            "url": url,
+            "statusCode": 200,
+            "content": "缓解幻觉的常用做法包括检索增强与事实校验。",
+            "truncated": False,
+            "title": "幻觉缓解综述",
+            "error": "",
+        }
+
+    monkeypatch.setattr(main.web_search, "search", fake_search)
+    monkeypatch.setattr(main.web_search, "search_many", empty_many)
+    monkeypatch.setattr(main.web_search, "fetch", fake_fetch)
+
+    backend = CapturingBackend(["论文材料不足，", "这里用联网正文补充。"])
+    llm_mod.set_backend(backend)
+    try:
+        with TestClient(main.app) as client:
+            res = client.post(
+                "/api/papers/p1/ask/stream",
+                json={
+                    "question": "多模态大模型的幻觉问题怎么缓解",
+                    "web": True,
+                },
+            )
+    finally:
+        llm_mod.set_backend(None)
+
+    assert res.status_code == 200
+    events = _events(res.text)
+    sources_ev = next(e for e in events if e["type"] == "sources")
+    assert sources_ev["usedWeb"] is True
+    assert sources_ev["webStatus"]["depth"] == "deep"
+    assert sources_ev["webStatus"]["fetched"] == 1
+
+    names = [t["name"] for t in sources_ev["tools"]]
+    assert names == ["paper_context", "web_search", "web_fetch"]
+    fetch_tool = next(t for t in sources_ev["tools"] if t["name"] == "web_fetch")
+    assert fetch_tool["status"] == "done"
+    assert "深读 1 篇" in fetch_tool["summary"]
+    assert fetch_tool["items"][0]["url"] == "https://e.com/a"
+
+    user_prompt = backend.seen[0][-1]["content"]
+    assert "[W1 正文]" in user_prompt
+    assert "检索增强与事实校验" in user_prompt
+    assert "RAG 实践" in user_prompt
+    assert "论文外的摘要 B" in user_prompt

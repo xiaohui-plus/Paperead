@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { Paper, ViewMode } from '../types'
 import { downloadMarkdown } from '../lib/markdown'
 import { tourBus } from '../tour/tourBus'
-import { IconAutoHighlight, IconBack, IconCollapse, IconDownload, IconExpand, IconExternalLink, IconMinus, IconPdf, IconPlus, IconPrint, IconSettings, IconSidebar, IconTranslate } from './icons'
+import { IconAutoHighlight, IconBack, IconCollapse, IconDownload, IconExpand, IconExternalLink, IconMinus, IconPdf, IconPlus, IconPrint, IconReview, IconSettings, IconSidebar, IconTranslate } from './icons'
 
 interface Props {
   paper: Paper
@@ -26,6 +26,11 @@ interface Props {
   pdfHref: string
   pdfExpanded: boolean
   onTogglePdfExpand: () => void
+  /** PDF 审阅模式：在页面右侧显示批注卡片 */
+  pdfReview: boolean
+  onTogglePdfReview: () => void
+  /** 窄屏没有右侧栏：审阅入口改由底部批注抽屉承载，顶栏不再显示 */
+  narrow?: boolean
   /** 阅读侧栏折叠状态与切换；不传则不显示折叠按钮。 */
   panelCollapsed?: boolean
   onTogglePanel?: () => void
@@ -64,6 +69,9 @@ export function TopBar({
   pdfHref,
   pdfExpanded,
   onTogglePdfExpand,
+  pdfReview,
+  onTogglePdfReview,
+  narrow = false,
   panelCollapsed = false,
   onTogglePanel,
   showPanelToggle = false,
@@ -232,6 +240,18 @@ export function TopBar({
             onClick={onTogglePdf}
           >
             <IconPdf />
+          </button>
+        )}
+
+        {pdfMode && !narrow && (
+          <button
+            className="icon-btn pdf-review-toggle"
+            data-active={pdfReview}
+            aria-pressed={pdfReview}
+            title={pdfReview ? '退出审阅模式' : '审阅模式：在页面右侧显示批注'}
+            onClick={onTogglePdfReview}
+          >
+            <IconReview />
           </button>
         )}
 

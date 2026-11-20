@@ -99,10 +99,20 @@ function readPanelWidth(): number {
 }
 
 const PANEL_COLLAPSED_KEY = 'paperead.panelCollapsed'
+const PDF_REVIEW_KEY = 'paperead.pdfReview'
 
 function readPanelCollapsed(): boolean {
   try {
     return localStorage.getItem(PANEL_COLLAPSED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+/** PDF 审阅模式开关；关掉后原版视图恢复原来的单页居中布局。 */
+function readPdfReview(): boolean {
+  try {
+    return localStorage.getItem(PDF_REVIEW_KEY) === '1'
   } catch {
     return false
   }
@@ -149,6 +159,22 @@ export function ReaderView({ paperId, onBack }: Props) {
   const [pdfPage, setPdfPage] = useState(1)
   // 默认只占右侧阅读区、保留左侧功能面板；展开后才占满整行
   const [pdfExpanded, setPdfExpanded] = useState(initialExpanded)
+  // 审阅模式：在 PDF 页面右侧按位置渲染每条批注
+  const [pdfReview, setPdfReview] = useState(readPdfReview)
+  // 窄屏没有放右侧批注栏的位置：审阅模式改由底部「批注」抽屉承载
+  const [narrowLayout, setNarrowLayout] = useState(
+    () =>
+      typeof window !== 'undefined' &&
+      window.matchMedia('(max-width: 860px)').matches,
+  )
+
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 860px)')
+    const onChange = () => setNarrowLayout(mq.matches)
+    onChange()
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [])
   // 面板里点目录/重点/图表时，PDF 视图要滚到对应页
   const [pdfJump, setPdfJump] = useState<{ page: number; token: number } | null>(null)
   const jumpSeq = useRef(0)
@@ -743,6 +769,18 @@ export function ReaderView({ paperId, onBack }: Props) {
     restored.current = true
     const hash = decodeURIComponent(window.location.hash.slice(1))
     const progress = paper.progress
+    // 未读论文默认从摘要开始：封面标题、作者与单位已经在 hero 里折叠，
+    // 正文流不再从首页的作者/投稿信息读起。已读论文仍回到上次位置。
+    if (!hash && (!progress || (!progress.block_id && !progress.pct))) {
+      window.setTimeout(() => {
+        const el = scrollRef.current
+        const target =
+          el?.querySelector<HTMLElement>('[data-block-kind="abstract"]') ??
+          el?.querySelector<HTMLElement>('[data-block-kind="para"]')
+        target?.scrollIntoView({ block: 'start' })
+      }, 120)
+      return
+    }
     if (hash || !progress || (!progress.block_id && !progress.pct)) return
     // 一次性动作：论文对象会随翻译流更新，这里不能把定时器绑在依赖清理上
     window.setTimeout(() => {
@@ -1170,6 +1208,16 @@ export function ReaderView({ paperId, onBack }: Props) {
     window.history.replaceState({}, '', url)
   }
 
+  const togglePdfReview = () => {
+    const next = !pdfReview
+    setPdfReview(next)
+    try {
+      localStorage.setItem(PDF_REVIEW_KEY, next ? '1' : '0')
+    } catch {
+      // 写不了就只在本次会话生效
+    }
+  }
+
   // 原版视图里 Reader 是卸载状态，滚动位置存在内存里，切回来补上
   useEffect(() => {
     if (pdfMode) return
@@ -1262,6 +1310,9 @@ export function ReaderView({ paperId, onBack }: Props) {
         pdfHref={pdfHref}
         pdfExpanded={pdfExpanded}
         onTogglePdfExpand={togglePdfExpand}
+        pdfReview={pdfReview}
+        narrow={narrowLayout}
+        onTogglePdfReview={togglePdfReview}
         panelCollapsed={panelHidden}
         onTogglePanel={togglePanel}
         showPanelToggle={!(pdfMode && pdfExpanded)}
@@ -1368,6 +1419,8 @@ focusAnnotation={focusAnnotation}
               annotationActions={annotationActions}
               onOpenAnnotation={openAnnotation}
               onAskQuote={addQuote}
+              reviewMode={pdfReview && !narrowLayout}
+              focusAnnotation={focusAnnotation}
             />
           </Suspense>
         ) : (
@@ -1410,7 +1463,7 @@ hint={
         )}
       </div>
 
-      {!(pdfMode && pdfExpanded) && (
+      {(!(pdfMode && pdfExpanded) || narrowLayout) && (
         <MobileDock
           paperId={paperId}
           paper={paper}

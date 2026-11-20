@@ -14,6 +14,8 @@ from paperead.layout import (
     Line,
     _detect_front_matter,
     _looks_author_name,
+    _merge_affiliations,
+    _merge_front_continuations,
     _merge_front_matter_cards,
     _reading_order,
 )
@@ -131,3 +133,89 @@ def test_front_matter_cards_merge_per_column():
     assert "4th" not in merged[0].text
     assert merged[3].text.startswith("4th Anqi Liu")
     assert "International College of Engineering" in merged[3].text
+
+
+def test_side_affiliation_column_is_not_interleaved_with_abstract():
+    """BMC 首页：左侧通讯/单位窄列 + 右侧摘要主列，不能按 y 逐行交错。"""
+    lines = [
+        _line("Ensemble learning for integrative prediction", 56, 50, 502, size=24),
+        _line("Lin-Lin Gu, Run-Qing Yang", 56, 184, 394, size=11),
+        _line("Abstract", 185, 229, 224, size=10.3, bold=True),
+        _line(
+            "Background: Whole genome variants offer sufficient information for genetic prediction",
+            185, 244, 535,
+        ),
+        _line(
+            "tion of human disease risk, and prediction of animal and plant breeding values",
+            185, 257, 535,
+        ),
+        _line("*Correspondence: zywang@jmu.edu.cn", 56, 236, 128, size=7.5),
+        _line("1 Key Laboratory of Healthy Mariculture", 56, 267, 140, size=7.5),
+        _line("2 Research Center for Aquatic Biotechnology", 56, 277, 146, size=7.5),
+        _line("Keywords: Genomic prediction, Genomic selection, Ensemble learning", 185, 446, 512),
+        _line("Background", 178, 484, 234, size=10.3, bold=True),
+        _line(
+            "Genome-wide distributed variants provide sufficient information for prediction of genetic value.",
+            178, 499, 540, size=9.8,
+        ),
+    ]
+    front = _detect_front_matter(lines, body_size=10.0, page_height=792, page_width=595)
+    abstract_line = lines[3]
+    aux_line = lines[6]
+    assert front.abstract_x is not None
+    assert front.in_abstract(abstract_line)
+    assert not front.in_abstract(aux_line)
+    assert front.in_aux(aux_line.bbox)
+    assert front.keywords is not None and front.keywords[1] <= 484
+
+    ordered = _reading_order(lines, None, front, page_width=595)
+    assert ordered.index(aux_line) < ordered.index(abstract_line)
+
+def test_wide_aastex_author_rows_are_not_merged_into_affiliation():
+    """通栏作者行不是三列卡片：作者行合并成 author，单位必须独立成 affiliation。"""
+    front = FrontMatter(page=1, head_end=600)
+    blocks = [
+        Block(id="", order=0, page=1, kind="author", text="Serena A. Cronin ,1 Alberto D. Bolatto ,1, 2", bbox=(51.6, 123.4, 560.5, 140.0)),
+        Block(id="", order=1, page=1, kind="author", text="Rebecca C. Levy ,3 Karl D. Gordon ,3", bbox=(51.6, 142.0, 560.5, 158.0)),
+        Block(id="", order=2, page=1, kind="affiliation", text="1Department of Astronomy, University of Maryland", bbox=(59.9, 239.2, 549.0, 374.5)),
+        Block(id="", order=3, page=1, kind="affiliation", text="2Joint Space-Science Institute, University of Maryland", bbox=(59.9, 376.0, 549.0, 390.0)),
+    ]
+    cards = _merge_front_matter_cards(blocks, front, page_width=612)
+    # 通栏作者行直接返回，交给 _merge_affiliations 按 kind 合并
+    assert len(cards) == 4
+    merged = _merge_affiliations(cards)
+    assert [b.kind for b in merged] == ["author", "affiliation"]
+    assert "Department of Astronomy" not in merged[0].text
+    assert "Cronin" in merged[0].text
+
+
+def test_abstract_and_keywords_merge_across_page_and_email_note():
+    blocks = [
+        Block(
+            id="", order=0, page=1, kind="abstract",
+            text="We present the first spatially resolved study of PAH evolution in the nearby galaxy out to a deprojected distance",
+            bbox=(84.6, 611.9, 527.0, 684.1),
+        ),
+        Block(id="", order=1, page=1, kind="affiliation", text="Email: cronin@umd.edu", bbox=(51.1, 720.1, 140.6, 728.0)),
+        Block(
+            id="", order=2, page=2, kind="para",
+            text="r ∼ 0.5 kpc, beyond which they likely become confused with the spiral arms in the southwest,",
+            bbox=(84.6, 66.6, 527.0, 130.0),
+        ),
+        Block(id="", order=3, page=2, kind="para", text="first few Myr.", bbox=(84.6, 132.0, 160.0, 142.0)),
+        Block(
+            id="", order=4, page=2, kind="keywords",
+            text="Keywords: Galaxy winds (626) — Starburst galaxies (1570) — Polycyclic aromatic hydrocarbons",
+            bbox=(84.6, 229.1, 526.0, 239.1),
+        ),
+        Block(id="", order=5, page=2, kind="para", text="(1280)", bbox=(84.6, 241.0, 120.0, 250.0)),
+        Block(id="", order=6, page=2, kind="heading", text="1. INTRODUCTION", bbox=(124.1, 265.9, 218.8, 275.9)),
+    ]
+    merged = _merge_front_continuations(blocks)
+
+    abstract = next(b for b in merged if b.kind == "abstract")
+    keywords = next(b for b in merged if b.kind == "keywords")
+    assert "first few Myr." in abstract.text
+    assert "(1280)" in keywords.text
+    assert any(b.kind == "affiliation" and "cronin@" in b.text for b in merged)
+    assert any(b.kind == "heading" and b.text == "1. INTRODUCTION" for b in merged)

@@ -18,10 +18,15 @@ from dataclasses import dataclass, field
 
 from .textnorm import keep_space_between
 
-# 数学字体（含正体 CMR：正文公式里的括号、数字、SPD/log 等）
-MATH_FONTS = (
-    "CMMI", "CMR", "CMSY", "CMEX", "MSBM", "MTMI", "MTEX", "EUSM", "EUFM", "Symbol",
+# 强数学字体：只有这些字体能作为「这一行是公式」的锚点。
+# CMR 是 Computer Modern 的**正文字体**（AASTeX / 部分 arXiv 论文整篇正文都用
+# CMR10），绝不能单独作为公式证据——否则整篇正文都会被重建为行内公式。
+STRONG_MATH_FONTS = (
+    "CMMI", "CMSY", "CMEX", "MSBM", "MTMI", "MTEX", "EUSM", "EUFM", "Symbol",
 )
+# 辅助字体：只能并入已经由强数学字体开启的公式组（括号、数字、Mpc/SPD 等正体词）。
+AUX_MATH_FONTS = ("CMR",)
+MATH_FONTS = STRONG_MATH_FONTS + AUX_MATH_FONTS
 # 这些字体一旦出现，通常意味着分式/大运算符/矩阵等复杂结构，交给裁图兜底
 HARD_FONTS = ("CMEX", "MSBM", "MTEX", "EUSM", "EUFM")
 
@@ -73,13 +78,25 @@ def _is_math(font: str) -> bool:
     return any(font.startswith(prefix) for prefix in MATH_FONTS)
 
 
+def _is_strong_math(font: str) -> bool:
+    return any(font.startswith(prefix) for prefix in STRONG_MATH_FONTS)
+
+
+def _is_aux_math(font: str) -> bool:
+    return any(font.startswith(prefix) for prefix in AUX_MATH_FONTS)
+
+
 def _is_hard(font: str) -> bool:
     return any(font.startswith(prefix) for prefix in HARD_FONTS)
 
 
 def _span_base_size(spans: list[dict]) -> float:
     """行内主字号：正文字体优先，否则取出现最多的字号。"""
-    prose = [float(s.get("size") or 0) for s in spans if not _is_math(s.get("font") or "")]
+    prose = [
+        float(s.get("size") or 0)
+        for s in spans
+        if not _is_strong_math(s.get("font") or "")
+    ]
     candidates = prose or [float(s.get("size") or 0) for s in spans]
     if not candidates:
         return 10.0
@@ -174,13 +191,11 @@ def build_inline_math(spans: list[dict], ranges: list[tuple[int, int, dict]]) ->
         nonlocal group
         if not group:
             return
-        # 只有数学字体才构成行内公式；纯正体正文不处理
-        if not any(_is_math(s.get("font") or "") for _, _, s in group):
+        # 只有强数学字体才能构成行内公式。正文字体（CMR）即使整行都是，
+        # 也不能单独成组——AASTeX 等 LaTeX 论文的正文就是 CMR10。
+        if not any(_is_strong_math(s.get("font") or "") for _, _, s in group):
             group = []
             return
-        first = next(i for i, (_, _, s) in enumerate(group) if _is_math(s.get("font") or ""))
-        last = max(i for i, (_, _, s) in enumerate(group) if _is_math(s.get("font") or ""))
-        group = group[first:last + 1]
         start = group[0][0]
         end = group[-1][1]
         raw = "".join((s.get("text") or "") for _, _, s in group)
@@ -241,21 +256,40 @@ def build_inline_math(spans: list[dict], ranges: list[tuple[int, int, dict]]) ->
 
     for index, item in enumerate(ranges):
         _, _, span = item
-        if _is_math(span.get("font") or ""):
+        font = span.get("font") or ""
+        text = (span.get("text") or "").strip()
+        if _is_strong_math(font):
             group.append(item)
             continue
-        # 公式里的正体短词（x^front / x^down 的 front、down）用正文
-        # 字体排版，夹在两个数学 span 之间；不并入会把一条公式切成三段，
-        # 正文里就会出现残缺的 latex。
-        text = (span.get("text") or "").strip()
-        prev_math = bool(group) and _is_math(group[-1][2].get("font") or "")
-        next_math = (
+        # 组已经由强数学字体开启时，才允许并入**紧邻的短辅助片段**：
+        # 公式里的括号/数字（CMR）、Mpc/kpc/K 这类单位正体词。
+        # 不能按「CMR 就是公式」处理，否则一行正文会被整行吞掉。
+        aux_ok = (
+            bool(group)
+            and _is_aux_math(font)
+            and text
+            and len(text) <= 12
+            and " " not in text
+            and (
+                any(ch.isdigit() for ch in text)
+                or text.isupper()
+                or not re.search(r"[a-z]{4,}", text)
+            )
+        )
+        if aux_ok:
+            group.append(item)
+            continue
+        # 公式里的正体短词（x^front / x^down 的 front、down）夹在两个
+        # 强数学 span 之间；不并入会把一条公式切成三段。
+        prev_strong = bool(group) and _is_strong_math(group[-1][2].get("font") or "")
+        next_strong = (
             index + 1 < len(ranges)
-            and _is_math(ranges[index + 1][2].get("font") or "")
+            and _is_strong_math(ranges[index + 1][2].get("font") or "")
         )
         if (
-            prev_math
-            and next_math
+            group
+            and prev_strong
+            and next_strong
             and text
             and len(text) <= 12
             and text.isascii()

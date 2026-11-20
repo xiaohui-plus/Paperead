@@ -212,15 +212,48 @@ async def expand_query(question: str) -> list[str]:
     return words
 
 
+_FOLLOWUP_RE = re.compile(
+    r"^(那|那么|所以|但是|还有|继续|再说|接着|然后|这个|那个|它|他|她|该|上述|前面|"
+    r"刚才|上一条|上句|这里|这种|那样|这样|同样|为什么|怎么|如何|展开|解释一下)|"
+    r"(它|这个|那个|该|上述|前面|刚才|上一条|上句|这里|这种|那样|这句话|这段|这部分)",
+    re.IGNORECASE,
+)
+
+
+def looks_like_followup(question: str) -> bool:
+    """问题是否依赖上下文（指代/省略/追问）。仅在这种情况下才需要模型改写。
+
+    不看长度：短问题（「什么是注意力」「第二个问题」）往往本身完整，
+    误判会让每轮都多一次模型调用，正是之前慢的来源之一。
+    """
+    q = (question or "").strip()
+    if not q:
+        return False
+    return bool(_FOLLOWUP_RE.search(q))
+
+
+def keywords(question: str, limit: int = 12) -> list[str]:
+    """本地取检索关键词，替代每次提问都调模型扩充。"""
+    seen: list[str] = []
+    for token in tokenize(question or ""):
+        if token in seen:
+            continue
+        seen.append(token)
+        if len(seen) >= limit:
+            break
+    return seen
+
+
 async def rewrite_and_expand(
     question: str, history: list[dict] | None = None
 ) -> tuple[str, list[str]]:
-    """把追问改写成独立问题，并给出中英检索词。一次调用完成两件事。
+    """把追问改写成独立问题，并给出检索词。
 
-    没有历史时退化为原来的关键词扩张；解析失败时 standalone 用原问题。
+    没有历史、或当前问题本身完整时直接返回本地关键词：不额外调用模型，
+    论文材料由档案直供，关键词只用于本地定位与联网检索。
     """
-    if not history:
-        return question, await expand_query(question)
+    if not history or not looks_like_followup(question):
+        return question, keywords(question)
 
     recent = "\n".join(
         f"{'用户' if m.get('role') == 'user' else '助手'}："
@@ -296,30 +329,35 @@ def needs_external(question: str, top_score: float) -> bool:
     return top_score < 1.2      # 论文里基本没匹配上
 
 
-ANSWER_SYS = """你是论文助教。结合【材料】回答问题，用中文，简洁、分点、不要客套。
+ANSWER_SYS = """你是论文助教。材料按可信度分层，回答以【用户引用】和【论文档案】为准，
+【对话历史】只用于承接语境，【关于读者】只用于调整讲法。
 
-材料分三类：
-- [P3] 论文原文第 3 页
-- [R31] 论文参考文献 31
-- [W2] 网络检索结果 2（公开网络，可能有错，需谨慎采信）
-另有【附录】里的图表/公式、用户上传的附件，按标注引用。
+材料标记：
+- [P3 §3.2] 论文第 3 页第 3.2 节原文；标「全文」的段落是完整原文；
+- 未标「全文」的段落只提供了首句（全篇覆盖用），不能把首句当成完整段落；
+- [R31] 论文参考文献 31；[W2] 网络检索摘要（可能有错，谨慎采信）；
+- [W2 正文] 论文材料不足时抓取到的网页正文，比搜索摘要完整，引用时给出来源链接。
 
-规则：
-1. 优先用论文材料回答；论文确实没写、或用户问的是论文之外的知识时，用网络结果回答，
-   也可以补充必要的领域常识与定义，不要因为论文没写就拒答。
-2. 绝对不要编造论文里没有的页码、数据、实验结论；不要把网络内容或常识说成论文原文。
-3. 论断标注来源：来自论文标 [P3]，来自参考文献标 [R31]，来自网络标 [W2]；
-   来自你自己的领域常识、且材料里没有的，句末标「（通识）」。
-4. 如果论文与网络信息冲突，指出各自说法，不要强行统一。
-5. 材料完全不足以回答时，说明缺什么，再给出基于公开资料或常识的最佳解释，
-   不要只回一句"论文中没有提到"。
-6. 不要复述问题，直接给答案。"""
+回答规则：
+1. 先直接回答问题本身，再补充依据；不要答非所问、不要复述问题。
+2. 论文有依据的结论标 [P页码]，参考文献标 [R31]，网络标 [W2]；自己的领域常识标「（通识）」。
+3. 绝对不要编造论文里没有的页码、数据、实验结论、方法名。材料只到首句时，
+   要说明「论文该段只看到开头」，不要脑补中间内容。
+4. 论文确实没写、或用户问的是论文之外的知识时，按 [W] 联网材料优先、其次领域常识回答，
+   但要明确这不是论文原文；有 [W 正文] 时优先用它而不是只靠摘要。
+5. 【用户引用】非空时，本次问题优先针对引用片段：先解释/回答引用的内容，
+   再视需要补充上下文；引用里没有的内容不要硬塞。
+6. 【对话历史】越近的轮次越完整、越远的越模糊；指代（「它」「这个方法」「上面说的」）
+   按最近对话理解；早期对话只当背景，不能当作论文事实。
+7. 【关于读者】用于决定讲法（深度、例子、是否补前置），不能当作论文事实或数据来源。
+8. 材料不足时说明缺什么；材料之间冲突时指出差异，不要强行统一。
+9. 中文，简洁、分点、不要客套。"""
 
 MEMORY_RULES = """
-7. 【背景记忆】只用于调整讲法、承接前文、避免重复，不能作为论文事实、数字、结论的依据；
-8. 概念标为"已懂"的不再展开；标为"困惑"的换一种讲法，先补前置；
-9. 用户纠正过的以纠正为准；记忆与材料冲突时以材料为准；
-10. 不要声称"我记得你……"，直接用调整后的讲法。"""
+补充：
+- 【关于读者】里标为「已懂」的概念不再展开；标为「困惑」的换一种讲法、先补前置；
+- 用户纠正过的以纠正为准；记忆与论文材料冲突时以论文材料为准；
+- 不要声称「我记得你……」，直接使用调整后的讲法。"""
 
 WEB_NOTE = """
 【联网状态】本次未能获取到有效的网络结果。若论文材料不足，请基于领域常识回答，
@@ -362,13 +400,83 @@ def _sanitize_dialogue(text: object) -> str:
 
 
 def _recent_block(recent: list[dict] | None) -> str:
-    """最近几轮只留角色和正文，不带 client_id / sources 等内部字段。"""
-    lines = [
-        f"{'用户' if m.get('role') == 'user' else '助手'}："
-        f"{_sanitize_dialogue(m.get('text', ''))[:300]}"
-        for m in (recent or [])[-6:]
-    ]
-    return "【最近对话】\n" + "\n".join(lines)
+    """把历史按「记忆曲线」压成材料：越近记得越完整，越远越模糊。"""
+    return history_curve(recent)
+
+
+HISTORY_TOTAL_LIMIT = 3_600
+# (轮次上限, 问题上限, 答案上限)
+_HISTORY_LEVELS = (
+    (2, 600, 700),
+    (5, 320, 320),
+    (10, 160, 120),
+)
+
+
+def history_curve(recent: list[dict] | None) -> str:
+    """越近的轮次保留越多细节，越远的只留问题要点。
+
+    这不是检索：只是把已有对话按距离做确定性压缩，不额外调用模型。
+    """
+    messages = list(recent or [])
+    if not messages:
+        return ""
+
+    turns: list[tuple[str, str]] = []
+    pending_q = ""
+    for msg in messages:
+        role = msg.get("role")
+        text = _sanitize_dialogue(msg.get("text", ""))
+        if role == "user":
+            if pending_q:
+                turns.append((pending_q, ""))
+            pending_q = text
+        elif pending_q:
+            turns.append((pending_q, text))
+            pending_q = ""
+    if pending_q:
+        turns.append((pending_q, ""))
+
+    if not turns:
+        return ""
+
+    lines: list[str] = ["【历史对话·越近越完整】"]
+    budget = HISTORY_TOTAL_LIMIT
+    for distance, (question, answer) in enumerate(reversed(turns), 1):
+        for until, q_limit, a_limit in _HISTORY_LEVELS:
+            if distance <= until:
+                break
+        else:
+            q_limit, a_limit = 90, 0
+
+        if budget <= 0:
+            lines.append("- …（更早的对话已省略）")
+            break
+
+        q = _clip_text(question, q_limit)
+        if q_limit < 160:
+            q = q.rstrip("…") + "…" if len(question) > q_limit else q
+        note = "（较早，细节可能已模糊）" if distance > 3 else ""
+        line = f"- 问：{q}"
+        if answer and a_limit > 0:
+            line += f"\n  答：{_clip_text(answer, a_limit)}"
+        if note:
+            line += f"\n  {note}"
+        if len(line) > budget:
+            line = _clip_text(line, max(0, budget))
+        lines.append(line)
+        budget -= len(line)
+    lines.append("（最近一轮最可信；更早的内容只作背景，不作为论文事实。）")
+    return "\n".join(lines)
+
+
+def _clip_text(text: str, limit: int) -> str:
+    value = re.sub(r"\s+", " ", text or "").strip()
+    if limit <= 0:
+        return ""
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 1)].rstrip() + "…"
 
 
 def _answer_messages(
@@ -379,11 +487,17 @@ def _answer_messages(
     web_empty: bool = False,
 ) -> list[dict]:
     system = ANSWER_SYS + (MEMORY_RULES if memory else "")
-    user = f"【材料】\n{context}\n\n【问题】{question}"
-    if recent:
-        user = f"{_recent_block(recent)}\n\n{user}"
-    if memory:
-        user = f"【背景记忆】\n{memory}\n\n{user}"
+    parts: list[str] = []
+    history = history_curve(recent)
+    if history:
+        parts.append(history)
+    parts.append(
+        "【关于读者】\n"
+        + (memory or "读者是正在精读这篇论文的研究者；未提供更多个人背景，不要臆测其领域与目标。")
+    )
+    parts.append(f"【材料】\n{context}")
+    parts.append(f"【本次问题】{question}")
+    user = "\n\n".join(parts)
     if web_empty:
         user = f"{user}\n{WEB_NOTE}"
     return [

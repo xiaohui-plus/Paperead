@@ -2,13 +2,14 @@ import type { AskToolCall, AskToolItem } from '../lib/library'
 import { IconBook, IconChevron, IconList, IconSearch, IconWrench } from './icons'
 
 const TOOL_TITLES: Record<string, string> = {
+  paper_context: '论文全篇',
   paper_search: '检索论文',
   web_search: '联网搜索',
   web_fetch: '读取网页',
 }
 
 function toolIcon(name: string) {
-  if (name === 'paper_search') return <IconBook />
+  if (name === 'paper_context' || name === 'paper_search') return <IconBook />
   if (name === 'web_fetch') return <IconList />
   if (name.includes('search')) return <IconSearch />
   return <IconWrench />

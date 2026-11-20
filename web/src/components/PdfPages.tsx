@@ -1,6 +1,8 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
@@ -43,6 +45,10 @@ interface Props {
   onOpenAnnotation?: (annotation: Annotation) => void
   /** 划词工具条点「提问」：把原版 PDF 里选中的文字带到左侧问答面板 */
   onAskQuote?: (quote: ReaderQuoteDraft) => void
+  /** 审阅模式：在每一页右侧按位置渲染批注卡片（类似 Word 的批注气泡） */
+  reviewMode?: boolean
+  /** 双击标注后聚焦：右侧对应卡片滚动到视野并闪两下 */
+  focusAnnotation?: { id: string; at: number } | null
 }
 
 interface PdfSelection {
@@ -184,6 +190,174 @@ function mergeOverlaps(rects: PdfRect[]): PdfRect[] {
 // 服务端按这个宽度渲染，前端只做等比缩放；再大对公式也没有额外增益。
 const RENDER_WIDTH = 1200
 
+/** 审阅模式右侧批注栏宽度与卡片间距（布局像素）。 */
+const REVIEW_WIDTH = 280
+const REVIEW_GAP = 16
+const CARD_GAP = 8
+
+const NOTE_TYPE_LABEL: Record<Annotation['kind'], string> = {
+  highlight: '荧光笔',
+  comment: '批注',
+}
+
+/**
+ * 审阅模式：在一页右侧按批注在页面里的纵向位置渲染卡片。
+ *
+ * 卡片默认绝对定位、按 rects[0].y 对到页面对应行，互相重叠时向下让位；
+ * 一页批注太多、整体超出页面高度时整列上移，避免压到下一页。
+ * 可用宽度不足时（stacked）改为在页面下方按顺序排列。
+ */
+function PdfMarginNotes({
+  page,
+  annotations,
+  frameHeight,
+  stacked,
+  actions,
+  focusAnnotation,
+}: {
+  page: number
+  annotations: Annotation[]
+  frameHeight: number
+  stacked: boolean
+  actions?: AnnotationActions
+  focusAnnotation?: { id: string; at: number } | null
+}) {
+  const items = useMemo(
+    () =>
+      annotations
+        .filter((item) => item.page === page && item.rects?.length)
+        .sort(
+          (a, b) =>
+            (a.rects?.[0]?.y ?? 0) - (b.rects?.[0]?.y ?? 0) ||
+            a.created_at - b.created_at,
+        ),
+    [annotations, page],
+  )
+  const cardRefs = useRef(new Map<string, HTMLElement>())
+  const [tops, setTops] = useState<Record<string, number>>({})
+  const [contentHeight, setContentHeight] = useState(frameHeight)
+
+  useLayoutEffect(() => {
+    if (stacked) {
+      setTops({})
+      setContentHeight(frameHeight)
+      return
+    }
+    const next: Record<string, number> = {}
+    let cursor = 0
+    for (const item of items) {
+      const height = cardRefs.current.get(item.id)?.offsetHeight ?? 96
+      const desired = Math.max(0, (item.rects?.[0]?.y ?? 0) * frameHeight - 14)
+      const top = Math.max(desired, cursor)
+      next[item.id] = top
+      cursor = top + height + CARD_GAP
+    }
+    // 卡片整体超过页面高度时整列上移，优先保证第一条贴近原位置
+    const bottom = items.length ? cursor - CARD_GAP : 0
+    const overflow = bottom - frameHeight
+    if (overflow > 0 && items.length) {
+      const firstId = items[0].id
+      const shift = Math.min(overflow, next[firstId] ?? 0)
+      if (shift > 0) {
+        for (const key of Object.keys(next)) next[key] -= shift
+      }
+    }
+    setTops(next)
+    setContentHeight(Math.max(frameHeight, bottom))
+  }, [items, frameHeight, stacked])
+
+  useEffect(() => {
+    if (!focusAnnotation) return
+    const el = cardRefs.current.get(focusAnnotation.id)
+    if (!el) return
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    el.classList.remove('is-flash')
+    void el.offsetWidth
+    el.classList.add('is-flash')
+    const timer = window.setTimeout(() => el.classList.remove('is-flash'), 1500)
+    return () => {
+      window.clearTimeout(timer)
+      el.classList.remove('is-flash')
+    }
+  }, [focusAnnotation])
+
+  return (
+    <aside
+      className={`pdf-margin-notes${stacked ? ' is-stacked' : ''}`}
+      aria-label={`第 ${page} 页批注`}
+      style={
+        stacked
+          ? undefined
+          : { height: `${Math.max(frameHeight, contentHeight)}px` }
+      }
+    >
+      {items.map((item, index) => {
+        const top = tops[item.id]
+        return (
+          <article
+            className="pdf-margin-card"
+            key={`${item.id}-${item.updated_at}`}
+            data-annotation-id={item.id}
+            data-color={item.color}
+            ref={(node) => {
+              if (node) cardRefs.current.set(item.id, node)
+              else cardRefs.current.delete(item.id)
+            }}
+            style={
+              stacked
+                ? undefined
+                : {
+                    top: `${top ?? 0}px`,
+                    visibility: top === undefined ? 'hidden' : undefined,
+                  }
+            }
+          >
+            <header className="pdf-margin-head">
+              <span className="pdf-margin-index">{index + 1}</span>
+              <span
+                className={`note-swatch note-${item.kind} note-${item.kind}-${item.color}`}
+                aria-hidden
+              />
+              <span className="pdf-margin-type">{NOTE_TYPE_LABEL[item.kind]}</span>
+              {!stacked && <span className="pdf-margin-page">P{page}</span>}
+              {actions && (
+                <button
+                  className="link-btn danger pdf-margin-delete"
+                  type="button"
+                  title="删除这条批注"
+                  onClick={() => {
+                    if (window.confirm(`删除这条${NOTE_TYPE_LABEL[item.kind]}？`)) {
+                      void actions.remove(item.id)
+                    }
+                  }}
+                >
+                  删除
+                </button>
+              )}
+            </header>
+            <p className="pdf-margin-quote">{item.quote}</p>
+            <textarea
+              className="note-input pdf-margin-input"
+              defaultValue={item.note}
+              placeholder={
+                item.kind === 'comment' ? '写下你的批注…' : '给这处荧光笔补一句笔记…'
+              }
+              rows={2}
+              disabled={!actions}
+              onBlur={(event) => {
+                const next = event.target.value
+                if (actions && next !== item.note) {
+                  void actions.update(item.id, { note: next })
+                }
+              }}
+            />
+          </article>
+        )
+      })}
+    </aside>
+  )
+}
+
 /**
  * 原版 PDF 视图：逐页竖排、连续滚动。
  *
@@ -205,6 +379,8 @@ export function PdfPages({
   annotationActions,
   onOpenAnnotation,
   onAskQuote,
+  reviewMode = false,
+  focusAnnotation,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const jumped = useRef(false)
@@ -218,7 +394,16 @@ export function PdfPages({
     () => new Set([initialPage - 1, initialPage, initialPage + 1]),
   )
   const [selection, setSelection] = useState<PdfSelection | null>(null)
-  const [editing, setEditing] = useState<{ annotation: Annotation; rect: DOMRect } | null>(null)
+  const [editing, setEditing] = useState<{
+    annotation: Annotation
+    rect: DOMRect
+    /** 单击已有标注的查看态：不自动聚焦输入 */
+    peek?: boolean
+  } | null>(null)
+  // 单击标注与双击（切批注栏）共用同一次点击序列，靠这个延时区分两者
+  const peekTimer = useRef<number | null>(null)
+  // 阅读区太窄时，右侧批注栏改到页面下方，避免把页面挤得过窄
+  const [stackedNotes, setStackedNotes] = useState(false)
   const useTextLayer = Boolean(pdfUrl) && !pdfFailed
 
   const pageWidth = Math.max(320, Math.min(width, available || width))
@@ -227,6 +412,12 @@ export function PdfPages({
     scrollRef.current
       ?.querySelector<HTMLElement>(`[data-page="${page}"]`)
       ?.scrollIntoView({ block: 'start' })
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (peekTimer.current) window.clearTimeout(peekTimer.current)
+    }
   }, [])
 
   // 图片还没加载完时容器高度是 0，先滚一次，再在目标页 onLoad 时补一次
@@ -267,16 +458,22 @@ export function PdfPages({
     return () => el.removeEventListener('scroll', onScroll)
   }, [onPageChange])
 
-  // 测量可用宽度：页宽不能超过阅读区，否则文本层会被裁掉
+  // 测量可用宽度：页宽不能超过阅读区，否则文本层会被裁掉。
+  // 审阅模式下还要给右侧批注栏留出固定宽度（阅读区太窄时卡片改到页面下方）。
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
-    const measure = () => setAvailable(Math.max(320, el.clientWidth - 56))
+    const measure = () => {
+      const stacked = el.clientWidth < REVIEW_WIDTH + 536
+      setStackedNotes(stacked)
+      const notesWidth = reviewMode && !stacked ? REVIEW_WIDTH + REVIEW_GAP : 0
+      setAvailable(Math.max(320, el.clientWidth - 56 - notesWidth))
+    }
     measure()
     const observer = new ResizeObserver(measure)
     observer.observe(el)
     return () => observer.disconnect()
-  }, [])
+  }, [reviewMode])
 
   // 只渲染视口附近的页：整本几百页也不会一次性建 DOM
   useEffect(() => {
@@ -339,20 +536,17 @@ export function PdfPages({
   }
 
   /**
-   * 双击页面上的荧光笔/批注：按坐标命中已有的标注矩形，交给左侧批注栏定位。
-   *
-   * 标注层本身是 `pointer-events: none`（否则会挡住文本选择），所以这里不改
-   * 图层的事件，而是用归一化坐标反查——既能双击定位，也不影响正常划词。
+   * 按页面归一化坐标找鼠标下面的标注；rect 用于把编辑框锚在点击的那一行旁边。
    */
-  const onFrameDoubleClick = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (!onOpenAnnotation) return
+  const hitAnnotationAt = (event: ReactMouseEvent<HTMLDivElement>) => {
     const frame = event.currentTarget
     const bounds = frame.getBoundingClientRect()
-    if (!bounds.width || !bounds.height) return
+    if (!bounds.width || !bounds.height) return null
     const page = Number(frame.closest<HTMLElement>('[data-page]')?.dataset.page || 0)
-    if (!page) return
+    if (!page) return null
     const x = (event.clientX - bounds.left) / bounds.width
     const y = (event.clientY - bounds.top) / bounds.height
+    if (x < 0 || x > 1 || y < 0 || y > 1) return null
     const pad = 0.006
     const hits = annotations.filter(
       (item) =>
@@ -365,16 +559,71 @@ export function PdfPages({
             y <= rect.y + rect.h + pad,
         ),
     )
-    if (!hits.length) return
+    if (!hits.length) return null
     // 后创建的标注画在上层，命中时优先返回它
     const hit = [...hits].sort((a, b) =>
       String(a.created_at ?? '').localeCompare(String(b.created_at ?? '')),
     )[hits.length - 1]
+    const rects = hit.rects ?? []
+    const rect =
+      rects.find(
+        (item) =>
+          x >= item.x - pad &&
+          x <= item.x + item.w + pad &&
+          y >= item.y - pad &&
+          y <= item.y + item.h + pad,
+      ) ?? rects[0]
+    if (!rect) return null
+    return {
+      annotation: hit,
+      rect: new DOMRect(
+        bounds.left + rect.x * bounds.width,
+        bounds.top + rect.y * bounds.height,
+        Math.max(1, rect.w * bounds.width),
+        Math.max(1, rect.h * bounds.height),
+      ),
+    }
+  }
+
+  /**
+   * 单击已有的荧光笔/批注：在标注旁边直接弹出笔记小窗（不切左侧栏）。
+   * 双击仍走原逻辑切到批注栏，所以这里延时后再弹，双击会被取消。
+   */
+  const onFrameClick = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (reviewMode || !annotationActions || event.button !== 0) return
+    const sel = window.getSelection()
+    if (sel && !sel.isCollapsed && sel.toString().trim()) return
+    const hit = hitAnnotationAt(event)
+    if (!hit) return
+    if (peekTimer.current) window.clearTimeout(peekTimer.current)
+    peekTimer.current = window.setTimeout(() => {
+      peekTimer.current = null
+      setSelection(null)
+      setEditing({ annotation: hit.annotation, rect: hit.rect, peek: true })
+    }, 240)
+  }
+
+  /**
+   * 双击页面上的荧光笔/批注：按坐标命中已有的标注矩形，交给左侧批注栏定位。
+   *
+   * 标注层本身是 `pointer-events: none`（否则会挡住文本选择），所以这里不改
+   * 图层的事件，而是用归一化坐标反查——既能双击定位，也不影响正常划词。
+   */
+  const onFrameDoubleClick = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (peekTimer.current) {
+      window.clearTimeout(peekTimer.current)
+      peekTimer.current = null
+    }
+    // 双击语义是「去批注栏继续看」，不叠加行内小窗
+    setEditing(null)
+    if (!onOpenAnnotation) return
+    const hit = hitAnnotationAt(event)
+    if (!hit) return
     event.preventDefault()
     event.stopPropagation()
     window.getSelection()?.removeAllRanges()
     setSelection(null)
-    onOpenAnnotation(hit)
+    onOpenAnnotation(hit.annotation)
   }
 
   const applyAnnotation = async (color: AnnotationColor, kind: AnnotationKind) => {
@@ -420,33 +669,51 @@ export function PdfPages({
               const size = pageSizes?.[page - 1]
               // 拿不到页尺寸时退回 A4 比例，至少保证跳页时占位高度稳定
               const ratio = size && size[0] > 0 ? `${size[0]} / ${size[1]}` : '0.707'
+              const aspect = size && size[0] > 0 ? size[0] / size[1] : 0.707
               return (
-                <figure
+                <div
                   key={page}
-                  className="pdf-page"
-                  data-page={page}
-                  style={{ width: `min(${pageWidth}px, 100%)` }}
+                  className={`pdf-page-row${reviewMode ? ' is-review' : ''}${
+                    reviewMode && stackedNotes ? ' is-stacked' : ''
+                  }`}
                 >
-                  <div
-                    className="pdf-page-frame"
-                    style={{ width: '100%', aspectRatio: ratio }}
-                    onMouseUp={onFrameMouseUp}
-                    onDoubleClick={onFrameDoubleClick}
+                  <figure
+                    className="pdf-page"
+                    data-page={page}
+                    style={{ width: `${pageWidth}px` }}
                   >
-                    {visible.has(page) && (
-                      <Page
-                        pageNumber={page}
-                        width={pageWidth}
-                        renderTextLayer
-                        renderAnnotationLayer={false}
-                        loading={<span className="pdf-page-loading" />}
-                        error={<span className="pdf-page-loading">第 {page} 页加载失败</span>}
-                      />
-                    )}
-                    <PdfAnnotationLayer page={page} annotations={annotations} />
-                  </div>
-                  <figcaption>第 {page} 页</figcaption>
-                </figure>
+                    <div
+                      className="pdf-page-frame"
+                      style={{ width: '100%', aspectRatio: ratio }}
+                      onMouseUp={onFrameMouseUp}
+                      onDoubleClick={onFrameDoubleClick}
+                      onClick={onFrameClick}
+                    >
+                      {visible.has(page) && (
+                        <Page
+                          pageNumber={page}
+                          width={pageWidth}
+                          renderTextLayer
+                          renderAnnotationLayer={false}
+                          loading={<span className="pdf-page-loading" />}
+                          error={<span className="pdf-page-loading">第 {page} 页加载失败</span>}
+                        />
+                      )}
+                      <PdfAnnotationLayer page={page} annotations={annotations} />
+                    </div>
+                    <figcaption>第 {page} 页</figcaption>
+                  </figure>
+                  {reviewMode && (
+                    <PdfMarginNotes
+                      page={page}
+                      annotations={annotations}
+                      frameHeight={pageWidth / aspect}
+                      stacked={stackedNotes}
+                      actions={annotationActions}
+                      focusAnnotation={focusAnnotation}
+                    />
+                  )}
+                </div>
               )
             })}
           </div>
@@ -456,37 +723,55 @@ export function PdfPages({
           {pages.map((page) => {
             const size = pageSizes?.[page - 1]
             const ratio = size && size[0] > 0 ? `${size[0]} / ${size[1]}` : '0.707'
+            const aspect = size && size[0] > 0 ? size[0] / size[1] : 0.707
             return (
-              <figure
+              <div
                 key={page}
-                className="pdf-page"
-                data-page={page}
-                style={{ width: `min(${width}px, 100%)` }}
+                className={`pdf-page-row${reviewMode ? ' is-review' : ''}${
+                  reviewMode && stackedNotes ? ' is-stacked' : ''
+                }`}
               >
-                <div
-                  className="pdf-page-frame"
-                  style={{ width: '100%', aspectRatio: ratio }}
-                  onDoubleClick={onFrameDoubleClick}
+                <figure
+                  className="pdf-page"
+                  data-page={page}
+                  style={{ width: `${pageWidth}px` }}
                 >
-                  <img
-                    src={
-                      pageUrls?.[page] ??
-                      mediaUrl(
-                        `/api/papers/${encodeURIComponent(paperId)}/page/${page}.png?width=${RENDER_WIDTH}`,
-                      )
-                    }
-                    alt={`第 ${page} 页`}
-                    loading={Math.abs(page - initialPage) <= 1 ? 'eager' : 'lazy'}
-                    onLoad={() => {
-                      if (page === initialPage && !jumped.current) {
-                        jumped.current = true
-                        scrollToPage(initialPage)
+                  <div
+                    className="pdf-page-frame"
+                    style={{ width: '100%', aspectRatio: ratio }}
+                    onDoubleClick={onFrameDoubleClick}
+                    onClick={onFrameClick}
+                  >
+                    <img
+                      src={
+                        pageUrls?.[page] ??
+                        mediaUrl(
+                          `/api/papers/${encodeURIComponent(paperId)}/page/${page}.png?width=${RENDER_WIDTH}`,
+                        )
                       }
-                    }}
+                      alt={`第 ${page} 页`}
+                      loading={Math.abs(page - initialPage) <= 1 ? 'eager' : 'lazy'}
+                      onLoad={() => {
+                        if (page === initialPage && !jumped.current) {
+                          jumped.current = true
+                          scrollToPage(initialPage)
+                        }
+                      }}
+                    />
+                  </div>
+                  <figcaption>第 {page} 页</figcaption>
+                </figure>
+                {reviewMode && (
+                  <PdfMarginNotes
+                    page={page}
+                    annotations={annotations}
+                    frameHeight={pageWidth / aspect}
+                    stacked={stackedNotes}
+                    actions={annotationActions}
+                    focusAnnotation={focusAnnotation}
                   />
-                </div>
-                <figcaption>第 {page} 页</figcaption>
-              </figure>
+                )}
+              </div>
             )
           })}
         </div>
@@ -523,6 +808,7 @@ export function PdfPages({
         <AnnotationPopover
           annotation={editing.annotation}
           rect={editing.rect}
+          autoFocus={!editing.peek}
           onSave={async (patch) => {
             await annotationActions.update(editing.annotation.id, patch)
             setEditing(null)

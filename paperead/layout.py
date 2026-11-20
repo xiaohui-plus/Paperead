@@ -28,7 +28,7 @@ from statistics import median
 import pymupdf
 import pymupdf.table as _pymupdf_table
 
-from .inline_math import MATH_FONTS as _INLINE_MATH_FONTS
+from .inline_math import STRONG_MATH_FONTS as _INLINE_MATH_FONTS
 from .inline_math import build_inline_math, spans_with_offsets
 from .regions import PageRegions, build_page_regions
 from .textnorm import (
@@ -108,6 +108,18 @@ _SECTION_RE = re.compile(
     r"Acknowledg(?:e)?ments?|Appendix(?:\s+[A-Z])?)\b)\s*",
     re.IGNORECASE,
 )
+# 论文后置声明区小标题（BMC/Springer 等常见），常常只有正文字号、
+# 不加粗、也不带编号；靠词表与短行识别，避免整段声明被当正文。
+_DECLARATION_HEAD_RE = re.compile(
+    r"^(?:Authors?'?\s+contributions|Author contributions|Funding|"
+    r"Availability of data(?:\s+and\s+materials)?|"
+    r"Ethics approval(?:\s+and\s+consent\s+to\s+participate)?|"
+    r"Consent for publication|Competing interests|Conflict of interest|"
+    r"Acknowledg(?:e)?ments?|Declarations|Abbreviations|List of abbreviations|"
+    r"Publisher['’]s Note|Supplementary information|Additional information)\b",
+    re.IGNORECASE,
+)
+
 # 编号小节标题：2.1 Foo Bar
 _NUM_HEADING_RE = re.compile(r"^\d+(?:\.\d+)*\.?\s+[A-Z][A-Za-z]")
 # 中文小标题（「2.2 智能问答性能」）没有大小写、也常常不加粗，只能靠
@@ -185,6 +197,10 @@ def _is_caption_text(text: str) -> bool:
     # 但「如表 2 所示」「图 3 中」这类是正文引用，必须排除。
     if _CJK_RE.match(first):
         return not _CAPTION_ZH_REF_RE.match(rest)
+    # `Fig. 1 a Representation ...` 是期刊常见的子图标注格式：
+    # 编号后先出现小写子图字母，再跟标题正文。
+    if re.match(r"^[a-z]\s+[A-Z]", rest):
+        return True
     return first.isupper() or first.isdigit() or first in "（(“\"'["
 # 数学字体（Computer Modern 数学族）
 _MATH_FONTS = ("CMMI", "CMEX", "CMSY", "MSBM", "MTMI", "MTEX", "EUSM", "EUFM", "Symbol")
@@ -712,7 +728,10 @@ _AUTHOR_PREFIX_RE = re.compile(
 # 两个词」的约束，足以挡住 "Changsha, China" 这类地址行。
 _PLACE_RE = re.compile(
     r"\b(?:China|USA|U\.S\.A|UK|United\s+States|Japan|Germany|France|Canada|"
-    r"Australia|India|Korea|Singapore|Italy|Spain|Netherlands|Brazil)\b",
+    r"Australia|India|Korea|Singapore|Italy|Spain|Netherlands|Brazil|Chile|"
+    r"Mexico|Switzerland|Sweden|Denmark|Belgium|Austria|Israel|Taiwan|Russia|"
+    r"Poland|Portugal|Ireland|New\s+Zealand|South\s+Africa|Argentina|Colombia|"
+    r"Peru|Finland|Norway|Greece|Turkey|Czech|Hungary)\b",
     re.IGNORECASE,
 )
 
@@ -732,16 +751,29 @@ class FrontMatter:
     head_end: float = 0.0
     abstract: tuple[float, float] | None = None
     abstract_col: int = 0
-    # 通栏摘要的 x 范围。期刊页边的 "Check for updates" / "Article" 等
-    # 标记与摘要同 y 但不属于摘要，靠 x 重叠区分。
+    # 摘要/关键词所在的主列 x 范围。首页常见「左侧通讯/单位窄列 + 右侧摘要
+    # 主列」；只按 y/col 判断会把左侧窄列的小字夹进摘要，摘要范围还会被
+    # 异列邮箱行提前截断。x 范围是这两类版式的共同锚点。
     abstract_x: tuple[float, float] | None = None
     keywords: tuple[float, float] | None = None
     keywords_col: int = 0
+    keywords_x: tuple[float, float] | None = None
+    # 首页辅助窄列（通讯作者、邮箱、单位）。它与摘要同 y 但不属于正文流；
+    # 单独记录后由阅读顺序排到摘要之前/之后，并由分类阶段标成 affiliation。
+    aux: tuple[float, float] | None = None
+    aux_x: tuple[float, float] | None = None
 
     def in_head(self, bbox: tuple[float, float, float, float]) -> bool:
         # 左右栏同一行的 y0 常有 0.5~1pt 的差（Agri-SAGE 右栏正文比左栏
         # Abstract 高 0.7pt）。留 2pt 容差，免把右栏正文首行算进作者区。
         return self.head_end > 0 and bbox[1] < self.head_end - 2.0
+
+    @staticmethod
+    def _x_matches(bbox: tuple[float, float, float, float], span: tuple[float, float]) -> bool:
+        x0, x1 = span
+        width = max(bbox[2] - bbox[0], 1.0)
+        overlap = min(bbox[2], x1) - max(bbox[0], x0)
+        return overlap >= 0.35 * width
 
     def in_abstract(self, ln: Line) -> bool:
         if self.abstract is None:
@@ -751,11 +783,8 @@ class FrontMatter:
             return False
         if self.abstract_col >= 0 and ln.col not in (self.abstract_col, -1):
             return False
-        if self.abstract_col < 0 and self.abstract_x is not None:
-            ax0, ax1 = self.abstract_x
-            overlap = min(ln.x1, ax1) - max(ln.x0, ax0)
-            if overlap < 0.5 * max(ln.width, 1.0):
-                return False
+        if self.abstract_x is not None and not self._x_matches(ln.bbox, self.abstract_x):
+            return False
         return True
 
     def is_abstract_head(self, ln: Line) -> bool:
@@ -769,10 +798,21 @@ class FrontMatter:
         if self.keywords is None:
             return False
         y0, y1 = self.keywords
-        return (
-            y0 - 0.5 <= ln.y0 < y1
-            and (self.keywords_col < 0 or ln.col in (self.keywords_col, -1))
-        )
+        if not (y0 - 0.5 <= ln.y0 < y1):
+            return False
+        if self.keywords_col >= 0 and ln.col not in (self.keywords_col, -1):
+            return False
+        if self.keywords_x is not None and not self._x_matches(ln.bbox, self.keywords_x):
+            return False
+        return True
+
+    def in_aux(self, bbox: tuple[float, float, float, float]) -> bool:
+        if self.aux is None:
+            return False
+        y0, y1 = self.aux
+        if not (y0 - 0.5 <= bbox[1] <= y1 + 0.5):
+            return False
+        return self.aux_x is None or self._x_matches(bbox, self.aux_x)
 
 
 def _first_body_line_y(
@@ -870,19 +910,36 @@ def _detect_front_matter(
     if intro_ln is not None and intro_ln.y0 <= top + line_h:
         intro_ln = None
 
+    def _same_flow(ln: Line, ref: Line, col: int) -> bool:
+        """同栏且同一条文字流：首页左侧通讯/单位窄列与右侧摘要列同 col、
+        同页，但 x 范围不重叠，不能沿 y 当作同一段继续延伸。"""
+        if col >= 0 and ln.col not in (col, -1):
+            return False
+        overlap = min(ln.x1, ref.x1) - max(ln.x0, ref.x0)
+        return overlap > min(ln.width, ref.width) * 0.25
+
     def _range_end(start: Line, col: int, stops: list[Line | None]) -> float:
         ends = [ln.y0 for ln in stops if ln is not None and ln.y0 > start.y0 + 1]
         same_col = sorted(
             [
                 ln
                 for ln in page_lines
-                if ln.y0 > start.y0 + 1
-                and (col < 0 or ln.col in (col, -1))
+                if ln.y0 > start.y0 + 1 and _same_flow(ln, start, col)
             ],
             key=lambda l: l.y0,
         )
         prev = start
         for ln in same_col:
+            # 同一摘要/关键词流里出现下一个粗体小标题（如 Background）就结束；
+            # 它与摘要正文同 y 范围，但属于下一节，不是摘要续行。
+            if (
+                ln.bold
+                and ln.size > start.size + 0.2
+                and len(ln.text.strip()) <= 60
+                and not ln.text.strip().lower().startswith(("keywords", "abstract"))
+            ):
+                ends.append(ln.y0)
+                break
             gap = ln.y0 - prev.y1
             if gap > max(line_h * 1.9, 7.0) or abs(ln.size - start.size) > max(
                 2.0, start.size * 0.25
@@ -903,6 +960,15 @@ def _detect_front_matter(
         if end > abs_ln.y0 + 1:
             front.abstract = (abs_ln.y0, end)
             front.abstract_col = col
+            abstract_lines = [
+                ln for ln in page_lines
+                if abs_ln.y0 <= ln.y0 < end and _same_flow(ln, abs_ln, col)
+            ]
+            if abstract_lines:
+                front.abstract_x = (
+                    abs_ln.x0,
+                    max(ln.x1 for ln in abstract_lines),
+                )
     elif intro_ln is not None:
         front.page = 1
         front.head_end = min(intro_ln.y0, body_y) if body_y > 0 else intro_ln.y0
@@ -936,10 +1002,38 @@ def _detect_front_matter(
 
     if kw_ln is not None:
         col = kw_ln.col if kw_ln.col in (0, 1) else -1
-        front.keywords = (kw_ln.y0, _range_end(kw_ln, col, [intro_ln]))
+        kw_end = _range_end(kw_ln, col, [intro_ln])
+        front.keywords = (kw_ln.y0, kw_end)
         front.keywords_col = col
+        kw_lines = [
+            ln for ln in page_lines
+            if kw_ln.y0 <= ln.y0 < kw_end and _same_flow(ln, kw_ln, col)
+        ]
+        if kw_lines:
+            front.keywords_x = (kw_ln.x0, max(ln.x1 for ln in kw_lines))
         if front.page:
             front.head_end = min(front.head_end, kw_ln.y0)
+
+    # 首页辅助窄列：通讯/邮箱/单位与摘要并列，不属于摘要或正文流。
+    # 以「摘要主列的左缘」为界，收集其左侧的小字号机构/邮箱行。
+    if front.page == 1 and abs_ln is not None:
+        start_y = min(front.head_end, abs_ln.y0) - 4.0
+        end_y = front.keywords[1] if front.keywords is not None else (
+            front.abstract[1] if front.abstract is not None else abs_ln.y0 + page_height * 0.4
+        )
+        aux_lines = [
+            ln for ln in page_lines
+            if start_y <= ln.y0 <= end_y
+            and ln.x1 <= abs_ln.x0 - 6
+            and ln.size < abs_ln.size * 0.9
+            and not front.in_abstract(ln)
+            and not front.in_keywords(ln)
+        ]
+        # 单位最后一行（城市/国家）常不含机构关键词，不能只按文本种子；
+        # 只要落在摘要主列左侧、字号明显小于摘要，就同属辅助窄列。
+        if aux_lines:
+            front.aux = (min(ln.y0 for ln in aux_lines), max(ln.y1 for ln in aux_lines))
+            front.aux_x = (min(ln.x0 for ln in aux_lines), max(ln.x1 for ln in aux_lines))
     return front
 
 
@@ -1308,7 +1402,26 @@ def _reading_order(
     """
     body = [ln for ln in lines if not ln.is_margin]
     if gutter is None:
-        # 原生流顺序（LaTeX 通常已是正确顺序）
+        # 单栏正文仍按 y 顺序；但首页可能有「左侧通讯/单位窄列 + 右侧摘要
+        # 主列」的并列版式，直接按 (y,x) 排序会让两列逐行交错。先把首页
+        # 的 head / aux / abstract / keywords 分别成流，再接其余正文。
+        if front is not None and front.page == 1:
+            page1 = [ln for ln in body if ln.page == 1]
+            others = [ln for ln in body if ln.page != 1]
+            head = [ln for ln in page1 if front.in_head(ln.bbox)]
+            aux = [ln for ln in page1 if front.in_aux(ln.bbox)]
+            abs_ = [ln for ln in page1 if front.in_abstract(ln)]
+            kws = [ln for ln in page1 if front.in_keywords(ln)]
+            used = {id(ln) for ln in [*head, *aux, *abs_, *kws]}
+            rest = [ln for ln in page1 if id(ln) not in used]
+            return (
+                _band_major(head)
+                + _band_major(aux)
+                + _band_major(abs_)
+                + _band_major(kws)
+                + sorted(rest, key=lambda ln: (ln.y0, ln.x0))
+                + sorted(others, key=lambda ln: (ln.page, ln.y0, ln.x0))
+            )
         return sorted(body, key=lambda ln: (ln.page, ln.y0, ln.x0))
 
     ordered: list[Line] = []
@@ -1316,10 +1429,16 @@ def _reading_order(
     for page in pages:
         plines = [ln for ln in body if ln.page == page]
         head: list[Line] = []
+        aux: list[Line] = []
         if front is not None and front.page == page and front.head_end > 0:
             head = [ln for ln in plines if front.in_head(ln.bbox)]
-            plines = [ln for ln in plines if not front.in_head(ln.bbox)]
+            aux = [ln for ln in plines if front.in_aux(ln.bbox)]
+            plines = [
+                ln for ln in plines
+                if not front.in_head(ln.bbox) and not front.in_aux(ln.bbox)
+            ]
         ordered.extend(_band_major(head))
+        ordered.extend(_band_major(aux))
 
         # 摘要/关键词是独立的一段阅读流：通栏摘要的某些行比页宽 55% 窄，
         # 若交给下面的锚点/归栏逻辑，摘要末行会被当成右栏文字排到正文后面。
@@ -1458,15 +1577,92 @@ def _is_heading(ln: Line, body_size: float) -> int:
     text = ln.text.strip()
     if not text or len(text) > 120:
         return 0
+    # 以冒号/分号收尾的是图注、说明或正文片段，不是章节标题。
+    if text.endswith((":", ";")):
+        return 0
+    # 图内的方位/仪器短标签（N / E / MIRI）不能当章节标题。
+    if len(text) <= 5 and text.isupper() and not text.endswith("."):
+        return 0
+    # 单位、地名、参考文献条目即使以编号/年份开头也不是章节标题。
+    if _AFFIL_RE.search(text) or _PLACE_RE.search(text) or _looks_reference_entry(text):
+        return 0
+    if re.match(r"^(?:19|20)\d{2}[a-z]?\.\s", text):
+        return 0
+    if re.search(
+        r"\b(?:Conference|Proceedings|Workshop|Symposium|Journal|arXiv|et\s+al)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return 0
+    # AASTeX / ApJ 的章节标题常用正文字号 + 正体（CMR10）排版，只靠字号和
+    # 粗体会全部漏掉。编号标题的形态很稳定：`1. INTRODUCTION`、
+    # `2. DATA`、`2.1. NIRCam Observations & Data Reduction`。
+    # 用「编号 + 短标题 + 全大写或 Title Case」识别，层级由编号段数决定。
+    # 字母编号只接受 `A. CONTINUUM...` 这类全大写附录标题，避免把
+    # `T. A. Thompson et al.` 这种正文引用行误判成标题。
+    numbered = re.match(
+        r"^\s*(?P<num>\d+(?:\.\d+)*\.?|[A-Z]\.(?=\s+[A-Z]{2,}\b))\s+(?P<name>\S.*)$",
+        text,
+    )
+    if numbered:
+        name = numbered.group("name").strip()
+        raw_num = numbered.group("num")
+        # 字母编号（A. CONTINUUM...）通常位于 APPENDIX 之下，层级按二级处理；
+        # 数字编号按段数（1.→1，2.1.→2）。
+        depth = 2 if raw_num[:1].isalpha() else raw_num.rstrip(".").count(".") + 1
+        words = re.findall(r"[A-Za-z][A-Za-z'’\-]*", name)
+        title_case = bool(words) and all(
+            w[:1].isupper()
+            or w.lower() in {"of", "and", "the", "for", "in", "on", "to", "with", "a", "an"}
+            for w in words
+        )
+        # 贡献列表常写成 `1. We propose...` / `2. We show...`：编号相同，
+        # 但标题名很长、含句号空格或冒号。标题名应短而完整。
+        title_shaped = (
+            name
+            and len(name) <= 80
+            and len(name.split()) <= 12
+            and not name.endswith((".", "?", ";", ",", ":"))
+            and not re.match(r"^[\d(]", name)
+            and ": " not in name
+            and ". " not in name
+        )
+        if title_shaped:
+            if name.isupper() or (depth >= 2) or len(name) <= 45:
+                if name.isupper() or title_case:
+                    return min(depth, 3)
     if ln.size >= body_size + 3.5:
-        return 1
+        if not text.endswith((":", ";")) and ": " not in text and ". " not in text:
+            return 1
     if ln.size >= body_size + 1.2:
-        return 2
+        if not text.endswith((":", ";")) and ": " not in text and ". " not in text:
+            return 2
+    # 非编号标题里出现多个功能词（the/of/can/be/to...）通常是正文句子，
+    # 只是字号或粗体被误判成标题。
+    if numbered is None and len(_STOP_RE.findall(text)) >= 3:
+        return 0
+    if (
+        _DECLARATION_HEAD_RE.fullmatch(text.rstrip(" :：").strip())
+        and len(text) <= 60
+        and text[:1].isupper()
+    ):
+        return 3
     m = _SECTION_RE.match(text)
     # 只认首字母大写的章节名：「methods take the random walk ...」是正文，不是标题
     if m and m.group("head")[:1].isupper() and len(m.group("head")) <= 40 and len(text) <= 60:
         return 1 if ln.size >= body_size else 2
-    if ln.bold and len(text) <= 70 and not text.endswith((".", "?", ";", ",")):
+    if (
+        ln.bold
+        and len(text) <= 60
+        and not text.endswith((".", "?", ";", ",", ")", ":"))
+        and text[:1].isupper()
+        and ": " not in text
+        and ". " not in text
+        # 单字章节标题（Simulations / Funding / Declarations）是合法的；
+        # 图内重复标签（Task Task）通常字号明显小于正文，用字号下限挡住。
+        and (body_size <= 0 or ln.size >= body_size * 0.9)
+        and len(re.findall(r"[A-Za-z]{2,}", text)) >= 1
+    ):
         return 3
     if _NUM_HEADING_RE.match(text) and ln.bold:
         return 3
@@ -1501,6 +1697,8 @@ def _split_line_heading(ln: Line, body_size: float) -> tuple[str, str] | None:
 
 _REL_RE = re.compile(r"[=≈≤≥≃∼<>\u2211\u222b\u220f]")
 _WORD_RE = re.compile(r"[A-Za-z]{3,}")
+# 文献引用是正文行内公式最常见的「伴生文本」：年份 / et al. / DOI。
+_CITE_RE = re.compile(r"\bet\s+al\b|\b(?:19|20)\d{2}\b|doi:|arxiv", re.IGNORECASE)
 # 私用区字符：LaTeX 把大括号/根号等大型定界符映射到 U+E000–U+F8FF（CMEX 字体），
 # 浏览器渲染出来就是豆腐块。含这类字符的行一定是公式，不能当正文翻译。
 _PUA_RE = re.compile(r"[\ue000-\uf8ff]")
@@ -1533,9 +1731,44 @@ def _looks_equation(
     # 行内公式占比再高也不能当公式裁图。
     if _CJK_RE.search(t) and t.endswith(("。", "！", "？", "；")):
         return False
+    # 正文里的行内公式常与文献引用 / 行尾句读同行：
+    # `massive (M⋆ ∼ 4 × 10^10 M⊙; A. K. Leroy et al. 2021),`
+    # 这类行是正文，只是句子里带公式，不能整行裁成公式图。
+    if _CITE_RE.search(t):
+        return False
+    if re.search(r"\b(?:Fig|Figs|Eq|Eqs|Sec|Ref|Refs|Dec)\b\.?", t, re.IGNORECASE):
+        return False
+    if (
+        len(t) >= 40
+        and re.search(r"\b[a-z]{3,}\s+[a-z]{3,}\b", t)
+        and t.rstrip().endswith((",", ".", ";", ":"))
+    ):
+        return False
+    if len(t) >= 24 and t.rstrip().endswith("-") and re.search(r"[A-Za-z]{2,}", t):
+        return False
+    # `ratio (3.35 µm - ...) ≈ 0.77.` 这类「英文词开头 + 行尾句读」的行
+    # 是正文句子里带公式；显示公式不会以自然语言词开头再以句号收尾。
+    if re.match(r"^[a-z]{3,}\b", t) and t.rstrip().endswith((",", ".", ";", ":")):
+        return False
+    # 正文末行常只剩「数值范围 + 单位 + 句号」（t_cc ∼ 0.05-0.35 Myr.）。
+    # 它数学字体占比高，但仍属于上一段正文；显示公式不会以句号收尾。
+    if (
+        len(t) <= 32
+        and re.match(r"^[\d.−\-–—]+", t)
+        and t.rstrip().endswith(".")
+        and re.search(r"\b(?:Myr|Gyr|yr|kpc|Mpc|pc|km|mJy|erg|Hz|K)\b", t)
+    ):
+        return False
     if inline_math:
         covered = sum(max(0, int(m["end"]) - int(m["start"])) for m in inline_math)
         if text and covered / len(text) >= 0.55:
+            # 行内公式占比高 ≠ 整行都是公式。AASTeX / 部分 arXiv 论文的
+            # 正文字体就是 CMR10，若把 CMR 当公式字体，整篇正文都会被
+            # 重建为 inline_math 并吞成 equation。这里用自然语言证据否决：
+            # 含停用词或 ≥5 个英文词的行仍是正文，只是句中带公式。
+            words = _WORD_RE.findall(t)
+            if _STOP_RE.search(t) or len(words) >= 5:
+                return False
             return True
     if is_math_font:
         # 数学字体占主导也可能是行文（"where q_i = ..."），先排除
@@ -1754,6 +1987,28 @@ def _build_blocks(
         in_kw = bool(front and front.page == ln.page and front.in_keywords(ln))
         para_kind = "abstract" if in_abs else ("keywords" if in_kw else "para")
 
+        # 首页前置区（标题 / 作者 / 单位 / 收稿与期刊信息）按行成块，不参与
+        # 正文段落合并。AASTeX 这类论文有几十位作者和二十多个单位，按正文
+        # 规则会粘成一个上千字符的巨型块：作者识别不出来、单位混进 author，
+        # 前端也无法把「开头信息」折叠起来从摘要开始读。
+        if (
+            front is not None
+            and front.page == ln.page
+            and (front.in_head(ln.bbox) or front.in_aux(ln.bbox))
+            and not in_abs
+            and not in_kw
+        ):
+            flush()
+            flush_eq()
+            blocks.append(
+                Block(
+                    id="", order=len(blocks), page=ln.page, kind="para",
+                    text=ln.text.strip(), bbox=ln.bbox, level=0, size=ln.size,
+                    bboxes=[[ln.page, ln.bbox[0], ln.bbox[1], ln.bbox[2], ln.bbox[3]]],
+                )
+            )
+            continue
+
         # ── 区域过滤：行号栏与图内文字在建块前就排除 ──
         # 这一步必须在公式/标题判定之前：图里的 `100%`、`Step 3 pool`
         # 既像短段落又像公式碎片，放任它们进入后续规则会同时污染
@@ -1782,6 +2037,10 @@ def _build_blocks(
             # 也会被当成「长单词」，按词数卡会把它们误判成正文
             and not _STOP_RE.search(ln.text)
             and not _PROSE_LEAD_RE.match(ln.text.strip())
+            # 只有带数学证据的短碎片才允许被上一条公式吸收；否则紧贴公式
+            # 的正文短句（如 "Table 2 lists..."）会被整句并进公式裁图。
+            and bool(ln.math or ln.inline_math or _MATH_SYMBOL_RE.search(ln.text))
+            and len(_WORD_RE.findall(ln.text)) <= 6
         )
         if (_looks_equation(ln.text, ln.math, ln.inline_math) or absorb) and not _is_heading(ln, body_size):
             flush()
@@ -1875,13 +2134,27 @@ def _build_blocks(
         # 该栏的极值；否则首页窄摘要会被标题/页脚撑出的右边界误判成没写满。
         prev_left, prev_right = cur["ref_left"], cur["ref_right"]
         prev_short = cur["last_x1"] < prev_right - 0.08 * max(prev_right - prev_left, 1.0)
+        gap = ln.y0 - cur["last_y1"]
+        # 两端对齐的正文里，行尾因长单词换行变短并不等于段落结束。
+        # 「上一行短」必须和句末标点 / 下一行大写或数字 / 较大段间距
+        # 同时成立才断段；否则下一行小写接续词仍属于同一段。
+        next_starts_new = bool(
+            ln.text[:1].isupper()
+            or ln.text[:1].isdigit()
+            or ln.text[:1] in "(["
+        )
+        prev_short_break = prev_short and (
+            _ends_sentence(cur["text"])
+            or next_starts_new
+            or gap > max(line_h * 1.35, 8.0)
+        )
         left, right = local.get(id(ln), edges.get((ln.page, ln.col), (ln.x0, ln.x1)))
         # 首行缩进：既要相对栏左边界缩进，又要相对上一行缩进（否则整段每行都会被误判）
         indented = (
             ln.x0 - left > 0.8 * ln.size
             and ln.x0 - cur["last_x0"] > 0.5 * ln.size
         )
-        gap = ln.y0 - cur["last_y1"]
+
 
         same_style = (
             abs(ln.size - cur["size"]) <= 1.0 and ln.bold == cur["bold"]
@@ -1914,7 +2187,7 @@ def _build_blocks(
                 ln.col != cur["col"]
                 or gap > max(line_h * 1.55, 6)
                 or not same_style
-                or prev_short
+                or prev_short_break
                 or indented
                 # 图注比正文短，局部宽度下末行容易被判成「写满」而把紧随的
                 # 作者脚注、版权行吞进 caption。只有明确的续行证据才允许合并，
@@ -1963,14 +2236,21 @@ def _build_blocks(
 # ── 块分类与清理 ───────────────────────────────────────────────────────
 
 _AFFIL_RE = re.compile(
-    r"Department|University|Universit|Institute|Laborator|College|Academy|"
-    r"School of|Inc\.|Corp|Ltd|Research Center|@",
+    r"Department|University|Universit|Institute|Institut|Laborator|College|Academy|"
+    r"School of|Inc\.|Corp|Ltd|Research Center|Research Centre|Observator|"
+    r"Telescope|Astronom|Astrophys|Nucleus|Facility|@",
     re.IGNORECASE,
 )
 # 单位列表常见形态：上标编号粘在机构名前，如 "adComprehensive Cancer Center"
 _AFFIL_MARKER_RE = re.compile(r"^[a-z]{1,3}[A-Z][a-z]")
 _KEYWORDS_RE = re.compile(r"^(?:Keywords?|KEY\s*WORDS|Index Terms)\s*[:：]", re.IGNORECASE)
 _NAME_RE = re.compile(r"[A-Z][a-z]+(?:\s+[A-Z]\.)?\s+[A-Z][a-z]+")
+# 姓名里的姓氏小品词（Paul P. van der Werf / Ludwig van Beethoven）。
+# 它们是小写，但属于姓名的一部分，不能因此把整行判成单位/正文。
+_NAME_PARTICLES = re.compile(
+    r"^(?:van|von|de|del|della|der|da|di|du|la|le|ten|ter|dos|das|bin|al)$",
+    re.IGNORECASE,
+)
 _FOOTNOTE_RE = re.compile(
     r"copyright\s*©|all rights reserved|contributed equally|"
     r"permission to make digital|^proceedings of the|^arxiv:\s*\d|"
@@ -1981,7 +2261,7 @@ _FOOTNOTE_RE = re.compile(
 # 不能参与翻译；有些期刊没有 affiliation 标签，靠这些短语识别。
 _AUTHOR_NOTE_RE = re.compile(
     r"(?:is\s+with\s+the|are\s+with\s+the|Corresponding\s+author|"
-    r"E-?mail\s*[:：]|@)",
+    r"E-?mail\s*[:：]|@|\bNSF\b|\bNASA\b|\bFellow(?:ship)?\b)",
     re.IGNORECASE,
 )
 
@@ -2072,6 +2352,7 @@ def _looks_author_name(text: str) -> bool:
         )
         or re.search(
             r"\b(?:Received|Accepted|Published|Revised|Online|Open\s+access|"
+            r"Submitted|Preprint|Draft\s+version|Typeset|ApJ|ApJL|MNRAS|AASTeX|"
             r"January|February|March|April|May|June|July|August|September|"
             r"October|November|December)\b",
             raw,
@@ -2102,7 +2383,11 @@ def _looks_author_name(text: str) -> bool:
             ws = re.findall(r"[A-Za-z][A-Za-z'’\-.]*", part)
             if not (1 <= len(ws) <= 5):
                 continue
-            caps = sum(1 for w in ws if w[:1].isupper() or w.isupper())
+            caps = sum(
+                1
+                for w in ws
+                if w[:1].isupper() or w.isupper() or _NAME_PARTICLES.match(w)
+            )
             if caps >= len(ws) - 1:
                 name_like += 1
         if name_like >= 2:
@@ -2119,7 +2404,10 @@ def _looks_author_name(text: str) -> bool:
         re.IGNORECASE,
     ):
         return False
-    caps = sum(1 for w in words if w[:1].isupper() or w.isupper())
+    caps = sum(
+        1 for w in words
+        if w[:1].isupper() or w.isupper() or _NAME_PARTICLES.match(w)
+    )
     return caps >= len(words) - 1
 
 
@@ -2164,6 +2452,16 @@ def _merge_front_matter_cards(
     if len(idx) < 2:
         return blocks
     items = [blocks[i] for i in idx]
+
+    # 通栏作者行（AASTeX/ ApJ：一行排多位作者，单位另起整段）不是「多列
+    # 作者卡片」。若仍按 x 聚类分卡，姓名行与下方单位行会被并进同一张卡，
+    # 整段单位重新被吞进 author。这里直接交给 _merge_affiliations：
+    # author 行按行合并、affiliation 行单独合并，两类永不混。
+    if page_width > 0 and any(
+        b.kind == "author" and (b.bbox[2] - b.bbox[0]) > page_width * 0.5
+        for b in items
+    ):
+        return blocks
 
     # 一维 x 聚类：作者列心之间通常隔着明显空白，列内的姓名/单位/邮箱
     # 只是几百 pt 内的左右摆动。阈值随页宽缩放，窄页也不会把两列并成一列。
@@ -2291,6 +2589,45 @@ def _classify(
             # 图注/表注随论文一起翻译：前端图表栏优先展示配对 caption 块的
             # translated（captionZh），保持 False 会让图注永远只有英文。
             b.translatable = True
+            continue
+
+        # 首页辅助窄列（通讯作者/邮箱/单位）与摘要并列，属于元数据，不是正文。
+        if (
+            front is not None
+            and front.page == b.page
+            and front.in_aux(b.bbox)
+            and b.kind not in ("equation", "figure", "table")
+        ):
+            b.kind = "affiliation"
+            b.translatable = False
+            b.level = 0
+            continue
+
+        # 版权/开放获取声明是 7~8pt 脚注，不是可翻译正文。
+        if (
+            b.kind == "para"
+            and b.size < body_size * 0.9
+            and re.search(
+                r"©|Creative\s+Commons|All\s+rights\s+reserved|"
+                r"This\s+article\s+is\s+licensed",
+                t,
+                re.IGNORECASE,
+            )
+        ):
+            b.kind = "footnote"
+            b.translatable = False
+            continue
+
+        # 声明区的「Not applicable.」与收稿/接受日期是元数据，不是正文。
+        if b.kind == "para" and re.fullmatch(r"(?:Not applicable|N/?A)\.?", t, re.IGNORECASE):
+            b.kind = "footnote"
+            b.translatable = False
+            continue
+        if b.kind == "para" and re.match(
+            r"^(?:Received|Accepted|Published)\s*[:：]", t, re.IGNORECASE
+        ):
+            b.kind = "footnote"
+            b.translatable = False
             continue
 
         # 前置区（标题下方、摘要之前）是作者卡片，不是正文。用显式的
@@ -2622,6 +2959,338 @@ def _merge_across_pages(
     return out
 
 
+def _merge_front_continuations(blocks: list["Block"]) -> list["Block"]:
+    """把跨页/续行的摘要与关键词并回同一条目。
+
+    `_classify` 只按首页标记给第一段定 kind；摘要续页与关键词末行会被当成
+    普通 para。它们既不该单独翻译，也不该在阅读页里落在 Keywords 之后。
+    只吸收紧邻、以接续字符开头、且当前条目尚未结束的行，遇到下一个小节
+    或图表立即停止。
+    """
+    out: list["Block"] = []
+    i = 0
+    while i < len(blocks):
+        b = blocks[i]
+        if b.kind not in ("abstract", "keywords"):
+            out.append(b)
+            i += 1
+            continue
+        j = i + 1
+        skipped: list["Block"] = []
+        while j < len(blocks) and not _ends_sentence(b.text):
+            n = blocks[j]
+            # 首页作者脚注（邮箱/通讯作者）可能夹在摘要与续页之间；
+            # 它不是正文，但不能因此切断摘要跨页合并。跳过并保留原位。
+            if n.kind in ("affiliation", "author", "footnote"):
+                skipped.append(n)
+                j += 1
+                continue
+            if n.kind != "para" or n.page not in (b.page, b.page + 1):
+                break
+            if b.kind == "keywords" and len(n.text.strip()) > 160:
+                break
+            if not (_CONTINUE_START.match(n.text) or n.text[:1] in "(["):
+                break
+            text = n.text
+            b.text, offset = _append_line_text(b.text, text)
+            lead = len(text) - len(text.lstrip())
+            for item in n.inline_math:
+                start_pos = int(item["start"]) - lead + offset
+                end_pos = int(item["end"]) - lead + offset
+                if start_pos < 0 or end_pos <= start_pos:
+                    continue
+                b.inline_math.append({**item, "start": start_pos, "end": end_pos})
+            b.bboxes = _merge_bbox_lists(b.bboxes, n.bboxes)
+            j += 1
+        out.append(b)
+        out.extend(skipped)
+        i = j
+    for idx, b in enumerate(out):
+        b.order = idx
+        b.id = f"b{idx:04d}"
+    return out
+
+
+def _merge_heading_continuations(blocks: list["Block"]) -> list["Block"]:
+    """把被排版拆成两行的正文章节标题并回一条。
+
+    AASTeX / CVPR 的章节标题常与正文同字号、正体，第二行会被当成 para 或
+    另一个 heading（`3 FEW-SHOT MOLECULAR PROPERTY PREDIC-` + `TION METHODS`）。
+    只对编号标题吸收紧邻、同字号、短且未以句读结尾的下一块；无编号的粗体
+    短句不能吸收 para，否则正文首行会被并进标题。
+    """
+    numbered_head = re.compile(r"^\s*(?:\d+(?:\.\d+)*\.?|[A-Z]\.)\s+")
+    out: list["Block"] = []
+    i = 0
+    while i < len(blocks):
+        b = blocks[i]
+        if b.kind != "heading":
+            out.append(b)
+            i += 1
+            continue
+        while i + 1 < len(blocks):
+            n = blocks[i + 1]
+            if n.page != b.page or n.kind not in ("heading", "para"):
+                break
+            if b.text.rstrip().endswith((".", "?", "!", ";", ":")):
+                break
+            if len(n.text.strip()) > 90:
+                break
+            if n.text.strip().endswith((".", "?", "!", ";", ":")):
+                break
+            if _is_caption_text(n.text):
+                break
+            # 只有编号标题才允许吸收普通 para；无编号粗体短句很可能只是
+            # 正文段首，不能把整段第一行并进标题。
+            if n.kind == "para" and not numbered_head.match(b.text):
+                break
+            if n.kind == "heading" and numbered_head.match(n.text):
+                break
+            if n.kind == "heading":
+                # 全大写 section 后接 Title Case 标题（`MATERIALS AND METHODS`
+                # + `Ethics Statement`）是两个独立标题，不能并成一条。
+                if b.text.isupper() and not n.text.isupper():
+                    break
+                n_words = re.findall(r"[A-Za-z][A-Za-z'’\-]*", n.text)
+                if (
+                    len(n_words) >= 2
+                    and not n.text[:1].islower()
+                    and not b.text.rstrip().endswith("-")
+                ):
+                    break
+            if b.size and n.size and abs(b.size - n.size) > 1.2:
+                break
+            gap = n.bbox[1] - b.bbox[3]
+            if gap > max((b.size or n.size or 10.0) * 1.25, 4.0):
+                break
+            if abs(n.bbox[0] - b.bbox[0]) > 30 and abs(n.bbox[2] - b.bbox[2]) > 30:
+                break
+            b.text = _join_text(b.text, n.text)
+            b.bboxes = _merge_bbox_lists(b.bboxes, n.bboxes)
+            i += 1
+        out.append(b)
+        i += 1
+    for idx, x in enumerate(out):
+        x.order = idx
+        x.id = f"b{idx:04d}"
+    return out
+
+
+_ROTATED_CAPTION_RE = re.compile(
+    r"^\s*((?:Supplementary\s+|Extended\s+Data\s+)?(?:Figure|Fig\.|Table|Tab\.|FIGURE|TABLE))"
+    r"\s*([A-Z]?\d+)",
+    re.IGNORECASE,
+)
+
+
+def _collect_rotated_caption_blocks(doc: pymupdf.Document) -> list[Block]:
+    """收集旋转 90° 的图注/表注（横排大表常整页旋转放置）。
+
+    `_collect_lines` 会过滤旋转文字，所以 Table 3 这类旋转表的标题不会进入
+    正常图注流；表格虽然被 find_tables 找到，却因为没有可配对的 caption
+    被整张丢掉，随后同页矢量图兜底又把表格误裁成 figure。这里只收旋转的
+    「Figure/Table + 编号」行，不参与正文，供表格/图注配对使用。
+    """
+    grouped: dict[tuple[int, str, str], Block] = {}
+    for pno in range(len(doc)):
+        page = doc[pno]
+        for block in page.get_text("dict")["blocks"]:
+            for line in block.get("lines") or []:
+                direction = line.get("dir") or (1, 0)
+                if abs(float(direction[1])) <= 0.15:
+                    continue
+                spans = [
+                    s for s in line.get("spans") or []
+                    if (s.get("text") or "").strip()
+                ]
+                if not spans:
+                    continue
+                text = _normalize_text(_join_spans(spans)).strip()
+                if not text or not _CAPTION_RE.match(text) or not _is_caption_text(text):
+                    continue
+                m = _ROTATED_CAPTION_RE.match(text)
+                if not m:
+                    continue
+                key = (pno + 1, m.group(1).lower(), m.group(2).upper())
+                bbox = tuple(line["bbox"])
+                size = median(
+                    [float(s.get("size") or 0) for s in spans]
+                ) or 10.0
+                if key in grouped:
+                    cap = grouped[key]
+                    cap.text = _join_text(cap.text, text)
+                    cap.bbox = (
+                        min(cap.bbox[0], bbox[0]), min(cap.bbox[1], bbox[1]),
+                        max(cap.bbox[2], bbox[2]), max(cap.bbox[3], bbox[3]),
+                    )
+                    cap.size = max(cap.size, size)
+                else:
+                    grouped[key] = Block(
+                        id="", order=0, page=pno + 1, kind="caption",
+                        text=text, bbox=bbox, size=size, translatable=True,
+                    )
+    return list(grouped.values())
+
+
+def _insert_rotated_captions(blocks: list[Block], captions: list[Block]) -> list[Block]:
+    """把旋转图注插到所属页的开头；后续表格抽取会把它作为锚点。
+
+    旋转表通常独占一页，页首插入不会打乱正文；若同页已有相同文本的
+    正常图注，则不重复插入。
+    """
+    if not captions:
+        return blocks
+    out = list(blocks)
+    for cap in captions:
+        if any(
+            b.kind == "caption" and b.page == cap.page
+            and b.text.strip() == cap.text.strip()
+            for b in out
+        ):
+            continue
+        idx = next((i for i, b in enumerate(out) if b.page >= cap.page), len(out))
+        out.insert(idx, cap)
+    for i, b in enumerate(out):
+        b.order = i
+        b.id = f"b{i:04d}"
+    return out
+
+
+def _merge_small_caption_continuations(blocks: list[Block], body_size: float) -> list[Block]:
+    """把图注之后紧邻的小字号续行并回 caption。
+
+    图注末行常被拆成独立的 8pt 小字（`... in silico` + `experiment`），
+    它们不是正文；图注本身又没有句末标点，单靠 `_continues_paragraph`
+    容易被字号/行距判据挡住。这里只接受「同页、紧邻、小字号、短行」。
+    """
+    out: list[Block] = []
+    i = 0
+    while i < len(blocks):
+        b = blocks[i]
+        if b.kind != "caption" or _is_table_caption(b.text):
+            out.append(b)
+            i += 1
+            continue
+        j = i + 1
+        while j < len(blocks):
+            n = blocks[j]
+            if n.page != b.page or n.kind != "para":
+                break
+            if body_size > 0 and n.size >= body_size * 0.92:
+                break
+            if len(n.text.strip()) > 80:
+                break
+            gap = n.bbox[1] - b.bbox[3]
+            if gap < -2 or gap > max(body_size * 1.8, 14.0):
+                break
+            overlap = min(b.bbox[2], n.bbox[2]) - max(b.bbox[0], n.bbox[0])
+            if overlap < 0.3 * min(b.bbox[2] - b.bbox[0], n.bbox[2] - n.bbox[0]):
+                break
+            b.text = _join_text(b.text, n.text)
+            b.bboxes = _merge_bbox_lists(b.bboxes, n.bboxes)
+            j += 1
+        out.append(b)
+        i = j
+    for idx, b in enumerate(out):
+        b.order = idx
+        b.id = f"b{idx:04d}"
+    return out
+
+
+def _absorb_table_notes(blocks: list[Block], body_size: float) -> list[Block]:
+    """把表格下方紧邻的小字号表注并回表题。
+
+    BMC/医学期刊的表注常排在表格下方 7pt 小字（`— Represents ...`、
+    疾病缩写列表），既不是正文也不是独立图注。留在正文流会破坏段落，
+    翻译也会把它们当正文；并回 caption 后随表格一起展示。
+    """
+    out: list[Block] = []
+    i = 0
+    while i < len(blocks):
+        b = blocks[i]
+        if b.kind != "table":
+            out.append(b)
+            i += 1
+            continue
+        cap = next(
+            (
+                c for c in blocks
+                if c.page == b.page and c.kind == "caption"
+                and _is_table_caption(c.text)
+                and _rect_gap(pymupdf.Rect(c.bbox), pymupdf.Rect(b.bbox)) <= 80
+            ),
+            None,
+        )
+        j = i + 1
+        notes: list[Block] = []
+        while j < len(blocks):
+            n = blocks[j]
+            if n.page != b.page or n.kind != "para":
+                break
+            gap = n.bbox[1] - b.bbox[3]
+            if gap < -2 or gap > max(body_size * 1.8, 14.0):
+                break
+            if body_size > 0 and n.size >= body_size * 0.92:
+                break
+            if len(n.text.strip()) > 300:
+                break
+            overlap = min(b.bbox[2], n.bbox[2]) - max(b.bbox[0], n.bbox[0])
+            if overlap < 0.3 * min(b.bbox[2] - b.bbox[0], n.bbox[2] - n.bbox[0]):
+                break
+            notes.append(n)
+            j += 1
+        if notes:
+            note_text = " ".join(n.text.strip() for n in notes)
+            base = b.caption or (cap.text if cap is not None else "")
+            b.caption = _join_text(base, note_text)
+            if cap is not None:
+                cap.text = _join_text(cap.text, note_text)
+            out.append(b)
+            i = j
+            continue
+        out.append(b)
+        i += 1
+    for idx, b in enumerate(out):
+        b.order = idx
+        b.id = f"b{idx:04d}"
+    return out
+
+
+def _table_text_rotation(page: pymupdf.Page, rect: pymupdf.Rect) -> int:
+    """表格内文字的整体旋转角度；0 表示正常，90/180/270 表示需转正。
+
+    按字符数加权，避免个别横排表头把整张旋转表的判断带偏。
+    """
+    scores: Counter[tuple[float, float]] = Counter()
+    try:
+        for block in page.get_text("dict")["blocks"]:
+            for line in block.get("lines") or []:
+                direction = line.get("dir") or (1, 0)
+                if abs(float(direction[1])) <= 0.15:
+                    continue
+                if not pymupdf.Rect(line["bbox"]).intersects(rect):
+                    continue
+                text = "".join(
+                    (s.get("text") or "") for s in line.get("spans") or []
+                )
+                if text.strip():
+                    scores[(round(float(direction[0]), 2), round(float(direction[1]), 2))] += len(text)
+    except Exception:
+        return 0
+    if not scores:
+        return 0
+    (dx, dy), _ = scores.most_common(1)[0]
+    # 文字方向 (0,-1) 表示原表逆时针旋转，裁图后需顺时针转 90° 才正立；
+    # (0,1) 则相反。这里用字符数加权，不依赖单行表头。
+    if dy < -0.5:
+        return 90
+    if dy > 0.5:
+        return 270
+    if dx < -0.5:
+        return 180
+    return 0
+
+
 def _is_table_caption(text: str) -> bool:
     return bool(_TABLE_CAP_RE.match(text.strip())) and _is_caption_text(text)
 
@@ -2906,11 +3575,19 @@ def _table_crop_rect(page: pymupdf.Page, rect: pymupdf.Rect, margin: float = 4.0
                 cy = (br.y0 + br.y1) / 2
                 if not (out.y0 - 3 <= cy <= out.y1 + 3):
                     continue
+                # 表格外的成段正文不能靠「水平只差 20pt」吸进来：双栏页
+                # 的 gutter 常只有 18~24pt，旧阈值会把整栏正文裁进表格图。
+                # 只吸收短表格文字/表头，长句一律跳过。
+                line_text = "".join(
+                    (s.get("text") or "") for s in ln.get("spans") or []
+                ).strip()
+                if len(line_text) > 80:
+                    continue
                 # 只吸收与识别框水平紧邻的单元格文字。双栏页里另一栏
                 # 正文与表格隔着 gutter（约 27pt），按纵向范围无条件
                 # 扩边会把整页正文裁进表格图，导致图表内容错位。
                 gap = max(rect.x0 - br.x1, br.x0 - rect.x1, 0.0)
-                if gap > _TABLE_CROP_GAP:
+                if gap > min(_TABLE_CROP_GAP, 16.0):
                     continue
                 x0 = min(x0, br.x0)
                 x1 = max(x1, br.x1)
@@ -2947,6 +3624,10 @@ def _looks_like_text_table(html: str, cols: int) -> bool:
     """
     cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", html or "", re.S)
     if not cells:
+        return False
+    # 旋转表在 find_tables 里可能被压成 1 行 × N 列（整张表就是一排单元格），
+    # 但多列表格的结构证据已经足够强，不能按「行数少 + 单元格长」判正文。
+    if cols >= 4:
         return False
     rows = html.count("<tr")
     text = " ".join(re.sub(r"<[^>]+>", " ", c) for c in cells)
@@ -3116,6 +3797,42 @@ def _rect_is_figure_region(
     return False
 
 
+def _trim_table_crop_off_body(
+    crop: pymupdf.Rect,
+    raw: pymupdf.Rect,
+    blocks: list[Block],
+    page_no: int,
+) -> pymupdf.Rect:
+    """表格裁图扩边后若把正文扫进来，按正文块把裁图收回。
+
+    双栏页里 find_tables 只认出左栏表格，但图注/横线扩边可能把右栏正文
+    一起框进来；这样表格块会覆盖正文，前端看起来就是「正文被裁进表格」。
+    只裁掉确实不在原始表框内、且是长段正文/标题的块。
+    """
+    out = pymupdf.Rect(crop)
+    for b in blocks:
+        if b.page != page_no or b.kind not in ("para", "heading"):
+            continue
+        text = (b.text or "").strip()
+        if b.kind != "heading" and len(text) < 80:
+            continue
+        br = pymupdf.Rect(b.bbox)
+        if _cover_ratio(br, raw) > 0.4:
+            continue
+        if _cover_ratio(br, out) < 0.5:
+            continue
+        if br.x0 >= raw.x1 - 2:
+            out.x1 = min(out.x1, br.x0 - 2)
+        elif br.x1 <= raw.x0 + 2:
+            out.x0 = max(out.x0, br.x1 + 2)
+        elif br.y1 <= raw.y0 + 2:
+            out.y0 = max(out.y0, br.y1 + 2)
+        elif br.y0 >= raw.y1 - 2:
+            out.y1 = min(out.y1, br.y0 - 2)
+    out |= raw
+    return out
+
+
 def _extract_tables_structured(
     doc: pymupdf.Document,
     blocks: list[Block],
@@ -3149,7 +3866,13 @@ def _extract_tables_structured(
             for c in captions:
                 if c.id in used:
                     continue
-                dist = min(abs(c.bbox[1] - rect.y1), abs(rect.y0 - c.bbox[3]))
+                # 正常图注在表格上下方，旋转表注在表格左右侧；统一用矩形
+                # 最近距离，不能只看 y 距离（否则竖排表注永远配不上）。
+                dist = min(
+                    _rect_gap(pymupdf.Rect(c.bbox), rect),
+                    abs(c.bbox[1] - rect.y1),
+                    abs(rect.y0 - c.bbox[3]),
+                )
                 if dist < best_d and dist <= 350:
                     cap, best_d = c, dist
 
@@ -3174,9 +3897,11 @@ def _extract_tables_structured(
                 last_cap = (page_no, cap)
 
             crop = _include_caption(_table_crop_rect(page, rect), cap.bbox, page)
+            crop = _trim_table_crop_off_body(crop, rect, blocks, page_no)
             img = _crop(
                 page, crop, out_dir / f"p{page_no:03d}_tab{k}.png",
                 target_px=TABLE_TARGET_PX,
+                rotate=_table_text_rotation(page, rect),
             )
             if not img:
                 continue
@@ -3300,6 +4025,7 @@ def _extract_tables_by_caption(
         img = _crop(
             page, rect, out_dir / f"p{b.page:03d}_tbl_cap{i:04d}.png",
             target_px=TABLE_TARGET_PX,
+            rotate=_table_text_rotation(page, raw),
         )
         if not img:
             continue
@@ -3367,6 +4093,97 @@ def _drop_equation_orphans(blocks: list[Block]) -> list[Block]:
     for i, blk in enumerate(out):
         blk.order = i
         blk.id = f"b{i:04d}"
+    return out
+
+
+_FIG_NUM_RE = re.compile(r"^\s*(?:Figure|Fig\.?)\s*([A-Z]?\d+)", re.IGNORECASE)
+
+
+def _norm_caption(text: str) -> str:
+    return re.sub(r"\s+", "", (text or "").lower())
+
+
+def _drop_duplicate_figures(blocks: list[Block]) -> list[Block]:
+    """去掉同一 Figure 的重复抽取：子图标签块与整图、跨页同一图注碎片。
+
+    `_extract_figures` 与矢量图兜底可能同时产出一张大图和一张子图/片段；
+    跨页图注也可能让前一页只剩一条图注区域。保留图注更完整、面积更大的
+    一张，避免阅读页同一张图出现两次。
+    """
+    figs = [b for b in blocks if b.kind == "figure" and (b.caption or "").strip()]
+    if len(figs) < 2:
+        return blocks
+    drop: set[int] = set()
+    for i, a in enumerate(figs):
+        ma = _FIG_NUM_RE.match(a.caption)
+        if not ma:
+            continue
+        for b in figs[i + 1:]:
+            if id(a) in drop or id(b) in drop:
+                continue
+            mb = _FIG_NUM_RE.match(b.caption)
+            if not mb or ma.group(1).upper() != mb.group(1).upper():
+                continue
+            ca, cb = len(a.caption.strip()), len(b.caption.strip())
+            area_a = (a.bbox[2] - a.bbox[0]) * (a.bbox[3] - a.bbox[1])
+            area_b = (b.bbox[2] - b.bbox[0]) * (b.bbox[3] - b.bbox[1])
+            if a.page == b.page:
+                cover = max(
+                    _cover_ratio(pymupdf.Rect(a.bbox), pymupdf.Rect(b.bbox)),
+                    _cover_ratio(pymupdf.Rect(b.bbox), pymupdf.Rect(a.bbox)),
+                )
+                if cover > 0.7:
+                    if ca != cb:
+                        drop.add(id(a) if ca < cb else id(b))
+                    else:
+                        drop.add(id(a) if area_a < area_b else id(b))
+            elif abs(a.page - b.page) == 1 and _norm_caption(a.caption) == _norm_caption(b.caption):
+                if area_a < area_b * 0.55:
+                    drop.add(id(a))
+                elif area_b < area_a * 0.55:
+                    drop.add(id(b))
+    out = [b for b in blocks if id(b) not in drop]
+    for i, b in enumerate(out):
+        b.order = i
+        b.id = f"b{i:04d}"
+    return out
+
+
+def _drop_float_text_fragments(blocks: list[Block], body_size: float) -> list[Block]:
+    """丢掉落在图表裁图里的小字号短标注。
+
+    位图/矢量图或表格已经画出这些坐标轴、图例、子图字母和表内标签；它们
+    若还留在阅读流里，就会表现成「正文段落被识别进图片」——一条条 `A B`、
+    `C`、`JQ1 (nM)` 单独成段。只删除小字号且短/少词的块，正文和长表格
+    说明不会被误删。
+    """
+    floats = [b for b in blocks if b.kind in ("figure", "table")]
+    if not floats:
+        return blocks
+    out: list[Block] = []
+    for b in blocks:
+        if b.kind == "para" and b.text.strip() and body_size > 0:
+            text = b.text.strip()
+            # 坐标轴方位/仪器标签常用与正文相近的字号（N / E / MIRI），
+            # 不能只看「字号小于正文」；短全大写或少词标签直接按图内文字处理。
+            short_label = len(text) <= 12 and (
+                text.isupper() or len(_WORD_RE.findall(text)) <= 1
+            )
+            if 0 < b.size < body_size * 0.95 or short_label:
+                br = pymupdf.Rect(b.bbox)
+                covered = any(
+                    f.page == b.page and _cover_ratio(br, pymupdf.Rect(f.bbox)) >= 0.7
+                    for f in floats
+                )
+                if covered and (
+                    len(text) <= 120
+                    or len(_WORD_RE.findall(text)) <= 6
+                ):
+                    continue
+        out.append(b)
+    for i, b in enumerate(out):
+        b.order = i
+        b.id = f"b{i:04d}"
     return out
 
 
@@ -3449,7 +4266,15 @@ def _include_caption(
 
     阅读页仍保留 caption 文本，标题会出现两次——这是用户明确接受的重复。
     """
-    out = pymupdf.Rect(crop) | pymupdf.Rect(caption_bbox)
+    crop_rect = pymupdf.Rect(crop)
+    cap_rect = pymupdf.Rect(caption_bbox)
+    # 双栏页的表格/图与图注可能并排分属左右栏；把整块 caption 并进裁图
+    # 会横向跨过 gutter，把另一栏正文一起裁进图表。只有 x 方向有足够
+    # 重叠（上下紧邻）时才并入；并排 caption 交给阅读页单独显示。
+    overlap_x = min(crop_rect.x1, cap_rect.x1) - max(crop_rect.x0, cap_rect.x0)
+    if overlap_x < 0.25 * min(max(crop_rect.width, 1.0), max(cap_rect.width, 1.0)):
+        return crop_rect
+    out = crop_rect | cap_rect
     return pymupdf.Rect(
         max(page.rect.x0, out.x0 - pad),
         max(page.rect.y0, out.y0 - pad),
@@ -3465,12 +4290,21 @@ def _crop(
     dpi: int | None = None,
     target_px: int = CROP_TARGET_PX,
     dpi_max: int = CROP_DPI_MAX,
+    rotate: int = 0,
 ) -> str | None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         if dpi is None:
             dpi = _dpi_for(rect, target_px, dpi_max)
         pix = page.get_pixmap(clip=rect, dpi=dpi, alpha=False)
+        # 横排大表在竖版页面里常被旋转 90° 放置；裁出来仍是竖条，
+        # 阅读页必须把图像转正，否则整张表无法阅读。
+        if rotate == 90:
+            pix = pix.flip_rotate(pymupdf.Pixmap.ROTATE_90)
+        elif rotate == 180:
+            pix = pix.flip_rotate(pymupdf.Pixmap.ROTATE_180)
+        elif rotate == 270:
+            pix = pix.flip_rotate(pymupdf.Pixmap.ROTATE_270)
         pix.save(str(path))
         return str(path)
     except Exception:
@@ -4244,6 +5078,10 @@ def _extract_vector_text_figures(
             ]
         anchors: list[pymupdf.Rect] = []
         for r in regions:
+            # 表格自己也是矢量簇/线段，绝不能再被图注锚定成 figure。
+            # 旋转表整页只有表框时，这里会把同页的「图注」错误配给表格区域。
+            if any(_overlap_ratio(r, t) > 0.25 for t in table_guards):
+                continue
             for cap in caps:
                 cb = pymupdf.Rect(cap.bbox)
                 overlap_x = min(r.x1, cb.x1) - max(r.x0, cb.x0)
@@ -4784,6 +5622,7 @@ def parse_pdf(
             ordered, body_size, table_rects, page_regions, front
         )
         _classify(blocks, body_size, page_height, front)
+        blocks = _insert_rotated_captions(blocks, _collect_rotated_caption_blocks(doc))
         if _DIAG_PATH:
             diag_local = _local_edges(ordered)
             _diag_dump({
@@ -4821,18 +5660,22 @@ def parse_pdf(
                 ],
             })
         blocks = _merge_front_matter_cards(blocks, front, page_width)
+        blocks = _merge_heading_continuations(blocks)
         blocks = _attach_equation_numbers(blocks, doc)
         blocks = _merge_affiliations(blocks)
         blocks = _drop_noise(blocks)
         blocks = _drop_equation_orphans(blocks)
         blocks = _merge_across_pages(blocks, table_rects)
+        blocks = _merge_front_continuations(blocks)
         blocks = _merge_caption_continuations(blocks, table_rects)
+        blocks = _merge_small_caption_continuations(blocks, body_size)
 
         if with_figures and figure_dir is not None:
             out = Path(figure_dir)
             if paper_id:
                 out = out / paper_id
             blocks = _extract_tables(doc, blocks, out / "tables", detected)
+            blocks = _absorb_table_notes(blocks, body_size)
             blocks = _extract_figures(doc, blocks, out / "figures", body_size, detected)
             # 区域层的图区作为「带标注矢量图」的候选来源：图内标注已被建块
             # 阶段剔出正文流，原路径的文字生长失效，改由区域层提供图区，
@@ -4843,6 +5686,8 @@ def parse_pdf(
             blocks = _collapse_vector_figure_pages(
                 doc, blocks, out / "figures", body_size, page_regions,
             )
+            blocks = _drop_duplicate_figures(blocks)
+            blocks = _drop_float_text_fragments(blocks, body_size)
             # 图表裁好之后再清一次：图里的坐标轴/标注不该再作为公式出现
             blocks = _drop_equations_inside_floats(blocks)
             blocks = _crop_equations(doc, blocks, out / "equations")

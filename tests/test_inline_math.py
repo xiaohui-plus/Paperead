@@ -81,3 +81,30 @@ def test_two_column_visual_rows_stay_separate():
     merged = _merge_visual_lines(lines)
     assert len(merged) == 2
     assert [line["spans"][0]["text"] for line in merged] == ["left", "right"]
+
+def test_cmr_prose_line_does_not_become_inline_math():
+    """AASTeX 的正文整行就是 CMR10；CMR 只能并入已开启的公式组。"""
+    spans = [_span("We present a spatially resolved study of the superwind", "CMR10", 10, 50, 100, 260)]
+    text, ranges = spans_with_offsets(spans)
+
+    assert text.startswith("We present")
+    assert build_inline_math(spans, ranges) == []
+
+
+def test_cmr_prose_keeps_only_the_formula_fragment():
+    spans = [
+        _span("the nearby (", "CMR10", 10, 50, 100, 60),
+        _span("d", "CMMI10", 10, 110, 100, 6),
+        _span(" ∼ ", "CMSY10", 10, 116, 100, 12),
+        _span("3.5", "CMR10", 10, 128, 100, 15),
+        _span(" Mpc", "CMR10", 10, 143, 100, 25),
+        _span(") galaxy", "CMR10", 10, 168, 100, 45),
+    ]
+    text, ranges = spans_with_offsets(spans)
+    math = build_inline_math(spans, ranges)
+
+    assert len(math) == 1
+    fragment = text[math[0].start:math[0].end]
+    assert "d" in fragment and "3.5" in fragment
+    assert "nearby" not in fragment
+    assert "galaxy" not in fragment

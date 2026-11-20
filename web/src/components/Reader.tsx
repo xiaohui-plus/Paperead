@@ -61,6 +61,14 @@ export function Reader({
   const hasTranslation = translated > 0
   const terms = paper.glossary ?? {}
   const effectiveMode: ViewMode = hasTranslation ? mode : 'en'
+  // 本地 PDF 可能没有可用的元数据作者；回退到解析出的 author 块，
+  // 保证封面开头信息始终有归处，而不是散落在正文流里。
+  const blockAuthors = paper.blocks
+    .filter((b) => b.kind === 'author')
+    .map((b) => b.text.trim())
+    .filter(Boolean)
+    .join(' ')
+  const authors = paper.authors || blockAuthors
 
   return (
     <div className="main-scroll" ref={scrollRef}>
@@ -73,8 +81,8 @@ export function Reader({
           {paper.title_zh && <p className="hero-title-zh">{paper.title_zh}</p>}
 
           <details className="hero-author">
-            <summary>Author</summary>
-            {paper.authors && <p className="hero-authors">{paper.authors}</p>}
+            <summary>作者与单位</summary>
+            {authors && <p className="hero-authors">{authors}</p>}
             {paper.affiliation && <p className="hero-affil">{paper.affiliation}</p>}
           </details>
 

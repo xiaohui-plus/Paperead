@@ -83,12 +83,14 @@ import {
   saveAutoTranslate,
   loadReadingFonts,
   saveReadingFonts,
-  loadReaderFont,
-  saveReaderFont,
+  loadReaderFonts,
+  saveReaderFonts,
+  readerFontStack,
   READER_FONTS,
   loadDefaultReadingMode,
   saveDefaultReadingMode,
   type ReadingFonts,
+  type ReaderFontPair,
 } from '../lib/readingPrefs'
 
 interface Props {
@@ -781,7 +783,7 @@ export function SettingsDialog({
     tab === 'models'
       ? '回答模型负责问答与翻译，识图模型负责论文里的图片识别；两者可以分开配置，修改会自动保存在本机。'
       : tab === 'reading'
-        ? '调整正文字体、原文/译文字号与默认视图；改动会立即作用到当前打开的论文。'
+        ? '调整目标译文语种、自动翻译、正文字体、原文/译文字号与默认视图；改动会立即作用到当前打开的论文。'
         : tab === 'scholar'
           ? '这里配置 Semantic Scholar 与 CORE 的检索密钥；密钥只保存在本机，不会上传到服务器。'
           : tab === 'review'
@@ -794,7 +796,7 @@ export function SettingsDialog({
                   ? '遇到问题或有建议可以直接提交；截图支持 Ctrl+V 粘贴，内容会同步到 Gitee Issue。'
                   : tab === 'reward'
                     ? '给仓库一颗星，或扫码送一朵小花、请作者喝杯咖啡；所有支持都出于自愿，不影响任何功能。'
-                    : '应用更新、目标译文语种与自动翻译、离线库、服务器连接与写作工具等设置都收在这里。'
+                    : '应用更新、离线库、服务器连接与写作工具等设置都收在这里。'
 
   return (
     <div
@@ -1462,9 +1464,6 @@ export function SettingsDialog({
           </div>
         </div>
 
-        <div className="general-section">
-          <ReadingGeneralPanel />
-        </div>
 
         {mobile ? (
           <>
@@ -1732,92 +1731,22 @@ function readingPreviewSample(langKey: string): ReadingPreviewSample {
   }
 }
 
-/**
- * 设置 → 常规：目标译文语种与自动翻译。
- * 原文语种与目标语种一致时，阅读页不会自动启动翻译。
- */
-function ReadingGeneralPanel() {
-  const [lang, setLang] = useState(loadTargetLang)
-  const [autoTranslate, setAutoTranslate] = useState(loadAutoTranslate)
-
-  return (
-    <section className="reading-card">
-      <header className="reading-card-head">
-        <div>
-          <h3>翻译</h3>
-          <p>外文论文翻译成这里选择的语言；原文与目标译文语种一致时不会自动翻译。</p>
-        </div>
-        <span className="reading-badge">即时生效</span>
-      </header>
-
-      <div className="reading-row">
-        <div className="reading-row-label">
-          <b>目标译文语种</b>
-          <span>外文论文翻译成这里选择的语言；问答、导读和脉络仍用中文。</span>
-        </div>
-        <select
-          id="target-lang"
-          className="input reading-select"
-          value={lang}
-          onChange={(event) => {
-            setLang(event.target.value)
-            saveTargetLang(event.target.value)
-          }}
-        >
-          {TRANSLATION_LANGS.map((item) => (
-            <option key={item.key} value={item.key}>
-              {item.label}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      <div className="reading-row">
-        <div className="reading-row-label">
-          <b>打开论文自动翻译</b>
-          <span>
-            原文与目标语种一致时不翻译；不一致时打开论文自动翻译当前页和下一页。关闭后所有论文都不再自动翻译。
-          </span>
-        </div>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={autoTranslate}
-          className="switch"
-          data-on={autoTranslate}
-          onClick={() => {
-            const next = !autoTranslate
-            setAutoTranslate(next)
-            saveAutoTranslate(next)
-          }}
-          title={autoTranslate ? '关闭自动翻译' : '开启自动翻译'}
-        >
-          <i />
-        </button>
-      </div>
-
-      <p className="reading-note">
-        切换目标语种后，已翻译论文会在下次打开时按新语言重新翻译；原文、高亮和笔记不受影响。只对当前这台机器生效。
-      </p>
-    </section>
-  )
-}
-
-/** 设置 → 阅读界面：正文字体、原文/译文字号、默认阅读模式与自动阅读重点。 */
+/** 设置 → 阅读界面：译文语言、正文字体、原文/译文字号、默认阅读模式与自动阅读重点。 */
 function ReadingPanel() {
-  const [readerFont, setReaderFont] = useState(loadReaderFont)
-  const [previewLang, setPreviewLang] = useState(loadTargetLang)
+  const [targetLang, setTargetLang] = useState(loadTargetLang)
+  const [autoTranslate, setAutoTranslate] = useState(loadAutoTranslate)
+  const [readerFonts, setReaderFonts] = useState<ReaderFontPair>(loadReaderFonts)
   const [fonts, setFonts] = useState<ReadingFonts>(loadReadingFonts)
   const [mode, setMode] = useState<ViewMode>(loadDefaultReadingMode)
   const [enabled, setEnabled] = useState(loadAutoHighlights)
 
   useEffect(() => {
-    const sync = () => setPreviewLang(loadTargetLang())
+    const sync = () => setTargetLang(loadTargetLang())
     window.addEventListener('paperead:translation-changed', sync)
     return () => window.removeEventListener('paperead:translation-changed', sync)
   }, [])
 
-  const sample = readingPreviewSample(previewLang)
+  const sample = readingPreviewSample(targetLang)
 
   const changeFonts = (patch: Partial<ReadingFonts>) => {
     const next = { ...fonts, ...patch }
@@ -1825,8 +1754,74 @@ function ReadingPanel() {
     saveReadingFonts(next)
   }
 
+  const changeReaderFont = (side: keyof ReaderFontPair, key: string) => {
+    const next = { ...readerFonts, [side]: key }
+    setReaderFonts(next)
+    saveReaderFonts(next)
+  }
+
   return (
     <div className="modal-body settings-reading">
+      <section className="reading-card">
+        <header className="reading-card-head">
+          <div>
+            <h3>译文语言</h3>
+            <p>外文论文翻译成这里选择的语言；原文与目标译文语种一致时不会自动翻译。</p>
+          </div>
+          <span className="reading-badge">即时生效</span>
+        </header>
+
+        <div className="reading-row">
+          <div className="reading-row-label">
+            <b>目标译文语种</b>
+            <span>外文论文翻译成这里选择的语言；问答、导读和脉络仍用中文。正文字体与字号的预览会跟随切换。</span>
+          </div>
+          <select
+            id="target-lang"
+            className="input reading-select"
+            value={targetLang}
+            onChange={(event) => {
+              setTargetLang(event.target.value)
+              saveTargetLang(event.target.value)
+            }}
+          >
+            {TRANSLATION_LANGS.map((item) => (
+              <option key={item.key} value={item.key}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="reading-row">
+          <div className="reading-row-label">
+            <b>打开论文自动翻译</b>
+            <span>
+              原文与目标语种一致时不翻译；不一致时打开论文自动翻译当前页和下一页。关闭后所有论文都不再自动翻译。
+            </span>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={autoTranslate}
+            className="switch"
+            data-on={autoTranslate}
+            onClick={() => {
+              const next = !autoTranslate
+              setAutoTranslate(next)
+              saveAutoTranslate(next)
+            }}
+            title={autoTranslate ? '关闭自动翻译' : '开启自动翻译'}
+          >
+            <i />
+          </button>
+        </div>
+
+        <p className="reading-note">
+          切换目标语种后，已翻译论文会在下次打开时按新语言重新翻译；原文、高亮和笔记不受影响。只对当前这台机器生效。
+        </p>
+      </section>
+
       <section className="reading-card">
         <header className="reading-card-head">
           <div>
@@ -1837,17 +1832,32 @@ function ReadingPanel() {
         </header>
         <div className="reading-row">
           <div className="reading-row-label">
-            <b>字体</b>
-            <span>常见中英文字体都可用；下方示例会跟随目标译文语种切换。</span>
+            <b>原文字体</b>
+            <span>作用于原文段落：英文与数字使用所选西文字体，中文自动回退宋体。</span>
           </div>
           <select
-            id="reader-font"
+            id="reader-font-source"
             className="input reading-select"
-            value={readerFont}
-            onChange={(event) => {
-              setReaderFont(event.target.value)
-              saveReaderFont(event.target.value)
-            }}
+            value={readerFonts.source}
+            onChange={(event) => changeReaderFont('source', event.target.value)}
+          >
+            {READER_FONTS.map((font) => (
+              <option key={font.key} value={font.key}>
+                {font.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="reading-row">
+          <div className="reading-row-label">
+            <b>译文字体</b>
+            <span>作用于译文段落，可与原文选择不同字体；中文同样默认宋体。</span>
+          </div>
+          <select
+            id="reader-font-target"
+            className="input reading-select"
+            value={readerFonts.target}
+            onChange={(event) => changeReaderFont('target', event.target.value)}
           >
             {READER_FONTS.map((font) => (
               <option key={font.key} value={font.key}>
@@ -1860,9 +1870,22 @@ function ReadingPanel() {
           <span className="reading-preview-label">
             字体预览 · {sample.sourceLabel} / {sample.targetLabel}
           </span>
-          <span className="reading-preview-en">{sample.source}</span>
-          <span className="reading-preview-zh">{sample.target}</span>
+          <span
+            className="reading-preview-en"
+            style={{ fontFamily: readerFontStack(readerFonts.source) }}
+          >
+            {sample.source}
+          </span>
+          <span
+            className="reading-preview-zh"
+            style={{ fontFamily: readerFontStack(readerFonts.target) }}
+          >
+            {sample.target}
+          </span>
         </div>
+        <p className="reading-note">
+          默认 Georgia（英文报刊）负责英文与数字，中文使用宋体；另提供 Times New Roman + 宋体组合。原版 PDF 字体由文件本身决定。
+        </p>
       </section>
 
       <section className="reading-card">
