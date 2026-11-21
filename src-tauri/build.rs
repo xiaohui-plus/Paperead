@@ -33,6 +33,7 @@ fn main() {
             "check_desktop_update",
             "restart_app",
             "save_pdf_file",
+            "save_translated_pdf",
             "browser_extension_setup",
             "open_browser_extensions",
             "open_extension_folder",

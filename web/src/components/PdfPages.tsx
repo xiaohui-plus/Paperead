@@ -32,8 +32,8 @@ interface Props {
   initialPage: number
   /** 页面显示宽度（px）；图片按固定分辨率取，缩放只改 CSS 宽度 */
   width: number
-  /** 面板里点目录/重点/图表时滚到对应页；token 变化即触发 */
-  jump: { page: number; token: number } | null
+  /** 面板里点目录/重点/图表时滚到对应页；token 变化即触发。双栏不传，交给滚动联动 */
+  jump?: { page: number; token: number } | null
   onPageChange: (page: number) => void
   /** 离线页图（页码 → blob URL）；有值时不再请求服务器 */
   pageUrls?: Record<number, string>
@@ -371,7 +371,7 @@ export function PdfPages({
   pageSizes,
   initialPage,
   width,
-  jump,
+  jump = null,
   onPageChange,
   pageUrls,
   pdfUrl,

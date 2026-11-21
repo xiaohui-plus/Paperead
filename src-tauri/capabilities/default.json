@@ -15,6 +15,7 @@
     "allow-install-update",
     "allow-restart-app",
     "allow-save-pdf-file",
+    "allow-save-translated-pdf",
     "allow-browser-extension-setup",
     "allow-open-browser-extensions",
     "allow-open-extension-folder"

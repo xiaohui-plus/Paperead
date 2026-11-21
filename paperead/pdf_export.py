@@ -70,8 +70,10 @@ MAX_FILL_LINE_HEIGHT = 1.4
 BODY_FONT_SIZE = 8.6
 # 自动字号：从这里开始试排，收敛到「全篇正文都能放下的最大统一字号」
 AUTO_BODY_SIZE = 11.5
+# 自动字号的候选档位（从高到低试，取第一个全篇统一且不溢出的）。
+SIZE_STEPS = (12.0, 11.5, 10.5, 9.5, 8.6, 8.25, 7.75, 7.6)
 # 译文 PDF 缓存版本：排版算法变更时递增，使旧缓存失效
-PDF_ALGO_VER = "p2-autofit-v9"
+PDF_ALGO_VER = "p2-autofit-v22"
 # 标题按正文比例统一：同一 level 全篇一致，不逐块缩。
 TITLE_RATIO = 1.55
 HEADING_RATIOS = {1: 1.35, 2: 1.22, 3: 1.12}
@@ -659,6 +661,36 @@ def _slice_translation(block: dict, page_index: int) -> str:
     return ""
 
 
+def _strip_heading_echo(
+    text: str,
+    page_items: list[tuple[dict, pymupdf.Rect]],
+    block: dict,
+) -> str:
+    """去掉正文译文开头误抄进来的相邻标题整句。
+
+    翻译模型会把相邻节标题一起翻进正文块，而标题本身也有一块会单独写，
+    结果同一句中文在页面上出现两次（实测「双通路抑制的重要性」重复）。
+    只在「本块译文以同页标题译文开头且后面还有正文」时剥离。
+    """
+    if block.get("kind") in ("heading", "title", "caption"):
+        return text
+    stripped = (text or "").strip()
+    if not stripped:
+        return text
+    for other, _rect in page_items:
+        if other is block:
+            continue
+        if other.get("kind") not in ("heading", "title", "caption"):
+            continue
+        prefix = (other.get("translated") or "").strip()
+        if len(prefix) < 4 or not stripped.startswith(prefix):
+            continue
+        rest = stripped[len(prefix):].lstrip(" \t\r\n\u3000：:，,。;；")
+        if len(rest) >= 8:
+            return rest
+    return text
+
+
 def _tokenize_inline(text: str, inline_math: list[dict]) -> list[dict]:
     """把译文切成 text / math token；公式按 source 在译文中独立定位。"""
     matches: list[tuple[int, int, dict]] = []
@@ -885,10 +917,29 @@ def render_page(
                 {"block_id": block.get("id"), "reason": "caption_in_table"}
             )
             continue
+        # 高不足一行的块基本是图内标注/页脚碎片（实测 5.3pt 的
+        # "DiffSBDD, generated"），任何字号都放不下，译了只会变成溢出。
+        if (
+            block.get("kind") in ("para", "caption", "heading")
+            and rect.height < 6
+        ):
+            result.skipped.append(
+                {"block_id": block.get("id"), "reason": "too_small"}
+            )
+            continue
         if skip_nested_math and _contains_inner_math(rect, keep_blocks):
             result.skipped.append({"block_id": block.get("id"), "reason": "nested_math"})
             continue
         targets.append((block, rect))
+
+    # 短标签（节标题/小标题）先占位，长段落再避让：长段先写时短标签已无处
+    # 可下推，只能压在长段首行上（Abstract 标题与摘要正文即此形态）。
+    targets.sort(
+        key=lambda item: (
+            item[1].height > 16,
+            int(item[0].get("order") or 0),
+        )
+    )
 
     # 每个目标块：向下借用同栏空隙，再把公式/图表当成禁排区切成横带。
     # 只擦横带内的文字，公式本身既不被擦除，也不会被译文压住。
@@ -896,8 +947,15 @@ def render_page(
     redact_bands_by_block: dict[int, list[pymupdf.Rect]] = {}
     obstacles_by_block: dict[int, list[pymupdf.Rect]] = {}
     layout_rects: dict[int, pymupdf.Rect] = {}
+    # 已处理块的「原始 bbox」：下推只按真实文字范围算，不能用被 next_limit
+    # 向下扩过的 layout_rect，否则会把后块推得过远、引发新的溢出。
+    placed_rects: list[pymupdf.Rect] = []
     for block, rect in targets:
         limit = next_limit(rect, page_blocks, page.rect.height)
+        # 短标签只有一行，向下借用会把下方整段算进自己的范围，后块因此
+        # 无处下推（Abstract 标题压住摘要正文即此形态）。
+        if rect.height <= 16:
+            limit = rect.y1
         # 解析 bbox 有时只盖段落首行（b0046 400–486 实际到 619）；
         # 用该块所在 x 范围内文字的实际最大 y 补足，但不得越过下一段非图表块。
         words_max = rect.y1
@@ -930,6 +988,39 @@ def render_page(
                 ),
             ),
         )
+        # 小标题/短标签的 bbox 往往只有文字自身宽度（"B. GNNs" 仅 37.9pt），
+        # 译文稍长就溢出，被擦掉后原地留白。右侧同栏为空时扩到同栏右缘。
+        if layout_rect.height <= 16 and rect.width < page.rect.width * 0.5:
+            right = max(
+                [rect.x1]
+                + [
+                    other.x1
+                    for _kb, other in page_blocks
+                    if abs(other.x0 - rect.x0) < 12
+                ]
+            )
+            probe = pymupdf.Rect(rect.x1, rect.y0 - 1, right, rect.y1 + 1)
+            if right > rect.x1 + 4 and not page.get_text("words", clip=probe):
+                layout_rect = pymupdf.Rect(rect.x0, rect.y0, right, layout_rect.y1)
+        # 解析常把节标题从正文段落里拆成独立块，但两块 bbox 仍共享首行
+        # （典型：Abstract 标题压在摘要正文第一行上）。按阅读顺序把后块的
+        # 起点推到前块之下，保证任何两段中文都不会写在同一行。
+        shift_y0 = layout_rect.y0
+        for prev_rect in placed_rects:
+            if (
+                _overlaps_x(prev_rect, layout_rect)
+                and prev_rect.y0 <= layout_rect.y0 + 0.5
+                and prev_rect.y1 > shift_y0
+            ):
+                # 留 3pt：标题字号大于正文时 descender 会超出原 bbox，
+                # 只让 1pt 会让两行仍然贴在一起（实测重叠 0.4pt）。
+                shift_y0 = prev_rect.y1 + 3.0
+        if shift_y0 > layout_rect.y0 + 0.5 and shift_y0 < layout_rect.y1 - 2:
+            layout_rect = pymupdf.Rect(
+                layout_rect.x0, shift_y0, layout_rect.x1, layout_rect.y1
+            )
+        placed_rects.append(rect)
+
         obstacles = [
             _inflate(pymupdf.Rect(other))
             for _kb, other in keep_blocks
@@ -957,6 +1048,10 @@ def render_page(
         layout_rects[id(block)] = layout_rect
 
     inline_pixmaps: dict[int, dict[tuple, pymupdf.Pixmap]] = {}
+    # 被后块借用了富余高度的前块：不得再把行距拉伸到 1.4 填空白，
+    # 否则会把手伸进后块的位置、两段中文交错重叠。
+    # 集合在预排版阶段填充，但 dry_run 也走下面的排版循环，须先初始化。
+    no_fill_ids: set[int] = set()
     if not dry_run:
         # 行内公式裁图必须在 redact 之前完成：apply_redactions 会擦掉原字形。
         for block, rect in targets:
@@ -978,9 +1073,13 @@ def render_page(
             if pixmaps:
                 inline_pixmaps[id(block)] = pixmaps
         preserved_ids: set[int] = set()
+
+        planned: dict[int, tuple] = {}
         # 预排版：放不下就整块保留原文，不许「擦一半、写一半」。
         for block, rect in targets:
-            page_text = _slice_translation(block, page_index)
+            page_text = _strip_heading_echo(
+                _slice_translation(block, page_index), page_blocks, block
+            )
             kind = block.get("kind")
             if kind == "title":
                 size = round(body_size * TITLE_RATIO, 2)
@@ -1004,7 +1103,7 @@ def render_page(
                 tokens = _tokenize_inline(
                     page_text, block.get("inline_math") or []
                 )
-                _, _, _, inline_overflow = _layout_inline(
+                _isize, ilh, ilines, inline_overflow = _layout_inline(
                     use_font,
                     tokens,
                     bands[0],
@@ -1013,13 +1112,13 @@ def render_page(
                     min_size=min_size,
                     line_height=line_height,
                 )
-                if inline_overflow:
-                    preserved_ids.add(id(block))
+                planned[id(block)] = (size, use_font, ilh, ilines, True)
+                overflow = inline_overflow
             else:
                 text = clean_translation(
                     page_text, block.get("inline_math")
                 )
-                _, _, _, remaining = layout_in_bands(
+                _lsize, llh, placements, remaining = layout_in_bands(
                     use_font,
                     text,
                     bands,
@@ -1028,8 +1127,70 @@ def render_page(
                     max_size=max(max_size, size),
                     line_height=line_height,
                 )
-                if remaining.strip():
-                    preserved_ids.add(id(block))
+                planned[id(block)] = (size, use_font, llh, placements, False)
+                overflow = bool(remaining.strip())
+            if overflow:
+                preserved_ids.add(id(block))
+        # 同栏前块的中文常比原 bbox 短，块内下方留下空白（实测 p7 左栏
+        # 三块各富余 17/70/97pt），而紧随其后的块却因空间不足保留英文。
+        # 放不下的块向上借用同栏前一块的富余，再重排一次。
+        for block, rect in targets:
+            if id(block) not in preserved_ids:
+                continue
+            if planned[id(block)][4]:
+                continue
+            layout_rect = layout_rects[id(block)]
+            above = [
+                (_b, _r)
+                for _b, _r in targets
+                if _b is not block
+                and abs(_r.x0 - rect.x0) < 12
+                and _r.y1 <= rect.y0 + 1
+                and id(_b) not in preserved_ids
+                and not planned[id(_b)][4]
+                and planned[id(_b)][3]
+            ]
+            if not above:
+                continue
+            prev_block, _prev_rect = max(above, key=lambda item: item[1].y1)
+            psize, _pfont, plh, pplacements, _pinline = planned[id(prev_block)]
+            last_band, last_lines = pplacements[-1]
+            prev_bottom = last_band.y0 + len(last_lines) * psize * plh
+            new_y0 = prev_bottom + 2.0
+            if new_y0 >= layout_rect.y0 - 1:
+                continue
+            new_rect = pymupdf.Rect(rect.x0, new_y0, rect.x1, layout_rect.y1)
+            new_obstacles = [
+                _inflate(pymupdf.Rect(other))
+                for _kb, other in keep_blocks
+                if _kb.get("kind") != "figure"
+                and not (pymupdf.Rect(other) & new_rect).is_empty
+            ]
+            new_bands = plan_bands(new_rect, new_obstacles)
+            text = clean_translation(
+                _slice_translation(block, page_index), block.get("inline_math")
+            )
+            size, use_font, _plh, _plines, _pinl = planned[id(block)]
+            _nsize, nlh, nplacements, remaining = layout_in_bands(
+                use_font,
+                text,
+                new_bands,
+                size,
+                min_size=min_size,
+                max_size=max(max_size, size),
+                line_height=line_height,
+            )
+            if remaining.strip():
+                continue
+            preserved_ids.discard(id(block))
+            bands_by_block[id(block)] = new_bands
+            redact_bands_by_block[id(block)] = plan_bands(
+                new_rect, new_obstacles, min_width_ratio=0.0, min_height=0.5
+            )
+            layout_rects[id(block)] = new_rect
+            obstacles_by_block[id(block)] = new_obstacles
+            no_fill_ids.add(id(prev_block))
+            planned[id(block)] = (size, use_font, nlh, nplacements, False)
         for block, rect in targets:
             if id(block) in preserved_ids:
                 continue
@@ -1050,8 +1211,10 @@ def render_page(
                         page.add_redact_annot(piece)
         page.apply_redactions(
             images=pymupdf.PDF_REDACT_IMAGE_NONE,
-            # 只擦与横带相交的矢量字形（行内公式的原字形），表格线在禁排区外不受影响。
-            graphics=pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED,
+            # 矢量线必须保留：redact 横带与表格横线/页眉分隔线相交是常态
+            # （实测第 1 页 7 条表线被整条删除）。行内公式的原字形改用
+            # 下方白块覆盖处理，不再靠 redact 删线。
+            graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
         )
         # Type3/CID 公式字形 redact 擦不掉，用白色块盖住原公式区域；
         # 内联裁图随后写入，覆盖白块，页面上只看到一次公式。
@@ -1091,7 +1254,9 @@ def render_page(
             )
             result.layouts.append(layout)
             continue
-        page_text = _slice_translation(block, page_index)
+        page_text = _strip_heading_echo(
+            _slice_translation(block, page_index), page_blocks, block
+        )
         text = clean_translation(page_text, block.get("inline_math"))
         kind = block.get("kind")
         if kind == "title":
@@ -1212,6 +1377,7 @@ def render_page(
             and len(bands) == 1
             and len(placements) == 1
             and not block.get("inline_math")
+            and id(block) not in no_fill_ids
         ):
             line_count = len(placements[0][1])
             if line_count > 1:
@@ -1357,9 +1523,55 @@ def _page_hash(
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def _count_overlap(page: pymupdf.Page) -> int:
+    """统计同页写在同一位置的两段文字（不同行、横纵向都实质相交）。
+
+    这是「任何两块不得共享同一行」的自动验收：构建后直接读回文本层，
+    不依赖人工看图，也不对具体论文做任何特判。同一行内的多个 span 属于
+    并排（中文与公式混排），不参与比较。
+    """
+    lines: list[list[pymupdf.Rect]] = []
+    for block in page.get_text("dict")["blocks"]:
+        if block["type"] != 0:
+            continue
+        for line in block["lines"]:
+            rects = [
+                pymupdf.Rect(span["bbox"])
+                for span in line["spans"]
+                # 只比较写入的中文：原文保留的表格 ID/英文串本身就密集并排，
+                # 算进来会成批误报（实测一篇 297 条全是英文 ID）。
+                if span["text"].strip()
+                and any("\u4e00" <= ch <= "\u9fff" for ch in span["text"])
+            ]
+            if rects:
+                lines.append(rects)
+    count = 0
+    for index, left_line in enumerate(lines):
+        for right_line in lines[index + 1:]:
+            hit = False
+            for left in left_line:
+                for right in right_line:
+                    inter = left & right
+                    if (
+                        inter.is_valid
+                        and not inter.is_empty
+                        and inter.width > min(left.width, right.width) * 0.3
+                        and inter.height > min(left.height, right.height) * 0.3
+                    ):
+                        hit = True
+                        break
+                if hit:
+                    break
+            if hit:
+                count += 1
+    return count
+
+
 def _page_detail(page_pdf: Path, res: Any) -> dict[str, Any]:
     doc = pymupdf.open(page_pdf)
-    text = doc[0].get_text()
+    page = doc[0]
+    text = page.get_text()
+    overlap = _count_overlap(page)
     doc.close()
     cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
     return {
@@ -1368,6 +1580,7 @@ def _page_detail(page_pdf: Path, res: Any) -> dict[str, Any]:
         "overflow": [x.block_id for x in res.layouts if x.overflow],
         "residue": res.residue_blocks,
         "skipped": res.skipped,
+        "overlap": overlap,
         "cjk": cjk,
     }
 
@@ -1442,37 +1655,49 @@ def build_translated_pdf(
 
     requested = max(6.5, min(body_size, 13.0))
     known_size = cached_meta.get("body_size_used") if cached_pages else None
-    size = float(known_size) if known_size else requested
-    size = max(6.5, min(size, 13.0))
+    try:
+        known_size = float(known_size) if known_size else None
+    except (TypeError, ValueError):
+        known_size = None
+    if known_size:
+        known_size = max(6.5, min(known_size, 13.0))
 
-    pages_info: list[dict[str, Any]] = []
-    for _attempt in range(3):
-        pages_info = []
-        fits: list[float] = []
+    def _run(
+        size_value: float, target_dir: Path
+    ) -> tuple[list[dict[str, Any]], float, int, int]:
+        """渲染全篇，返回 (页信息, 最小正文字号, 溢出块数, 中文重叠对数)。"""
+        info: list[dict[str, Any]] = []
+        smallest = size_value
+        overflow_total = 0
+        overlap_total = 0
         for index in range(page_count):
-            page_pdf = out / f"p{index + 1}.pdf"
+            page_pdf = target_dir / f"p{index + 1}.pdf"
             digest = _page_hash(
                 blocks,
                 index,
                 lang=lang,
-                size=size,
+                size=size_value,
                 font_path=font_path,
                 heading_font_path=heading_font_path,
             )
             cached = cached_pages.get(str(index + 1)) or {}
             if (
-                cached.get("hash") == digest
-                and abs(float(cached.get("size", -1)) - size) < 0.001
+                target_dir == out
+                and cached.get("hash") == digest
+                and abs(float(cached.get("size", -1)) - size_value) < 0.001
                 and page_pdf.is_file()
                 and cached.get("detail")
             ):
-                pages_info.append(
+                cached_detail = cached["detail"]
+                overflow_total += len(cached_detail.get("overflow") or [])
+                overlap_total += int(cached_detail.get("overlap") or 0)
+                info.append(
                     {
                         "page": index + 1,
                         "hash": digest,
-                        "size": size,
+                        "size": size_value,
                         "reused": True,
-                        "detail": cached["detail"],
+                        "detail": cached_detail,
                     }
                 )
                 continue
@@ -1483,40 +1708,77 @@ def build_translated_pdf(
                 page_pdf,
                 font_path=font_path,
                 heading_font_path=heading_font_path,
-                body_size=size,
+                body_size=size_value,
                 line_height=line_height,
                 min_size=min_size,
                 max_size=max_size,
             )
             detail = _page_detail(page_pdf, res)
-            pages_info.append(
+            overlap_total += int(detail.get("overlap") or 0)
+            for layout in res.layouts:
+                if layout.kind in ("heading", "title"):
+                    continue
+                smallest = min(smallest, layout.font_size)
+                if layout.overflow:
+                    overflow_total += 1
+            info.append(
                 {
                     "page": index + 1,
                     "hash": digest,
-                    "size": size,
+                    "size": size_value,
                     "reused": False,
                     "detail": detail,
                 }
             )
-            fits.extend(
-                layout.font_size
-                for layout in res.layouts
-                if layout.kind not in ("heading", "title")
-            )
+        return info, smallest, overflow_total, overlap_total
 
-        need = min(fits + [size])
-        if need >= size - 0.01:
+    # 第一步沿用「块内压到最小可行字号、全篇跟着降」的收敛：即使个别块
+    # 物理上放不下，也不会因此把整篇降到最低档。
+    size = known_size or requested
+    pages_info, min_font, overflow_count, overlap_count = _run(size, out)
+    for _ in range(2):
+        if min_font >= size - 0.01 and overlap_count == 0:
             break
-        # 变化页需要更小字号：全篇统一，清空页缓存后按新字号重排。
-        size = max(6.5, round(need, 2))
+        size = max(6.5, round(min_font if min_font < size - 0.01 else size - 0.5, 2))
         cached_pages = {}
+        pages_info, min_font, overflow_count, overlap_count = _run(size, out)
 
-    totals = {"blocks": 0, "overflow": 0, "residue": 0, "cjk": 0}
+    # 第二步向上试更大档位：字号越高，同栏前块的译文越长、留给后一块的
+    # 富余越少，所以「某块被压到 8.25」不代表 9.5 不可行（实测 9.5 反而
+    # 能完整放下）。只在「没有块被压缩且溢出数不增加」时才采用。
+    for step in (
+        candidate for candidate in SIZE_STEPS if candidate > size + 0.01
+    ):
+        probe_dir = out / "_probe"
+        probe_dir.mkdir(parents=True, exist_ok=True)
+        trial_pages, trial_font, trial_overflow, trial_overlap = _run(step, probe_dir)
+        if (
+            trial_font >= step - 0.01
+            and trial_overflow <= overflow_count
+            and trial_overlap == 0
+        ):
+            for slot in trial_pages:
+                (probe_dir / f"p{slot['page']}.pdf").replace(
+                    out / f"p{slot['page']}.pdf"
+                )
+            size, pages_info, min_font, overflow_count, overlap_count = (
+                step,
+                trial_pages,
+                trial_font,
+                trial_overflow,
+                trial_overlap,
+            )
+            break
+        for leftover in probe_dir.glob("p*.pdf"):
+            leftover.unlink()
+
+    totals = {"blocks": 0, "overflow": 0, "residue": 0, "overlap": 0, "cjk": 0}
     detail = [slot["detail"] for slot in pages_info]
     for row in detail:
         totals["blocks"] += int(row.get("blocks") or 0)
         totals["overflow"] += len(row.get("overflow") or [])
         totals["residue"] += len(row.get("residue") or [])
+        totals["overlap"] += int(row.get("overlap") or 0)
         totals["cjk"] += int(row.get("cjk") or 0)
 
     merged = pymupdf.open()

@@ -1,5 +1,6 @@
 import * as pdfjsLib from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
+import { isDesktopApp } from './update'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
 
@@ -14,6 +15,102 @@ export function pdfFilename(title: string): string {
     .trim()
     .slice(0, 120)
   return `${name || 'paper'}.pdf`
+}
+
+/** File System Access API 的保存对话框（Chrome/Edge 支持，手机 WebView 不支持）。 */
+type SaveFilePickerHandle = {
+  name: string
+  createWritable: () => Promise<{
+    write: (data: Blob) => Promise<void>
+    close: () => Promise<void>
+  }>
+}
+type SaveFilePicker = (options: {
+  suggestedName?: string
+  types?: { description?: string; accept: Record<string, string[]> }[]
+}) => Promise<SaveFilePickerHandle>
+
+/** 译文 PDF 文件名：保留论文标题，追加目标语种，避免与原版同名覆盖。 */
+export function translatedPdfFilename(title: string, lang: string): string {
+  const suffix = lang && lang !== 'zh-Hans' ? `译文-${lang}` : '译文'
+  return pdfFilename(`${title} · ${suffix}`)
+}
+
+/**
+ * 下载译文 PDF：桌面走系统「另存为」后由壳直接写盘；Web 优先保存选择器，
+ * 最后才退回浏览器默认下载目录。返回 false 表示用户取消了保存。
+ */
+export async function downloadTranslatedPdf(
+  url: string,
+  title: string,
+  lang: string,
+  paperId: string,
+): Promise<boolean> {
+  const fileName = translatedPdfFilename(title, lang)
+
+  if (isDesktopApp()) {
+    const [{ save }, { invoke }] = await Promise.all([
+      import('@tauri-apps/plugin-dialog'),
+      import('@tauri-apps/api/core'),
+    ])
+    const target = await save({
+      defaultPath: fileName,
+      filters: [{ name: 'PDF 文档', extensions: ['pdf'] }],
+    })
+    if (!target) return false
+    const finalPath = /\.pdf$/i.test(target) ? target : `${target}.pdf`
+    await invoke<string>('save_translated_pdf', {
+      paperId,
+      lang,
+      path: finalPath,
+    })
+    return true
+  }
+
+  const picker = (window as unknown as { showSaveFilePicker?: SaveFilePicker })
+    .showSaveFilePicker
+  if (picker) {
+    let handle: SaveFilePickerHandle
+    try {
+      handle = await picker.call(window, {
+        suggestedName: fileName,
+        types: [{ description: 'PDF 文档', accept: { 'application/pdf': ['.pdf'] } }],
+      })
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return false
+      throw error
+    }
+    const response = await fetch(url)
+    if (!response.ok) {
+      throw new Error(
+        response.status === 404
+          ? '译文 PDF 尚未生成'
+          : `下载译文失败（HTTP ${response.status}）`,
+      )
+    }
+    const writable = await handle.createWritable()
+    await writable.write(await response.blob())
+    await writable.close()
+    return true
+  }
+
+  const response = await fetch(url)
+  if (!response.ok) {
+    throw new Error(
+      response.status === 404
+        ? '译文 PDF 尚未生成'
+        : `下载译文失败（HTTP ${response.status}）`,
+    )
+  }
+  const href = URL.createObjectURL(await response.blob())
+  const link = document.createElement('a')
+  link.href = href
+  link.download = fileName
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(href), 10_000)
+  return true
 }
 
 /** 下载原版 PDF：先取回文件本体，再按论文标题保存（服务端文件名是论文 id）。 */

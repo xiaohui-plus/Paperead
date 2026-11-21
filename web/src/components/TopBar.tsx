@@ -43,6 +43,15 @@ interface Props {
   /** 全文翻译双栏模式 */
   dualMode?: boolean
   onTranslateAll?: () => void
+  /** 双栏：是否显示左侧原文（关原文）与滚动联动 */
+  dualShowSource?: boolean
+  onToggleDualSource?: () => void
+  dualSync?: boolean
+  onToggleDualSync?: () => void
+  /** 双栏译文 PDF 下载（只在对比阅读中提供） */
+  translatedPdfReady?: boolean
+  translatedPdfUrl?: string
+  translationLang?: string
 }
 
 const MODES: { key: ViewMode; label: string }[] = [
@@ -84,10 +93,17 @@ export function TopBar({
   onToggleAutoTranslate,
   dualMode = false,
   onTranslateAll,
+  dualShowSource = true,
+  onToggleDualSource,
+  dualSync = true,
+  onToggleDualSync,
+  translatedPdfReady = false,
+  translatedPdfUrl = '',
+  translationLang = 'zh-Hans',
 }: Props) {
   const pct = total ? Math.round((translated / total) * 100) : 0
 
-  const [busy, setBusy] = useState<'print' | 'download' | null>(null)
+  const [busy, setBusy] = useState<'print' | 'download' | 'translated' | null>(null)
   const [progress, setProgress] = useState('')
   const [toast, setToast] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null)
   const toastTimer = useRef<number | null>(null)
@@ -128,6 +144,27 @@ export function TopBar({
       notify('原版 PDF 已保存')
     } catch (err) {
       notify(err instanceof Error ? err.message : 'PDF 下载失败', 'err')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /** 双栏专用：把译文 PDF 另存到用户选择的位置；取消保存不算失败。 */
+  const handleDownloadTranslated = async () => {
+    if (!translatedPdfUrl || busy) return
+    setBusy('translated')
+    try {
+      const { downloadTranslatedPdf } = await import('../lib/pdfFile')
+      const saved = await downloadTranslatedPdf(
+        translatedPdfUrl,
+        paper.title,
+        translationLang,
+        paper.paper_id,
+      )
+      if (saved) notify('译文 PDF 已保存')
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return
+      notify(err instanceof Error ? err.message : '译文 PDF 下载失败', 'err')
     } finally {
       setBusy(null)
     }
@@ -357,6 +394,46 @@ export function TopBar({
           <IconSettings />
           <i className="dot" data-on={configured} />
         </button>
+
+        {dualMode && (
+          <div className="topbar-dual-actions" role="group" aria-label="双栏阅读控制">
+            {onToggleDualSource && (
+              <button
+                type="button"
+                className="dual-source-toggle"
+                data-active={dualShowSource}
+                aria-pressed={dualShowSource}
+                title={dualShowSource ? '关闭左侧原文，译文占满' : '恢复左侧原文'}
+                onClick={onToggleDualSource}
+              >
+                {dualShowSource ? '关原文' : '开原文'}
+              </button>
+            )}
+            {onToggleDualSync && (
+              <button
+                type="button"
+                className="dual-source-toggle"
+                data-active={dualSync}
+                aria-pressed={dualSync}
+                title={dualSync ? '左右滚动联动：已开启，点击关闭' : '左右滚动联动：已关闭，点击开启'}
+                onClick={onToggleDualSync}
+              >
+                联动
+              </button>
+            )}
+            {translatedPdfReady && translatedPdfUrl && (
+              <button
+                type="button"
+                className="icon-btn topbar-translated-download"
+                title="下载译文 PDF（选择保存位置）"
+                disabled={busy !== null}
+                onClick={handleDownloadTranslated}
+              >
+                {busy === 'translated' ? <i className="spin-dot" /> : <IconDownload />}
+              </button>
+            )}
+          </div>
+        )}
 
       </div>
 

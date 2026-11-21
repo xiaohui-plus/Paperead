@@ -66,6 +66,7 @@ import { LeftPanel, PANEL_TABS, type TabKey } from './LeftPanel'
 import { MobileDock } from './MobileDock'
 import { Reader } from './Reader'
 import { DualReader } from './DualReader'
+import { TranslationSkeleton } from './TranslationSkeleton'
 import { SettingsDialog } from './SettingsDialog'
 
 // 原版 PDF 需要 pdf.js（体积不小）：只在切到 PDF 视图时才加载
@@ -164,6 +165,8 @@ export function ReaderView({ paperId, onBack }: Props) {
   )
   const [settledPage, setSettledPage] = useState(1)
   const [translating, setTranslating] = useState(false)
+  // 全文翻译刚点击、清单与任务还没落地的瞬间：骨架直接进「翻译中」而不是「未开始」
+  const [translateStarting, setTranslateStarting] = useState(false)
   // 本机副本：页图、PDF 直链，以及来源（StoryReader 导入的书没有 PDF）
   const [pageUrls, setPageUrls] = useState<Record<number, string>>({})
   const [localKind, setLocalKind] = useState<'none' | 'paper' | 'storyreader'>('none')
@@ -193,8 +196,8 @@ export function ReaderView({ paperId, onBack }: Props) {
     new URLSearchParams(window.location.search).get('full') === '1'
   const [pdfWidth, setPdfWidth] = useState(initialExpanded ? 1200 : 1000)
   const [pdfPage, setPdfPage] = useState(1)
-  const [dualJump, setDualJump] = useState<{ page: number; token: number } | null>(null)
-  const dualJumpSeq = useRef(0)
+  // 右栏译文 PDF 的起始页：只在进入双栏那一刻取一次，之后完全交给滚动联动
+  const [dualStartPage, setDualStartPage] = useState(1)
   // 默认只占右侧阅读区、保留左侧功能面板；展开后才占满整行
   const [pdfExpanded, setPdfExpanded] = useState(initialExpanded)
   // 审阅模式：在 PDF 页面右侧按位置渲染每条批注
@@ -444,6 +447,7 @@ export function ReaderView({ paperId, onBack }: Props) {
     async (job: TranslationJob, cursor = 0) => {
       const token = ++pollTokenRef.current
       fullRunning.current = true
+      setTranslateStarting(false)
       setTranslating(true)
       setDualMode(true)
       setDualCollapsed(true)
@@ -551,6 +555,20 @@ export function ReaderView({ paperId, onBack }: Props) {
     const current = paperRef.current
     if (!current || paperId === 'demo') return
     const targetLangNow = loadTargetLang()
+    const cfg = readyModel(loadModelSettings(), 'answer')
+    // 点击即进入双栏：右侧先出纸张骨架，清单与任务在后台继续准备。
+    // 已在双栏时这次点击可能是「退出」，不重复进入，避免界面闪一下。
+    if (!dualMode) {
+      if (!cfg) {
+        setSettingsKind('answer')
+        setSettingsOpen(true)
+        return
+      }
+      setDualMode(true)
+      setDualCollapsed(true)
+      setPdfMode(false)
+      setTranslateStarting(true)
+    }
     const online = await serverReachable()
 
     // 服务端清单是唯一口径：参考文献/图内文字/公式碎片不再算「还差几块」。
@@ -575,17 +593,19 @@ export function ReaderView({ paperId, onBack }: Props) {
 
     // 双栏里已经没有待译块：再点一次就是退出
     if (dualMode && !pending) {
+      setTranslateStarting(false)
       setDualMode(false)
       setDualCollapsed(false)
       return
     }
-    const cfg = readyModel(loadModelSettings(), 'answer')
     if (!cfg) {
       setSettingsKind('answer')
       setSettingsOpen(true)
       return
     }
+
     if (manifest && manifest.eligible_total === 0) {
+      setTranslateStarting(false)
       const refs = manifest.excluded?.reference ?? 0
       setTranslationNotice({
         tone: 'error',
@@ -596,6 +616,7 @@ export function ReaderView({ paperId, onBack }: Props) {
       return
     }
     if (!pending) {
+      setTranslateStarting(false)
       setDualMode(true)
       setDualCollapsed(true)
       setPdfMode(false)
@@ -609,6 +630,7 @@ export function ReaderView({ paperId, onBack }: Props) {
       const ac = new AbortController()
       fullAbortRef.current = ac
       fullRunning.current = true
+      setTranslateStarting(false)
       setTranslating(true)
       setDualMode(true)
       setDualCollapsed(true)
@@ -673,6 +695,7 @@ export function ReaderView({ paperId, onBack }: Props) {
     try {
       await probeModel(toPayload(cfg))
     } catch (e) {
+      setTranslateStarting(false)
       const msg = e instanceof Error ? e.message : String(e)
       setTranslationNotice({
         tone: 'error',
@@ -698,6 +721,7 @@ export function ReaderView({ paperId, onBack }: Props) {
       setTranslationNotice(null)
       await pollTranslationJob(job, 0)
     } catch (e) {
+      setTranslateStarting(false)
       const msg = e instanceof Error ? e.message : String(e)
       setTranslationNotice({
         tone: 'error',
@@ -757,12 +781,11 @@ export function ReaderView({ paperId, onBack }: Props) {
     if (dualMode) setTranslatedPdfVersion((v) => v + 1)
   }, [dualMode])
 
-  // 左栏翻页 → 右栏 PDF 跳到同一页
+  // 进入双栏时记下当前页作为右栏起点；之后左右只按滚动比例联动，不再按页跳转
   useEffect(() => {
-    if (!dualMode) return
-    dualJumpSeq.current += 1
-    setDualJump({ page: pdfPage, token: dualJumpSeq.current })
-  }, [dualMode, pdfPage])
+    if (dualMode) setDualStartPage(pdfPage)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dualMode])
 
   // 进入双栏前先确认译文 PDF 是否存在，避免 pdf.js 去加载 404
   const autoPdfBuildRef = useRef(false)
@@ -1784,6 +1807,13 @@ export function ReaderView({ paperId, onBack }: Props) {
   ).length
   // 分母用服务端可译清单：参考文献/图内文字不再被算成「没翻」。
   const total = translationManifest?.eligible_total ?? legacyTotal
+  // 右栏骨架阶段：翻译中 → 译文 PDF 生成中 → 还没开始
+  const skeletonPhase: 'translating' | 'building' | 'idle' =
+    translating || translateStarting
+      ? 'translating'
+      : pdfBuilding
+        ? 'building'
+        : 'idle'
 
   const outline = outlineOf(paper.blocks)
   const points = keyPoints(paper.blocks)
@@ -1821,7 +1851,7 @@ export function ReaderView({ paperId, onBack }: Props) {
         onBack={onBack}
         hasTranslation={translated > 0}
         translating={translating}
-        page={pdfMode ? pdfPage : visiblePage}
+        page={pdfMode || dualMode ? pdfPage : visiblePage}
         canShowPdf={canShowPdf}
         pdfMode={pdfMode}
         onTogglePdf={togglePdf}
@@ -1840,6 +1870,13 @@ export function ReaderView({ paperId, onBack }: Props) {
         onToggleAutoTranslate={toggleAutoTranslate}
         dualMode={dualMode}
         onTranslateAll={translateAll}
+        dualShowSource={dualShowSource}
+        onToggleDualSource={() => setDualShowSource((v) => !v)}
+        dualSync={dualSync}
+        onToggleDualSync={() => setDualSync((v) => !v)}
+        translatedPdfReady={translatedPdfReady}
+        translatedPdfUrl={translatedPdfUrl}
+        translationLang={targetLang}
       />
 
       {translationNotice && (
@@ -1962,12 +1999,14 @@ focusAnnotation={focusAnnotation}
         )}
         {dualMode ? (
           <DualReader
-            paper={paper}
-            currentPage={pdfPage}
             showSource={dualShowSource}
-            onToggleSource={() => setDualShowSource((v) => !v)}
             syncEnabled={dualSync}
-            onToggleSync={() => setDualSync((v) => !v)}
+            translationReady={translatedPdfReady}
+            progress={
+              translatedPdfReady || skeletonPhase === 'idle'
+                ? null
+                : { done: translated, total, building: skeletonPhase === 'building' }
+            }
             pdfPane={
               <Suspense
                 fallback={
@@ -2012,9 +2051,8 @@ focusAnnotation={focusAnnotation}
                     paperId={paperId}
                     pageCount={paper.page_count}
                     pageSizes={paper.page_sizes}
-                    initialPage={pdfPage}
+                    initialPage={dualStartPage}
                     width={pdfWidth}
-                    jump={dualJump}
                     onPageChange={() => undefined}
                     pageUrls={{}}
                     pdfUrl={translatedPdfUrl}
@@ -2023,11 +2061,14 @@ focusAnnotation={focusAnnotation}
                   />
                 </Suspense>
               ) : (
-                <div className="dual-pdf-empty">
-                  {pdfBuilding
-                    ? '正在生成译文 PDF…'
-                    : '译文 PDF 尚未生成。先完成全文翻译，再进入双栏即可看到页级译文。'}
-                </div>
+                <TranslationSkeleton
+                  pageCount={paper.page_count}
+                  pageSizes={paper.page_sizes}
+                  currentPage={pdfPage}
+                  phase={skeletonPhase}
+                  done={translated}
+                  total={total}
+                />
               )
             }
           />
