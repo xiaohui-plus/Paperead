@@ -10,11 +10,16 @@ import {
   FileText,
   Flower2,
   FolderPlus,
+  Globe,
   Heart,
+  Languages,
   LayoutTemplate,
   Lightbulb,
   MessageSquareText,
+  Mic,
+  AudioLines,
   Network,
+  Paperclip,
   Pin,
   PinOff,
   Settings2,
@@ -451,6 +456,8 @@ export const IconBookOpenText = lucideIcon(BookOpenText)
 export const IconLightbulb = lucideIcon(Lightbulb)
 /** 模型设置 */
 export const IconSettings2 = lucideIcon(Settings2)
+/** 全文翻译：进入双栏对照 */
+export const IconTranslateAll = lucideIcon(Languages)
 /** 需要配置模型 */
 export const IconCpu = lucideIcon(Cpu)
 /** 脉络：关系网络 */
@@ -471,6 +478,14 @@ export const IconFlower = lucideIcon(Flower2)
 export const IconCoffee = lucideIcon(Coffee)
 /** 打赏：给仓库一颗星 */
 export const IconStar = lucideIcon(Star)
+/** 问答消息框：上传附件 */
+export const IconPaperclip = lucideIcon(Paperclip)
+/** 问答消息框：联网检索 */
+export const IconGlobe = lucideIcon(Globe)
+/** 问答消息框：语音输入 */
+export const IconMic = lucideIcon(Mic)
+/** 问答消息框：正在聆听 */
+export const IconAudioLines = lucideIcon(AudioLines)
 /** 划词翻译卡片：固定在原位置（随 PDF 内容滚动） */
 export const IconPin = lucideIcon(Pin)
 /** 划词翻译卡片：取消固定 */

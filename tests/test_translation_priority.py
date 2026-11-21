@@ -38,7 +38,8 @@ def test_failed_block_can_be_requested_again(monkeypatch, tmp_path):
     calls = []
     async def translate(block, *args, **kwargs):
         calls.append(block.id)
-        if len(calls) <= 2:
+# 流式翻译现在是 3 次尝试 + 退避；让整轮三次都失败，验证下次请求能补译
+        if len(calls) <= 3:
             raise RuntimeError('temporary failure')
         return '这是一段足够长的中文译文，用于验证恢复过程。'
     monkeypatch.setattr(main, 'translate_block', translate)

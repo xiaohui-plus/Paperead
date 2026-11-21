@@ -103,6 +103,10 @@ export default function App() {
     const url = new URL(window.location.href)
     if (id) url.searchParams.set('p', id)
     else url.searchParams.delete('p')
+    // 视图模式属于「当前这篇论文」：打开新论文时不能继承上一篇的
+    // 原版 PDF / 全文翻译双栏，否则顶栏会带上上一篇的翻译图标。
+    url.searchParams.delete('view')
+    url.searchParams.delete('full')
     if (!id) url.hash = ''
     window.history.pushState({}, '', url)
     setPaperId(id)

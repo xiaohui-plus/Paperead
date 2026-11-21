@@ -217,18 +217,239 @@ async function readSSE<T>(res: Response, onEvent: (event: T) => void): Promise<v
  * 按页流式翻译：服务端每翻完一段推一条 `block` 事件，前端逐段渲染。
  * 首段通常 2–3 秒出现，不用等整页翻完。
  */
+export type TranslationBlockStatus = 'done' | 'pending' | 'failed' | 'skipped'
+
+export interface TranslationBlockState {
+  id: string
+  page: number
+  status: TranslationBlockStatus
+  /** skipped / failed 的原因码 */
+  reason?: string
+  code?: string
+  message?: string
+}
+
+export interface TranslationPageReport {
+  page: number
+  eligible: number
+  translated: number
+  failed: number
+  coverage: number
+}
+
+export interface TranslationFailure {
+  block_id: string
+  page: number
+  code: string
+  message: string
+  attempts: number
+}
+
+export interface TranslationReport {
+  paper_id: string
+  lang: string
+  parse_hash: string
+  status: 'succeeded' | 'partial' | 'failed' | 'blocked'
+  started_at: number
+  finished_at: number
+  elapsed_ms: number
+  total: number
+  translated: number
+  new_translated: number
+  failed: number
+  skipped: number
+  pending: number
+  coverage: number
+  excluded: Record<string, number>
+  failures: TranslationFailure[]
+  pages: TranslationPageReport[]
+  usage: Record<string, number>
+}
+
+/** 可译清单：前端判断 pending / 失败 / 跳过都以它为准。 */
+export interface TranslationManifest {
+  paper_id: string
+  lang: string
+  parse_hash: string
+  page_count: number
+  blocks_total: number
+  eligible_total: number
+  eligible_ids: string[]
+  translated: number
+  failed: number
+  pending: number
+  skipped: number
+  coverage: number
+  status_counts: Record<string, number>
+  excluded: Record<string, number>
+  blocks: TranslationBlockState[]
+  report?: TranslationReport | null
+}
+
 export interface TranslateEvent {
   type: 'start' | 'block' | 'done' | 'error' | 'reset' | 'highlights'
   block?: Record<string, unknown>
   page?: number
   total?: number
   translated?: number
+  /** 本次实际新翻完的块数 */
+  new?: number
+  failed?: number
+  skipped?: number
+  eligible?: number
+  coverage?: number
+  status?: string
+  /** error 事件的稳定错误码（auth / rate_limit / network…） */
+  code?: string
+  /** error 事件的原始异常摘要，仅供排查，不直接展示给用户 */
+  detail?: string
+  report?: TranslationReport
   pages?: number[] | null
   message?: string
   /** reset 事件带上新的目标语言 */
   target_lang?: string
   /** highlights 事件带上这一页自动提取的研究重点 */
   highlights?: ReadingHighlight[]
+}
+
+export type TranslationJobStatus =
+  | 'queued'
+  | 'running'
+  | 'paused'
+  | 'succeeded'
+  | 'partial'
+  | 'failed'
+  | 'cancelled'
+
+/** 服务端持久化任务：HTTP 断开后仍继续，重连时用 since 游标补块。 */
+export interface TranslationJob {
+  job_id: string
+  paper_id: string
+  lang: string
+  status: TranslationJobStatus
+  pages: number[] | null
+  total: number
+  done: number
+  failed: number
+  skipped: number
+  pending: number
+  eligible: number
+  current_page: number
+  coverage: number
+  created_at: number
+  updated_at: number
+  started_at: number
+  finished_at: number
+  error: { code: string; message: string } | null
+  report: TranslationReport | null
+  resume_available: boolean
+  concurrency: number
+  next_cursor: number
+  blocks: Record<string, unknown>[]
+}
+
+export async function startTranslationJob(
+  id: string,
+  config: LLMConfigPayload,
+  pages: number[],
+  targetLang = 'zh-Hans',
+  autoHighlights = true,
+  resumeJobId?: string,
+  blockIds?: string[],
+): Promise<TranslationJob> {
+  return jsonFetch(`/api/papers/${encodeURIComponent(id)}/translation/jobs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      config,
+      pages,
+      target_lang: targetLang,
+      auto_highlights: autoHighlights,
+      resume_job_id: resumeJobId,
+      block_ids: blockIds,
+    }),
+  })
+}
+
+export async function getTranslationJob(
+  id: string,
+  jobId: string,
+  since = 0,
+): Promise<TranslationJob> {
+  return jsonFetch(
+    `/api/papers/${encodeURIComponent(id)}/translation/jobs/${encodeURIComponent(jobId)}?since=${since}`,
+  )
+}
+
+export async function getActiveTranslationJob(
+  id: string,
+  lang = 'zh-Hans',
+): Promise<TranslationJob | null> {
+  const res = await fetch(
+    `/api/papers/${encodeURIComponent(id)}/translation/jobs/active?lang=${encodeURIComponent(lang)}`,
+  )
+  if (res.status === 404) return null
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error((data as any).detail || `HTTP ${res.status}`)
+  return data as TranslationJob
+}
+
+export async function resumeTranslationJob(
+  id: string,
+  jobId: string,
+  config: LLMConfigPayload,
+): Promise<TranslationJob> {
+  return jsonFetch(
+    `/api/papers/${encodeURIComponent(id)}/translation/jobs/${encodeURIComponent(jobId)}/resume`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config }),
+    },
+  )
+}
+
+export async function cancelTranslationJob(
+  id: string,
+  jobId: string,
+): Promise<TranslationJob> {
+  return jsonFetch(
+    `/api/papers/${encodeURIComponent(id)}/translation/jobs/${encodeURIComponent(jobId)}/cancel`,
+    { method: 'POST' },
+  )
+}
+
+export async function fetchTranslationManifest(
+  id: string,
+  lang = 'zh-Hans',
+): Promise<TranslationManifest> {
+  return jsonFetch(
+    `/api/papers/${encodeURIComponent(id)}/translation/manifest?lang=${encodeURIComponent(lang)}`,
+  )
+}
+
+export async function fetchTranslationReport(
+  id: string,
+  lang = 'zh-Hans',
+): Promise<TranslationReport | null> {
+  const res = await fetch(
+    `/api/papers/${encodeURIComponent(id)}/translation/report?lang=${encodeURIComponent(lang)}`,
+  )
+  if (res.status === 404) return null
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error((data as any).detail || `HTTP ${res.status}`)
+  return data as TranslationReport
+}
+
+/** 翻译前探活：一次最小调用，把 Key / 地址 / 网络问题在长任务前暴露出来。 */
+export async function probeModel(
+  config: LLMConfigPayload,
+): Promise<{ ok: boolean; ms: number; reply: string }> {
+  return jsonFetch('/api/ping', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ config }),
+  })
 }
 
 export async function translateStream(
@@ -626,6 +847,12 @@ export interface AskWebStatus {
   depth?: 'search' | 'deep'
   /** 实际抓取成功的正文篇数 */
   fetched?: number
+  /** 论文档案已能回答、主动未联网 */
+  skipped?: boolean
+  /** 未联网原因 */
+  reason?: string
+  /** 本次联网要补的缺口（检索目的） */
+  goal?: string
 }
 
 /** 工具卡片里的一条结果：论文段落可跳转，网页可打开外链。 */

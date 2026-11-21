@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { Paper, ViewMode } from '../types'
 import { downloadMarkdown } from '../lib/markdown'
 import { tourBus } from '../tour/tourBus'
-import { IconAutoHighlight, IconBack, IconCollapse, IconDownload, IconExpand, IconExternalLink, IconMinus, IconPdf, IconPlus, IconPrint, IconReview, IconSettings, IconSidebar, IconTranslate } from './icons'
+import { IconAutoHighlight, IconBack, IconCollapse, IconDownload, IconExpand, IconExternalLink, IconMinus, IconPdf, IconPlus, IconPrint, IconReview, IconSettings, IconSidebar, IconTranslate, IconTranslateAll } from './icons'
 
 interface Props {
   paper: Paper
@@ -40,6 +40,9 @@ interface Props {
   onToggleAutoHighlights: () => void
   autoTranslate: boolean
   onToggleAutoTranslate: () => void
+  /** 全文翻译双栏模式 */
+  dualMode?: boolean
+  onTranslateAll?: () => void
 }
 
 const MODES: { key: ViewMode; label: string }[] = [
@@ -79,6 +82,8 @@ export function TopBar({
   onToggleAutoHighlights,
   autoTranslate,
   onToggleAutoTranslate,
+  dualMode = false,
+  onTranslateAll,
 }: Props) {
   const pct = total ? Math.round((translated / total) * 100) : 0
 
@@ -186,16 +191,29 @@ export function TopBar({
         >
           <IconAutoHighlight />
         </button>
-        <button
-          className="icon-btn tool-toggle"
-          data-active={autoTranslate}
-          aria-pressed={autoTranslate}
-          title={autoTranslate ? '自动翻译：已开启，点击关闭' : '自动翻译：已关闭，点击开启'}
-          onClick={onToggleAutoTranslate}
-        >
-          <IconTranslate />
-        </button>
-        {!pdfMode && (
+        {!pdfMode && !dualMode && (
+          <button
+            className="icon-btn tool-toggle"
+            data-active={autoTranslate}
+            aria-pressed={autoTranslate}
+            title={autoTranslate ? '自动翻译：已开启，点击关闭' : '自动翻译：已关闭，点击开启'}
+            onClick={onToggleAutoTranslate}
+          >
+            <IconTranslate />
+          </button>
+        )}
+        {canShowPdf && onTranslateAll && (pdfMode || dualMode) && (
+          <button
+            className="icon-btn tool-toggle"
+            data-active={dualMode}
+            aria-pressed={dualMode}
+            title={dualMode ? '退出全文翻译双栏' : '翻译全文：左原文 / 右译文双栏对照'}
+            onClick={onTranslateAll}
+          >
+            <IconTranslateAll />
+          </button>
+        )}
+        {!pdfMode && !dualMode && (
           <div className="segmented" data-tour="reader-mode" role="tablist" aria-label="阅读模式">
             {MODES.map((m) => (
               <button

@@ -1,5 +1,14 @@
 /** 版本更新检查：一天最多自动检查一次，手动检查不受限制。 */
 
+import webPackage from '../../package.json'
+
+/**
+ * 前端构建自带的版本号。
+ * 网页端（没有 Tauri、后端也没起）时用它兜底，避免设置页显示上次检查缓存里的旧版本。
+ */
+export const BUNDLED_VERSION =
+  typeof webPackage?.version === 'string' ? webPackage.version : ''
+
 export interface UpdateInfo {
   current: string
   latest: string
@@ -70,8 +79,10 @@ export function loadUpdateCache(): UpdateCache | null {
 }
 
 /**
- * 当前安装的版本号：桌面端取 Tauri 应用版本（与安装包一致），
- * 网页端回退到后端版本。更新检查失败时界面仍可显示真实版本。
+ * 当前版本号：
+ * - 桌面端取 Tauri 应用版本（与安装包一致）；
+ * - 网页端取后端 /api/health（与 sidecar 一致）；
+ * - 后端不可达时回退到前端构建版本，绝不拿上次检查缓存里的旧版本顶替。
  */
 export async function getCurrentVersion(): Promise<string> {
   const invoke = tauriInvoke()
@@ -84,13 +95,15 @@ export async function getCurrentVersion(): Promise<string> {
     }
   }
   try {
-    const res = await fetch('/api/health')
+    const res = await fetch('/api/health', {
+      signal: AbortSignal.timeout(1500),
+    })
     const data = await res.json().catch(() => ({}))
     if (res.ok && data?.version) return String(data.version)
   } catch {
-    /* 离线时保持空 */
+    /* 后端没起/离线：用前端构建版本兜底 */
   }
-  return ''
+  return BUNDLED_VERSION
 }
 
 interface AndroidUpdatePayload {

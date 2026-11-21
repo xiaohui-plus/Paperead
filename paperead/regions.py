@@ -207,13 +207,17 @@ def _is_body_like(ln: LineLike, body_size: float) -> bool:
 
     这是图区扩张的边界。不能用「短就是图内标注」的逆命题——图内说明性
     标注本身就可能很长，只有「长 + 正文字号」才算正文。
+
+    注意：这里不能把「写满栏宽但不足 220 字」也算正文。图区生长阶段
+    对正文行很敏感，把重复正文行整体判成正文会让图区被过度收缩（实测
+    流程图测试因此漏图）；单行定义/假设段的保护放在建块与图区块删除层。
     """
     text = ln.text.strip()
-    if len(text) < 220:
-        return False
     if ln.math:
         return False
-    return body_size <= 0 or ln.size >= body_size * 0.95
+    if body_size > 0 and ln.size < body_size * 0.95:
+        return False
+    return len(text) >= 220
 
 
 def trim_off_body(

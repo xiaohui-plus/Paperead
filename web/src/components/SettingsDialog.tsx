@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  BUNDLED_VERSION,
   canInstallInApp,
   checkUpdate,
   formatCheckTime,
@@ -18,8 +19,10 @@ import {
   isModelReady,
   KIND_HINT,
   KIND_LABEL,
+  linkVisionToAnswer,
   loadModelSettings,
   maskKey,
+  modelSupportsVision,
   newModelId,
   normalizeBaseUrl,
   presetById,
@@ -27,7 +30,9 @@ import {
   presetsFor,
   PRESETS,
   providerName,
+  readyModel,
   saveModelSettings,
+  syncVisionConfig,
   toPayload,
   type ModelKind,
   type ModelProfile,
@@ -294,9 +299,7 @@ export function SettingsDialog({
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(
     () => loadUpdateCache()?.data ?? null,
   )
-  const [currentVersion, setCurrentVersion] = useState(
-    () => loadUpdateCache()?.data.current ?? '',
-  )
+  const [currentVersion, setCurrentVersion] = useState(BUNDLED_VERSION)
   const [updateCheckedAt, setUpdateCheckedAt] = useState(
     () => loadUpdateCache()?.checkedAt ?? 0,
   )
@@ -412,6 +415,18 @@ export function SettingsDialog({
     }
   }, [open, runUpdateCheck])
 
+  // 存量配置补同步：已经配好回答模型的用户，打开设置时也把「支持识图」的
+  // 回答模型补进识图列表。只补缺失项，不覆盖用户已选的识图模型。
+  useEffect(() => {
+    if (!open) return
+    const answer = readyModel(settings, 'answer')
+    if (!answer) return
+    const next = linkVisionToAnswer(settings, answer)
+    if (next !== settings) persist(next)
+    // persist 后 settings 会更新一次，linkVisionToAnswer 幂等返回同一引用后停止
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, settings])
+
   const installUpdate = async () => {
     setInstalling(true)
     setInstallError('')
@@ -488,6 +503,8 @@ export function SettingsDialog({
     saveModelSettings(next)
     setSettings(next)
     onSaved?.(next)
+    // 识图配置可能随回答模型一起变了：立即推给本地服务，解析新论文时马上生效
+    void syncVisionConfig()
     if (next.models.some((model) => model.kind === 'answer' && isModelReady(model))) {
       tourBus.emit('settings:saved')
     }
@@ -565,6 +582,7 @@ export function SettingsDialog({
   }
 
   const draftReady = editor ? isModelReady(draftProfile(editor)) : false
+  const draftVision = editor ? modelSupportsVision(draftProfile(editor)) : false
 
   const saveEditor = () => {
     if (!editor) return
@@ -681,11 +699,19 @@ export function SettingsDialog({
       }
     }
 
-    persist({
+    const next: ModelSettings = {
       version: 2,
       models,
       active: { ...settings.active, [editor.kind]: id },
-    })
+    }
+    // 回答模型如果自带识图能力，保存时同步一份到识图角色；
+    // 用户已配过识图模型时只把它列进列表，不改当前选择。
+    const saved = models.find((m) => m.id === id)
+    persist(
+      editor.kind === 'answer' && saved
+        ? linkVisionToAnswer(next, saved)
+        : next,
+    )
     // 「保存并使用」是完成动作：保存成功就退出设置，不把用户留在弹窗里。
     // 需要再配另一类模型时，从顶栏齿轮重新打开即可。
     closeEditor()
@@ -1079,6 +1105,13 @@ export function SettingsDialog({
                 </div>
               )}
 
+              {editor.kind === 'answer' && draftVision && (
+                <p className="hint">
+                  这个回答模型也支持识图：保存后会同步到「识图模型」。如果你已经配置过识图模型，
+                  当前选择不会被改变，这条配置仍会出现在识图列表里供你切换。
+                </p>
+              )}
+
               <TestBox test={test} />
             </div>
           ) : (
@@ -1244,6 +1277,9 @@ export function SettingsDialog({
                             <span className="model-info">
                               <b>
                                 {model.label}
+                                {model.linkedFrom === 'answer' && (
+                                  <em className="model-synced">随回答模型同步</em>
+                                )}
                                 {!isModelReady(model) && (
                                   <em className="model-bad">缺 Key</em>
                                 )}

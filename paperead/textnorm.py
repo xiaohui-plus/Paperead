@@ -120,3 +120,16 @@ def squeeze_cjk_spaces(text: str) -> tuple[str, list[int]]:
             out.append(ch)
     mapping[len(text)] = len(out)
     return "".join(out), mapping
+
+# 模型偶尔会把无法转写的公式/符号写成「□」(U+25A1)，编码转换失败还会留下
+# U+FFFD。这两类字符在字体里没有字形，前端/译文 PDF 都会显示成方框。
+# 私用区（U+E000–U+F8FF）不在这里删：行内公式要靠 `source` 里的私用区字符
+# 在译文里定位并换成裁图，删了会让公式整段落空。
+_UNRENDERABLE_RE = re.compile("[\ufffd\u25a1]")
+
+
+def strip_unrenderable(text: str) -> str:
+    """删掉没有字形的替换符/方框占位，保留私用区字符供行内公式匹配。"""
+    if not text:
+        return text
+    return _UNRENDERABLE_RE.sub("", text)

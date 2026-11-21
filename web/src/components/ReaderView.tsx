@@ -18,14 +18,23 @@ import {
   addAnnotation,
   deleteAnnotation,
   extractHighlights,
+  fetchTranslationManifest,
+  getActiveTranslationJob,
+  getTranslationJob,
   listAnnotations,
   listHighlights,
+  probeModel,
   recognizePaperFormulas,
+  resumeTranslationJob,
   saveProgress,
+  startTranslationJob,
   translateStream,
   updateAnnotation,
   type Annotation,
   type ReadingHighlight,
+  type TranslationJob,
+  type TranslationManifest,
+  type TranslationReport,
 } from '../lib/library'
 import { mediaUrl } from '../lib/mobile'
 import { canRunLocally, serverReachable } from '../lib/connectivity'
@@ -56,6 +65,7 @@ import { IconBack } from './icons'
 import { LeftPanel, PANEL_TABS, type TabKey } from './LeftPanel'
 import { MobileDock } from './MobileDock'
 import { Reader } from './Reader'
+import { DualReader } from './DualReader'
 import { SettingsDialog } from './SettingsDialog'
 
 // 原版 PDF 需要 pdf.js（体积不小）：只在切到 PDF 视图时才加载
@@ -138,6 +148,20 @@ export function ReaderView({ paperId, onBack }: Props) {
   const [visibleBlocks, setVisibleBlocks] = useState<string[]>([])
   const [translationRetry, setTranslationRetry] = useState(0)
   const [translationFailures, setTranslationFailures] = useState<Record<string, number>>({})
+  // 可译清单与验收报告：全文翻译的 pending / 失败 / 覆盖率都以服务端为准
+  const [translationManifest, setTranslationManifest] = useState<TranslationManifest | null>(null)
+  const [translationNotice, setTranslationNotice] = useState<{
+    tone: 'info' | 'warn' | 'error'
+    text: string
+    action?: 'retry' | 'settings' | 'resume'
+  } | null>(null)
+  const manifestStatus = useMemo(
+    () =>
+      new Map(
+        (translationManifest?.blocks ?? []).map((row) => [row.id, row.status] as const),
+      ),
+    [translationManifest],
+  )
   const [settledPage, setSettledPage] = useState(1)
   const [translating, setTranslating] = useState(false)
   // 本机副本：页图、PDF 直链，以及来源（StoryReader 导入的书没有 PDF）
@@ -152,11 +176,25 @@ export function ReaderView({ paperId, onBack }: Props) {
       paperId !== 'demo' &&
       new URLSearchParams(window.location.search).get('view') === 'pdf',
   )
+  // 全文翻译双栏：左原 PDF、右按块流式译文；与 pdfMode 互斥
+  const [dualMode, setDualMode] = useState(
+    () =>
+      paperId !== 'demo' &&
+      new URLSearchParams(window.location.search).get('view') === 'dual',
+  )
+  // 双栏模式临时折叠阅读助手：只影响本次模式，不写入用户偏好
+  const [dualCollapsed, setDualCollapsed] = useState(
+    () =>
+      paperId !== 'demo' &&
+      new URLSearchParams(window.location.search).get('view') === 'dual',
+  )
   // 原版 PDF 的显示宽度与当前页码；页码跟着 PDF 滚动更新，顶栏显示 P{n}
   const initialExpanded =
     new URLSearchParams(window.location.search).get('full') === '1'
   const [pdfWidth, setPdfWidth] = useState(initialExpanded ? 1200 : 1000)
   const [pdfPage, setPdfPage] = useState(1)
+  const [dualJump, setDualJump] = useState<{ page: number; token: number } | null>(null)
+  const dualJumpSeq = useRef(0)
   // 默认只占右侧阅读区、保留左侧功能面板；展开后才占满整行
   const [pdfExpanded, setPdfExpanded] = useState(initialExpanded)
   // 审阅模式：在 PDF 页面右侧按位置渲染每条批注
@@ -193,6 +231,17 @@ export function ReaderView({ paperId, onBack }: Props) {
   const [autoTranslate, setAutoTranslate] = useState(loadAutoTranslate)
   // 当前目标译文语种：与原文语种一致时默认不自动翻译
   const [targetLang, setTargetLang] = useState(loadTargetLang)
+  const [translatedPdfReady, setTranslatedPdfReady] = useState(false)
+  const [translatedPdfVersion, setTranslatedPdfVersion] = useState(0)
+  const [pdfBuilding, setPdfBuilding] = useState(false)
+  // 双栏：左原文栏默认显示、滚动默认联动；关掉原文后译文占满
+  const [dualShowSource, setDualShowSource] = useState(true)
+  const [dualSync, setDualSync] = useState(true)
+  // 译文 PDF：P2 生成的页级回填产物，右栏直接用 pdf.js 渲染它
+  const translatedPdfUrl =
+    paperId !== 'demo'
+      ? `/api/papers/${encodeURIComponent(paperId)}/translated-pdf?lang=${encodeURIComponent(targetLang)}&v=${translatedPdfVersion}`
+      : ''
   // 当前论文原文语种：中文文献打开时默认关掉自动翻译
   const [paperLang, setPaperLang] = useState<PaperLang>('unknown')
   // 示例数据没有后端，标注/进度只在真实论文上启用
@@ -207,7 +256,7 @@ export function ReaderView({ paperId, onBack }: Props) {
   )
   // 用户在窄屏手动展开过：直到窗口重新变宽前都不再自动收起
   const narrowPanelOverride = useRef(false)
-  const panelHidden = panelCollapsed || autoCollapsed
+  const panelHidden = panelCollapsed || autoCollapsed || dualCollapsed
   const [panelTab, setPanelTab] = useState<TabKey>(readInitialTab)
   // 双击正文高亮后要聚焦的批注条：at 让连续双击同一条也能重新滚动
   const [focusAnnotation, setFocusAnnotation] = useState<{
@@ -244,6 +293,11 @@ export function ReaderView({ paperId, onBack }: Props) {
   const pageById = useRef<Map<string, number>>(new Map())
   const requested = useRef<Set<number>>(new Set())
   const abortRef = useRef<AbortController | null>(null)
+  // 全文翻译与按页翻译分开中止：滚动换页只中止按页流，不能把整篇任务打断。
+  const fullAbortRef = useRef<AbortController | null>(null)
+  const fullRunning = useRef(false)
+  // 轮询 token：换论文/卸载时只让前端停止轮询，服务端任务继续跑。
+  const pollTokenRef = useRef(0)
   const inFlight = useRef(false)
   const inFlightPages = useRef<number[]>([])
   const inFlightBlocks = useRef<string[]>([])
@@ -262,6 +316,9 @@ export function ReaderView({ paperId, onBack }: Props) {
     if (!enabled) {
       abortRef.current?.abort()
       abortRef.current = null
+      fullAbortRef.current?.abort()
+      fullRunning.current = false
+      pollTokenRef.current += 1
       queued.current = null
       // 关闭后重新打开时要能重新请求；同时立刻收起「翻译中」状态，
       // 不等被 abort 的流在自己的 finally 里才复位。
@@ -292,6 +349,450 @@ export function ReaderView({ paperId, onBack }: Props) {
     applyAutoTranslate(next)
     if (paperId !== 'demo') savePaperAutoTranslate(paperId, next)
   }, [autoTranslate, applyAutoTranslate, paperId])
+
+  /** 拉取服务端可译清单；失败不打断阅读，沿用上一次结果。 */
+  const refreshTranslationManifest = useCallback(async () => {
+    if (paperId === 'demo') return null
+    try {
+      const manifest = await fetchTranslationManifest(paperId, loadTargetLang())
+      setTranslationManifest(manifest)
+      return manifest
+    } catch {
+      return null
+    }
+  }, [paperId])
+
+  useEffect(() => {
+    if (paperId === 'demo') return
+    void refreshTranslationManifest()
+  }, [paperId, targetLang, refreshTranslationManifest])
+
+  /** 重建译文 PDF；字号由后端按每篇内容自动统一，命中缓存时不重生成 */
+  const buildTranslatedPdf = useCallback(async () => {
+    if (paperId === 'demo') return
+    setPdfBuilding(true)
+    try {
+      const res = await fetch(
+        `/api/papers/${encodeURIComponent(paperId)}/translated-pdf/build?lang=${encodeURIComponent(targetLang)}`,
+        { method: 'POST' },
+      )
+      const data = (await res.json().catch(() => ({}))) as {
+        cached?: boolean
+        status?: string
+        coverage?: number
+        detail?: string
+      }
+      if (!res.ok) {
+        setTranslationNotice({
+          tone: 'error',
+          text: data.detail || `译文 PDF 生成失败（HTTP ${res.status}）`,
+        })
+        return
+      }
+      if (!data.cached) setTranslatedPdfVersion((v) => v + 1)
+      if (data.status === 'partial') {
+        const pct = Math.round((data.coverage ?? 0) * 100)
+        // 翻译流本身已经报错时，不要把「为什么失败」覆盖成覆盖率提示。
+        setTranslationNotice((prev) =>
+          prev?.tone === 'error'
+            ? prev
+            : {
+                tone: 'warn',
+                text: `译文 PDF 已生成，但正文覆盖率只有 ${pct}%，未翻部分保留原文。`,
+                action: 'retry',
+              },
+        )
+      }
+    } catch (e) {
+      setTranslationNotice({
+        tone: 'error',
+        text: e instanceof Error ? e.message : '译文 PDF 生成失败',
+      })
+    } finally {
+      setPdfBuilding(false)
+    }
+  }, [paperId, targetLang])
+
+  /** 把服务端任务返回的新块合并进 paper；轮询与重连共用。 */
+  const applyTranslationBlocks = useCallback(
+    (blocks: Record<string, unknown>[], lang: string) => {
+      if (!blocks.length) return
+      const updates = new Map(
+        blocks.map((item) => [
+          String((item as { id?: string }).id),
+          item as unknown as Block,
+        ]),
+      )
+      setPaper((prev) =>
+        prev
+          ? {
+              ...prev,
+              translation_lang: lang,
+              blocks: prev.blocks.map((b) => updates.get(b.id) ?? b),
+            }
+          : prev,
+      )
+    },
+    [],
+  )
+
+  /**
+   * 轮询服务端任务。组件卸载/切论文只停止轮询，不取消服务端任务；
+   * 重新进入论文时由 active-job 副作用自动接上。
+   */
+  const pollTranslationJob = useCallback(
+    async (job: TranslationJob, cursor = 0) => {
+      const token = ++pollTokenRef.current
+      fullRunning.current = true
+      setTranslating(true)
+      setDualMode(true)
+      setDualCollapsed(true)
+      setPdfMode(false)
+
+      let jobCursor = cursor
+      let report: TranslationReport | null = job.report ?? null
+      let terminal: TranslationJob['status'] = job.status
+      let lastError: { code: string; message: string } | null = job.error ?? null
+
+      try {
+        while (pollTokenRef.current === token) {
+          const data = await getTranslationJob(paperId, job.job_id, jobCursor)
+          if (pollTokenRef.current !== token) return
+          applyTranslationBlocks(data.blocks ?? [], data.lang)
+          jobCursor = data.next_cursor ?? jobCursor
+          terminal = data.status
+          lastError = data.error ?? null
+          report = data.report ?? report
+
+          if (terminal === 'running' || terminal === 'queued') {
+            setTranslationNotice({
+              tone: 'info',
+              text: `全文翻译中：${data.done}/${data.total}${
+                data.failed ? `，失败 ${data.failed}` : ''
+              }`,
+            })
+            await new Promise((resolve) =>
+              window.setTimeout(resolve, 1200),
+            )
+            continue
+          }
+          break
+        }
+      } catch (e) {
+        if (pollTokenRef.current === token) {
+          const msg = e instanceof Error ? e.message : String(e)
+          setTranslationNotice({
+            tone: 'error',
+            text: `翻译任务中断：${msg}`,
+            action: 'retry',
+          })
+        }
+        return
+      } finally {
+        if (pollTokenRef.current === token) {
+          fullRunning.current = false
+          setTranslating(false)
+
+          if (terminal === 'paused') {
+            setTranslationNotice({
+              tone: 'warn',
+              text: lastError?.message || '翻译任务已暂停，进度已保存。',
+              action: 'resume',
+            })
+          } else if (terminal === 'failed') {
+            setTranslationNotice({
+              tone: 'error',
+              text: `${lastError?.message || '翻译失败'}（${lastError?.code || 'unknown'}）`,
+              action:
+                lastError?.code === 'auth' || lastError?.code === 'quota'
+                  ? 'settings'
+                  : 'retry',
+            })
+          } else if (terminal === 'cancelled') {
+            setTranslationNotice({
+              tone: 'warn',
+              text: '翻译任务已取消，已译部分保留。',
+              action: 'retry',
+            })
+          } else if (report) {
+            if (report.translated === 0) {
+              setTranslationNotice({
+                tone: 'error',
+                text: `正文翻译完成 0/${report.total}，${report.failed} 块失败；已跳过生成空译文 PDF。`,
+                action: report.failed ? 'retry' : undefined,
+              })
+            } else if (report.failed > 0 || report.coverage < 1) {
+              const pct = Math.round(report.coverage * 100)
+              setTranslationNotice({
+                tone: 'warn',
+                text: `已译 ${report.translated}/${report.total}（${pct}%），${report.failed} 块失败；未翻部分保留原文。`,
+                action: 'retry',
+              })
+            } else {
+              setTranslationNotice(null)
+            }
+          }
+
+          if ((report?.translated ?? 0) > 0) void buildTranslatedPdf()
+          void refreshTranslationManifest()
+        }
+      }
+    },
+    [
+      paperId,
+      applyTranslationBlocks,
+      buildTranslatedPdf,
+      refreshTranslationManifest,
+    ],
+  )
+
+  /** 翻译全文 → 进入双栏：启动/续跑服务端任务，轮询逐块回填。 */
+  const translateAll = useCallback(async () => {
+    const current = paperRef.current
+    if (!current || paperId === 'demo') return
+    const targetLangNow = loadTargetLang()
+    const online = await serverReachable()
+
+    // 服务端清单是唯一口径：参考文献/图内文字/公式碎片不再算「还差几块」。
+    let manifest: TranslationManifest | null = null
+    if (online) {
+      try {
+        manifest = await fetchTranslationManifest(paperId, targetLangNow)
+        setTranslationManifest(manifest)
+      } catch {
+        // 清单拿不到时退回旧判断，不阻断翻译
+      }
+    }
+    const legacyPending = current.blocks.some(
+      (b) =>
+        (b.translatable || b.kind === 'caption') &&
+        b.text.trim() &&
+        !(b.translated ?? '').trim(),
+    )
+    const pending = manifest
+      ? manifest.pending > 0 || manifest.failed > 0
+      : legacyPending
+
+    // 双栏里已经没有待译块：再点一次就是退出
+    if (dualMode && !pending) {
+      setDualMode(false)
+      setDualCollapsed(false)
+      return
+    }
+    const cfg = readyModel(loadModelSettings(), 'answer')
+    if (!cfg) {
+      setSettingsKind('answer')
+      setSettingsOpen(true)
+      return
+    }
+    if (manifest && manifest.eligible_total === 0) {
+      const refs = manifest.excluded?.reference ?? 0
+      setTranslationNotice({
+        tone: 'error',
+        text: refs
+          ? `本篇有 ${refs} 条参考文献，但没有可翻译的正文块；参考文献按设计保留原文。`
+          : '本篇没有可翻译的正文块（可能是扫描版或解析未完成），不会生成译文 PDF。',
+      })
+      return
+    }
+    if (!pending) {
+      setDualMode(true)
+      setDualCollapsed(true)
+      setPdfMode(false)
+      return
+    }
+
+    // 离线：沿用本机模型通道，不进入服务端任务。
+    if (!online) {
+      abortRef.current?.abort()
+      fullAbortRef.current?.abort()
+      const ac = new AbortController()
+      fullAbortRef.current = ac
+      fullRunning.current = true
+      setTranslating(true)
+      setDualMode(true)
+      setDualCollapsed(true)
+      setPdfMode(false)
+      try {
+        await translatePagesLocal({
+          paper: current,
+          pages: Array.from({ length: current.page_count }, (_, i) => i + 1),
+          config: { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model: cfg.model },
+          targetLang: targetLangNow,
+          signal: ac.signal,
+          onPartial: (id, text) =>
+            setPaper((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    blocks: prev.blocks.map((b) =>
+                      b.id === id ? { ...b, translated: text } : b,
+                    ),
+                  }
+                : prev,
+            ),
+          onBlock: (id, text) =>
+            setPaper((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    translation_lang: targetLangNow,
+                    blocks: prev.blocks.map((b) =>
+                      b.id === id ? { ...b, translated: text } : b,
+                    ),
+                  }
+                : prev,
+            ),
+        })
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        setTranslationNotice({ tone: 'error', text: `本机翻译中断：${msg}` })
+      } finally {
+        if (fullAbortRef.current === ac) fullAbortRef.current = null
+        fullRunning.current = false
+        setTranslating(false)
+        void buildTranslatedPdf()
+      }
+      return
+    }
+
+    // 已有任务：running 直接重连；paused 点一次「翻译全文/继续」即续跑。
+    let active: TranslationJob | null = null
+    try {
+      active = await getActiveTranslationJob(paperId, targetLangNow)
+    } catch {
+      // /jobs 接口不可用时再走探活 + 新建
+    }
+    if (active?.status === 'running') {
+      setTranslationNotice(null)
+      await pollTranslationJob(active, 0)
+      return
+    }
+
+    // 长任务前先发一次最小请求：Key / 地址 / 网络问题不要等翻到一半才暴露。
+    try {
+      await probeModel(toPayload(cfg))
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setTranslationNotice({
+        tone: 'error',
+        text: `模型连接失败，已取消本次翻译：${msg}`,
+        action: 'settings',
+      })
+      setSettingsKind('answer')
+      setSettingsOpen(true)
+      return
+    }
+
+    try {
+      const job =
+        active?.status === 'paused'
+          ? await resumeTranslationJob(paperId, active.job_id, toPayload(cfg))
+          : await startTranslationJob(
+              paperId,
+              toPayload(cfg),
+              [],
+              targetLangNow,
+              autoHighlights,
+            )
+      setTranslationNotice(null)
+      await pollTranslationJob(job, 0)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setTranslationNotice({
+        tone: 'error',
+        text: `翻译任务启动失败：${msg}`,
+        action: 'retry',
+      })
+    }
+  }, [
+    dualMode,
+    paperId,
+    autoHighlights,
+    pollTranslationJob,
+  ])
+
+  // 打开论文 / 切回阅读页：有运行中的任务就自动接上；暂停则提示继续。
+  useEffect(() => {
+    if (paperId === 'demo' || !configured) return
+    let alive = true
+    void getActiveTranslationJob(paperId, targetLang)
+      .then((job) => {
+        if (!alive || !job) return
+        if (job.status === 'running') {
+          void pollTranslationJob(job, 0)
+        } else if (job.status === 'paused') {
+          setTranslationNotice({
+            tone: 'warn',
+            text: job.error?.message || '上次翻译已暂停，点击继续即可接着翻译。',
+            action: 'resume',
+          })
+        }
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [paperId, targetLang, configured, pollTranslationJob])
+
+  // 离开论文/切页时只停前端轮询，不取消服务端任务。
+  useEffect(() => {
+    return () => {
+      pollTokenRef.current += 1
+      fullRunning.current = false
+    }
+  }, [paperId])
+
+  // URL 直接打开 ?view=dual 时，自动开始整篇翻译（只触发一次）
+  const dualAutoStarted = useRef(false)
+  useEffect(() => {
+    if (!dualMode || dualAutoStarted.current) return
+    dualAutoStarted.current = true
+    // 没配模型时不要自动弹设置，避免挡住双栏；用户点「翻译全文」时再引导配置
+    if (readyModel(loadModelSettings(), 'answer')) void translateAll()
+  }, [dualMode, translateAll])
+
+  // 进入双栏时强制刷新译文 PDF 的 URL，避免浏览器复用旧缓存
+  useEffect(() => {
+    if (dualMode) setTranslatedPdfVersion((v) => v + 1)
+  }, [dualMode])
+
+  // 左栏翻页 → 右栏 PDF 跳到同一页
+  useEffect(() => {
+    if (!dualMode) return
+    dualJumpSeq.current += 1
+    setDualJump({ page: pdfPage, token: dualJumpSeq.current })
+  }, [dualMode, pdfPage])
+
+  // 进入双栏前先确认译文 PDF 是否存在，避免 pdf.js 去加载 404
+  const autoPdfBuildRef = useRef(false)
+  useEffect(() => {
+    if (!dualMode || !translatedPdfUrl) {
+      setTranslatedPdfReady(false)
+      return
+    }
+    let alive = true
+    fetch(translatedPdfUrl, { method: 'HEAD' })
+      .then((r) => {
+        if (!alive) return
+        setTranslatedPdfReady(r.ok)
+        if (r.ok || autoPdfBuildRef.current) return
+        // 已有译文但还没有译文 PDF：自动补建一次，避免每次进双栏都等
+        const hasTranslation = Boolean(
+          paperRef.current?.blocks.some((b) => (b.translated ?? '').trim()),
+        )
+        if (hasTranslation) {
+          autoPdfBuildRef.current = true
+          void buildTranslatedPdf()
+        }
+      })
+      .catch(() => {
+        if (alive) setTranslatedPdfReady(false)
+      })
+    return () => {
+      alive = false
+    }
+  }, [dualMode, translatedPdfUrl, buildTranslatedPdf])
 
   // ── 阅读助手宽度：拖动中间分隔线调整 ───────────────────
   const maxPanelWidth = () => {
@@ -715,6 +1216,10 @@ export function ReaderView({ paperId, onBack }: Props) {
     const onChanged = () => {
       requested.current.clear()
       abortRef.current?.abort()
+      // 目标语种变了：整篇任务也不能继续用旧语种写回
+      fullAbortRef.current?.abort()
+      fullRunning.current = false
+      pollTokenRef.current += 1
       const lang = loadTargetLang()
       setTargetLang(lang)
       setHighlights([])
@@ -837,6 +1342,9 @@ export function ReaderView({ paperId, onBack }: Props) {
       const current = paperRef.current
       if (!current || paperId === 'demo') return
       if (!autoTranslate) return
+      // 整篇任务持有服务端的 paper 锁，按页再起一条只会排队等锁；
+      // 这里直接让路，避免用户滚动时堆积无意义的请求。
+      if (fullRunning.current) return
       const cfg = readyModel(loadModelSettings(), 'answer')
       if (!cfg) return
       const targetLang = loadTargetLang()
@@ -857,8 +1365,10 @@ export function ReaderView({ paperId, onBack }: Props) {
           (b) =>
             b.page === pg
             && (!ids || ids.includes(b.id))
-            // 图注/表注随论文一起翻，历史论文的 caption 块也要放行
+            // 图注/表注随论文一起翻，历史论文的 caption 块也要放行；
+            // 服务端判定为 skipped（参考文献/图内文字/公式碎片）的块不再反复请求。
             && (b.translatable || b.kind === 'caption')
+            && manifestStatus.get(b.id) !== 'skipped'
             && b.text.trim(),
         )
         if (!blocks.length) return false
@@ -1017,18 +1527,23 @@ export function ReaderView({ paperId, onBack }: Props) {
         if (next) window.setTimeout(() => void ensurePages(next.pages, next.ids), 0)
       }
     },
-    [paperId, mergeHighlights, autoHighlights, autoTranslate],
+    [paperId, mergeHighlights, autoHighlights, autoTranslate, manifestStatus],
   )
 
   // 进入阅读页先翻当前页 + 下一页；滚动停稳后换页继续增量翻
   useEffect(() => {
     if (!paper) return
     const page = pdfMode ? pdfPage : settledPage
-    const eligible = paper.blocks.filter((b) => (b.translatable || b.kind === 'caption') && b.text.trim())
+    const eligible = paper.blocks.filter(
+      (b) =>
+        (b.translatable || b.kind === 'caption') &&
+        manifestStatus.get(b.id) !== 'skipped' &&
+        b.text.trim(),
+    )
     const ids = priorityBlocks(paper.blocks, visibleBlocks, pdfMode, page)
     const selected = eligible.filter((b) => ids.includes(b.id) && !b.translated)
     if (selected.length) void ensurePages([...new Set(selected.map((b) => b.page))], selected.map((b) => b.id))
-  }, [paper, settledPage, pdfMode, pdfPage, visibleBlocks, ensurePages, translationRetry])
+  }, [paper, settledPage, pdfMode, pdfPage, visibleBlocks, ensurePages, translationRetry, manifestStatus])
 
   // 滚动停稳 700ms 才算「用户停留」，快速滑动过程中不触发翻译
   useEffect(() => {
@@ -1263,10 +1778,13 @@ export function ReaderView({ paperId, onBack }: Props) {
     )
   }
 
-  const translated = paper.blocks.filter((b) => b.translated).length
-  const total = paper.blocks.filter(
+  const translated = paper.blocks.filter((b) => (b.translated ?? '').trim()).length
+  const legacyTotal = paper.blocks.filter(
     (b) => (b.translatable || b.kind === 'caption') && b.text.trim(),
   ).length
+  // 分母用服务端可译清单：参考文献/图内文字不再被算成「没翻」。
+  const total = translationManifest?.eligible_total ?? legacyTotal
+
   const outline = outlineOf(paper.blocks)
   const points = keyPoints(paper.blocks)
   const sampleImage =
@@ -1320,9 +1838,56 @@ export function ReaderView({ paperId, onBack }: Props) {
         onToggleAutoHighlights={() => saveAutoHighlights(!autoHighlights)}
         autoTranslate={autoTranslate}
         onToggleAutoTranslate={toggleAutoTranslate}
+        dualMode={dualMode}
+        onTranslateAll={translateAll}
       />
 
-      {formulaPending && !pdfMode && (
+      {translationNotice && (
+        <div
+          className={`formula-notice translation-notice is-${translationNotice.tone}`}
+          role="status"
+        >
+          <span>{translationNotice.text}</span>
+          {translationNotice.action === 'retry' && (
+            <button
+              type="button"
+              onClick={() => {
+                setTranslationNotice(null)
+                void translateAll()
+              }}
+            >
+              重试失败块
+            </button>
+          )}
+          {translationNotice.action === 'resume' && (
+            <button
+              type="button"
+              onClick={() => {
+                setTranslationNotice(null)
+                void translateAll()
+              }}
+            >
+              继续翻译
+            </button>
+          )}
+          {translationNotice.action === 'settings' && (
+            <button
+              type="button"
+              onClick={() => {
+                setSettingsKind('answer')
+                setSettingsOpen(true)
+              }}
+            >
+              去设置
+            </button>
+          )}
+          <button type="button" onClick={() => setTranslationNotice(null)}>
+            关闭
+          </button>
+        </div>
+      )}
+
+      {formulaPending && !pdfMode && !dualMode && (
         <div className="formula-notice">
           <span>
             {hasVision
@@ -1395,7 +1960,78 @@ focusAnnotation={focusAnnotation}
             />
           </>
         )}
-        {pdfMode ? (
+        {dualMode ? (
+          <DualReader
+            paper={paper}
+            currentPage={pdfPage}
+            showSource={dualShowSource}
+            onToggleSource={() => setDualShowSource((v) => !v)}
+            syncEnabled={dualSync}
+            onToggleSync={() => setDualSync((v) => !v)}
+            pdfPane={
+              <Suspense
+                fallback={
+                  <div className="pdf-view">
+                    <div className="pdf-pages">
+                      <p className="pdf-page-hint">正在准备原版 PDF…</p>
+                    </div>
+                  </div>
+                }
+              >
+                <PdfPages
+                  paperId={paperId}
+                  pageCount={paper.page_count}
+                  pageSizes={paper.page_sizes}
+                  initialPage={visiblePage}
+                  width={pdfWidth}
+                  jump={pdfJump}
+                  onPageChange={setPdfPage}
+                  pageUrls={pageUrls}
+                  pdfUrl={pdfHref}
+                  annotations={annotations}
+                  annotationActions={annotationActions}
+                  onOpenAnnotation={openAnnotation}
+                  onAskQuote={addQuote}
+                  reviewMode={false}
+                  focusAnnotation={focusAnnotation}
+                />
+              </Suspense>
+            }
+            translationPane={
+              translatedPdfReady ? (
+                <Suspense
+                  fallback={
+                    <div className="pdf-view">
+                      <div className="pdf-pages">
+                        <p className="pdf-page-hint">正在准备译文 PDF…</p>
+                      </div>
+                    </div>
+                  }
+                >
+                  <PdfPages
+                    paperId={paperId}
+                    pageCount={paper.page_count}
+                    pageSizes={paper.page_sizes}
+                    initialPage={pdfPage}
+                    width={pdfWidth}
+                    jump={dualJump}
+                    onPageChange={() => undefined}
+                    pageUrls={{}}
+                    pdfUrl={translatedPdfUrl}
+                    annotations={[]}
+                    reviewMode={false}
+                  />
+                </Suspense>
+              ) : (
+                <div className="dual-pdf-empty">
+                  {pdfBuilding
+                    ? '正在生成译文 PDF…'
+                    : '译文 PDF 尚未生成。先完成全文翻译，再进入双栏即可看到页级译文。'}
+                </div>
+              )
+            }
+          />
+        ) : pdfMode ? (
           <Suspense
             fallback={
               <div className="pdf-view">

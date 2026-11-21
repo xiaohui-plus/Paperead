@@ -179,6 +179,31 @@ function compactForMath(text: string): { norm: string; map: number[] } {
  * 但行内公式的 start/end 是相对英文原文的。这里按公式原文片段在译文里
  * 顺序查找（忽略空白差异），找到后用同一份 latex / 裁图渲染中文里的公式。
  */
+/** 私用区字符：PDF 把花体数学字母塞进 PUA，行内公式的 source 一定带着它。 */
+const ANCHOR_RE = /[\uE000-\uF8FF]/
+
+/** 公式符号后面可能紧跟的字母/数字（含希腊字母与 Unicode 数学字母）。 */
+const TRAILING_ATOM = /^[0-9A-Za-z\u0370-\u03ff\u1d400-\u1d7ff]$/u
+
+/**
+ * 宽松兜底：模型常把公式之间的 "and" 译成「和」，整段 source 就对不上了。
+ * 此时用公式里的私用区字符当锚点定位，并把紧随其后的字母/数字一起吞进公式区间
+ * （`\ue238𝑠𝑡𝑟和…` 只吞到「和」为止），公式不会丢，也不会留下 `𝑠𝑡𝑟` 碎片。
+ */
+function looseRange(norm: string, from: number, raw: string): { start: number; end: number } | null {
+  const anchor = raw.match(ANCHOR_RE)?.[0]
+  if (!anchor) return null
+  const at = norm.indexOf(anchor, from)
+  if (at < 0) return null
+  let end = at + 1
+  // 数学字母（𝑠/𝑐 等）是代理对，必须按码点遍历，否则单个 code unit 匹配不上。
+  for (const ch of norm.slice(end)) {
+    if (!TRAILING_ATOM.test(ch)) break
+    end += ch.length
+  }
+  return { start: at, end }
+}
+
 export function mapInlineMathToTranslation(
   source: string,
   translated: string,
@@ -193,13 +218,15 @@ export function mapInlineMathToTranslation(
     const raw = (item.source || source.slice(item.start, item.end) || '').trim()
     const needle = compactForMath(raw).norm
     if (!needle) continue
-    const found = target.norm.indexOf(needle, from)
-    if (found < 0) continue
-    const start = target.map[found]
-    const end = target.map[found + needle.length]
+    const exact = target.norm.indexOf(needle, from)
+    const relaxed = exact < 0 ? looseRange(target.norm, from, raw) : null
+    const range = exact >= 0 ? { start: exact, end: exact + needle.length } : relaxed
+    if (!range) continue
+    const start = target.map[range.start]
+    const end = target.map[range.end]
     if (end <= start) continue
     result.push({ ...item, start, end, source: translated.slice(start, end) })
-    from = found + needle.length
+    from = range.end
   }
   return result
 }

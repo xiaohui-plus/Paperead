@@ -56,6 +56,9 @@ export function Reader({
   const prepared = useMemo(() => prepareBlocks(paper.blocks), [paper.blocks])
   const flow = prepared.filter((r) => isFlowBlock(r.block))
   const refs = paper.blocks.filter((b) => b.kind === 'reference')
+  // 文末/页底的作者简介、通讯方式与声明：与作者信息一样折叠在最后，
+  // 默认不占用正文阅读空间。
+  const tailNotes = paper.blocks.filter((b) => b.kind === 'footnote' && b.text.trim())
   const paragraphs = paper.blocks.filter((b) => b.kind === 'para').length
   const translated = paper.blocks.filter((b) => b.translated).length
   const hasTranslation = translated > 0
@@ -144,6 +147,17 @@ export function Reader({
               <p className="ref-item" key={r.id}>
                 <b>{i + 1}</b>
                 {r.text}
+              </p>
+            ))}
+          </details>
+        )}
+
+        {tailNotes.length > 0 && (
+          <details className="tail-notes">
+            <summary>作者信息与声明 · {tailNotes.length} 条（不翻译）</summary>
+            {tailNotes.map((n) => (
+              <p className="tail-note" key={n.id}>
+                {n.text}
               </p>
             ))}
           </details>

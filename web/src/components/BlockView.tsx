@@ -33,7 +33,7 @@ import { IconCheck, IconClose, IconCopy, IconPlus } from './icons'
 import { configBody, visionModel } from '../lib/settings'
 import { mapRangeToOther } from '../lib/align'
 import { mapInlineMathToTranslation } from '../lib/math'
-import { stripDotLeaders } from '../lib/text'
+import { stripDotLeaders, stripUnrenderable } from '../lib/text'
 
 interface Props {
   rb: RenderBlock
@@ -222,7 +222,9 @@ export function BlockView({
   }
 
   const copy = () => {
-    navigator.clipboard?.writeText(stripDotLeaders(b.translated || b.text)).then(() => {
+    navigator.clipboard
+      ?.writeText(stripUnrenderable(stripDotLeaders(b.translated || b.text)))
+      .then(() => {
       setCopied(true)
       window.setTimeout(() => setCopied(false), 1500)
     })
@@ -231,9 +233,10 @@ export function BlockView({
   if (b.kind === 'heading') {
     const Tag = b.level <= 1 ? 'h2' : b.level === 2 ? 'h3' : 'h4'
     const cls = b.level <= 1 ? 'h h-1' : b.level === 2 ? 'h h-2' : 'h h-3'
-    // 目录条目的点线引导符对阅读没有意义，展示前统一去掉
-    const enText = stripDotLeaders(b.text)
-    const zhText = stripDotLeaders(b.translated ?? '')
+    // 目录条目的点线引导符对阅读没有意义，展示前统一去掉；无字形字符
+    // （私用区/替换符/方框占位）直接删掉，标题里不会出现「□」。
+    const enText = stripUnrenderable(stripDotLeaders(b.text))
+    const zhText = stripUnrenderable(stripDotLeaders(b.translated ?? ''))
     if (!enText && !zhText) return null
     // 与正文一致：英文在上、中文在下
     const showEn = (mode !== 'zh' || !zhText) && Boolean(enText)
@@ -331,8 +334,9 @@ export function BlockView({
   }
 
   if (b.kind === 'keywords') {
-    const words = b.text
-      .replace(/^keywords?[:：]\s*/i, '')
+    const words = stripUnrenderable(
+      b.text.replace(/^keywords?[:：]\s*/i, ''),
+    )
       .split(/[;；,，]/)
       .map((s) => s.trim())
       .filter(Boolean)
@@ -945,7 +949,7 @@ function EquationBody({
           {block.eq_number && <span className="eq-number">({block.eq_number})</span>}
         </div>
       ) : (
-        <pre>{block.text}</pre>
+        <pre>{stripUnrenderable(block.text)}</pre>
       )}
       {attach}
     </div>
@@ -963,7 +967,9 @@ function Caption({ zh, en }: { zh?: string; en?: string }) {
   const CN_PREFIX_RE =
     /^(?:Supplementary\s+)?(?:Figure|Fig\.?|Table|Tab\.?|图|表)\s*(?:\d+(?:\.\d+)*|[IVXLCDM]+|[A-Z]\d+)\s*[:：.]?\s*/i
   const strip = (s: string) =>
-    stripDotLeaders((prefix ? s.replace(prefix, '') : s).replace(CN_PREFIX_RE, ''))
+    stripUnrenderable(
+      stripDotLeaders((prefix ? s.replace(prefix, '') : s).replace(CN_PREFIX_RE, '')),
+    )
   return (
     <figcaption className="caption">
       {zh ? (

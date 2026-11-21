@@ -1,6 +1,7 @@
 import katex from 'katex'
 import type { ReactNode } from 'react'
 import { splitMath } from '../lib/math'
+import { stripUnrenderable } from '../lib/text'
 
 interface Props {
   text: string
@@ -14,7 +15,7 @@ interface Props {
  * display 公式在段落内以 block 呈现。
  */
 export function MathText({ text, renderText, className }: Props) {
-  const parts = splitMath(text)
+  const parts = splitMath(stripUnrenderable(text))
   if (parts.length === 0) return null
 
   return (

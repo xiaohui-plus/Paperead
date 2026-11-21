@@ -22,7 +22,7 @@ import katex from 'katex'
 import { mediaUrl } from '../lib/mobile'
 import { lastAnnotationColor, rememberAnnotationColor } from '../lib/annotationPrefs'
 import { CITE_RE, hasCitation } from '../lib/citationMark'
-import { stripDotLeaders } from '../lib/text'
+import { blankUnrenderable, stripDotLeaders, stripUnrenderable } from '../lib/text'
 import { normalizeMath } from '../lib/math'
 import { translateText } from '../lib/library'
 import { readyModel, loadModelSettings, toPayload } from '../lib/settings'
@@ -189,10 +189,23 @@ function buildSpans(
 
 /** 正文行内公式：优先 KaTeX，规则无法重建时显示解析器裁的小图。 */
 function InlineMathNode({ item }: { item: InlineMath }) {
-  if (item.image_path) {
-    return <img className="inline-math-img" src={mediaUrl(item.image_path)} alt="" />
+  // 裁图缺失/404 时不能留破图或方框：退回公式原文（清洗掉无字形字符）。
+  const [imgFailed, setImgFailed] = useState(false)
+  const sourceText = stripUnrenderable(item.source ?? '')
+  if (item.image_path && !imgFailed) {
+    return (
+      <img
+        className="inline-math-img"
+        src={mediaUrl(item.image_path)}
+        alt={sourceText}
+        loading="lazy"
+        onError={() => setImgFailed(true)}
+      />
+    )
   }
-  if (!item.latex) return null
+  if (!item.latex) {
+    return sourceText ? <span className="inline-math">{sourceText}</span> : null
+  }
   return (
     <span
       className="inline-math"
@@ -239,9 +252,34 @@ export function RichText({
 }: RichProps) {
   // 历史 blocks.json 的目录条目里残留点线引导符；行内公式按字符偏移渲染，
   // 只有没有公式时才能安全裁剪文本。
-  const text =
-    source === 'zh' || inlineMath.length === 0 ? stripDotLeaders(rawText) : rawText
-  const formulas = inlineMath
+  // 私用区/替换符/方框占位没有字形（前端画成「□」），统一换成等长空格：
+  // 既不再出现方框，又不会改动标注与公式的字符偏移。
+  const text = blankUnrenderable(
+    source === 'zh' || inlineMath.length === 0 ? stripDotLeaders(rawText) : rawText,
+  )
+  // 后端 inline_math 的 start/end 按 Unicode 码点计数；JS 的 slice 按
+  // UTF-16 code unit 计数。𝐡/𝐮/𝑘/𝑙 这类数学字母是 surrogate pair（占 2 个
+  // unit），不转换会把公式插进 respectively / concatenation 中间。
+  // 译文侧（zh）的区间由 zhInlineMath 用 JS indexOf 生成，已是 UTF-16，不再转。
+  const toUtf16 = (cp: number) => {
+    let units = 0
+    let points = 0
+    for (const ch of rawText) {
+      if (points >= cp) break
+      units += ch.length
+      points += 1
+    }
+    return units
+  }
+  const normalizedInlineMath =
+    source === 'en'
+      ? inlineMath.map((m) => ({
+          ...m,
+          start: toUtf16(m.start),
+          end: toUtf16(m.end),
+        }))
+      : inlineMath
+  const formulas = normalizedInlineMath
     .filter((m) => (m.latex || m.image_path) && m.start >= 0 && m.end > m.start)
     .sort((a, b) => a.start - b.start)
   const spans = buildSpans(text, source, annotations, highlights, terms).filter(
@@ -846,7 +884,7 @@ export function SelectionToolbar({
 
   return (
     <>
-      {!pinned && (
+      {(
       <div
         ref={toolbarRef}
         className={`hl-toolbar${dragging ? ' is-dragging' : ''}`}

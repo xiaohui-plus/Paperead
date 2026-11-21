@@ -27,7 +27,7 @@ import threading
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
 
@@ -61,6 +61,7 @@ from paperead.formula import (
 from paperead.highlights import CATEGORIES as HIGHLIGHT_CATEGORIES
 from paperead.highlights import extract_highlights
 from paperead.layout import Block, parse_pdf
+from paperead.pdf_export import AUTO_BODY_SIZE, PDF_ALGO_VER, build_translated_pdf
 from paperead.llm import LLMConfig, OpenAICompatBackend
 from paperead.tutor import build_guide
 from paperead.tutor.guide import GUIDE_VERSION
@@ -88,6 +89,29 @@ from paperead.translate import (
     translate_block,
     translate_paper,
     translate_text,
+)
+from paperead.translation_task import (
+    ACTIVE_STATUSES,
+    FATAL_CODES,
+    AdaptiveLimiter,
+    FatalTranslationError,
+    iter_job_paths,
+    new_job,
+    public_job,
+    published_ids,
+    read_job as read_translation_job,
+    retry_delay,
+    split_text,
+    write_job as write_translation_job,
+)
+from paperead.translation_manifest import (
+    build_manifest,
+    build_report,
+    classify_error,
+    coverage_guard,
+    read_report,
+    report_path,
+    write_report,
 )
 from server.ext_api import build_router as build_ext_router
 from server.plugin_auth import PluginRegistry, is_extension_origin
@@ -152,6 +176,22 @@ _update_cache: dict = {"checked_at": 0.0, "payload": None}
 store = LibraryStore(DATA_DIR)
 research_store = ResearchStore(DATA_DIR / "research")
 onboarding_store = OnboardingStore(DATA_DIR)
+# 启动时恢复「上次中断的解析」的强引用，避免任务被 GC 提前回收
+_parse_recovery_tasks: set[asyncio.Task] = set()
+
+# 全文翻译任务：生命周期独立于 HTTP 连接；进程重启后从文件恢复为 paused。
+_JOB_CACHE: dict[str, dict] = {}
+_JOB_TASKS: dict[str, asyncio.Task] = {}
+_MODEL_LIMITER: AdaptiveLimiter | None = None
+
+
+def _model_limiter() -> AdaptiveLimiter:
+    global _MODEL_LIMITER
+    if _MODEL_LIMITER is None:
+        initial = int(env("PAPEREAD_MODEL_CONCURRENCY", "8"))
+        maximum = int(env("PAPEREAD_MODEL_CONCURRENCY_MAX", "12"))
+        _MODEL_LIMITER = AdaptiveLimiter(initial, max_limit=maximum)
+    return _MODEL_LIMITER
 
 
 def _has_user_data() -> bool:
@@ -191,6 +231,24 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 research_store.update_session(str(session["id"]), status="idle")
     except Exception as exc:
         log.warning("恢复研究会话状态失败：%s", exc)
+    # 解析任务只存在内存里：进程重启后，卡在 parsing 且没有产物的论文
+    # 会永久不可译。这里在启动时重新入队，长文档中断后能自愈。
+    try:
+        for row in store.list(include_project=True):
+            if row.get("status") != "parsing":
+                continue
+            if store.read_blocks(str(row["id"])):
+                continue
+            task = asyncio.create_task(_parse_task(str(row["id"])))
+            _parse_recovery_tasks.add(task)
+            task.add_done_callback(_parse_recovery_tasks.discard)
+            log.info("恢复上次中断的解析：%s", row["id"])
+    except Exception as exc:
+        log.warning("恢复解析任务失败：%s", exc)
+    try:
+        _recover_translation_jobs()
+    except Exception as exc:
+        log.warning("恢复翻译任务失败：%s", exc)
     yield
 
 
@@ -375,6 +433,20 @@ class FormulaReq(BaseModel):
 
 class PingReq(BaseModel):
     config: LLMConfigIn
+
+class TranslationJobIn(BaseModel):
+    config: LLMConfigIn
+    pages: list[int] | None = None
+    block_ids: list[str] | None = None
+    target_lang: str = "zh-Hans"
+    auto_highlights: bool = True
+    resume_job_id: str | None = None
+
+
+class TranslationJobResumeIn(BaseModel):
+    config: LLMConfigIn
+
+
 
 
 class ImportReq(BaseModel):
@@ -1181,6 +1253,362 @@ async def paper_file(paper_id: str) -> FileResponse:
     if not path:
         raise HTTPException(status_code=404, detail="论文不存在")
     return FileResponse(path, media_type="application/pdf", filename=f"{paper_id}.pdf")
+
+
+def _translated_pdf_path(paper_id: str, lang: str):
+    return DATA_DIR / "papers" / f"{paper_id}_translated" / lang / "translated.pdf"
+
+
+@app.get("/api/papers/{paper_id}/translation/manifest")
+async def translation_manifest(paper_id: str, lang: str = "zh-Hans") -> dict:
+    """可译清单：前端用它判断「还差几块」，不再自己推算 pending。"""
+    if not store.get(paper_id):
+        raise HTTPException(status_code=404, detail="论文不存在")
+    blocks = store.read_blocks(paper_id)
+    if blocks is None:
+        raise HTTPException(status_code=409, detail="还在解析中，请稍后再试")
+    target = _norm_lang(lang)
+    report = read_report(DATA_DIR, paper_id, target)
+    manifest = build_manifest(blocks, paper_id, target, report=report)
+    manifest["report"] = report
+    return manifest
+
+
+@app.get("/api/papers/{paper_id}/translation/report")
+async def translation_report(paper_id: str, lang: str = "zh-Hans") -> dict:
+    """最近一次翻译任务的验收报告（覆盖率、失败清单、分页统计）。"""
+    if not store.get(paper_id):
+        raise HTTPException(status_code=404, detail="论文不存在")
+    target = _norm_lang(lang)
+    report = read_report(DATA_DIR, paper_id, target)
+    if report is None:
+        raise HTTPException(status_code=404, detail="还没有翻译报告")
+    return report
+
+
+def _translated_pdf_gate(paper_id: str, lang: str) -> tuple[bool, str, str, Path]:
+    """译文 PDF 是否可交付：文件存在、覆盖率 > 0、且版式不是旧缓存。
+
+    顺序很重要：0 覆盖要先报 ``zero_coverage``（历史坏产物），再报版本过期，
+    否则用户只会看到「需要重建」而不知道根本原因是没翻译。
+    """
+    path = _translated_pdf_path(paper_id, lang)
+    if not path.is_file():
+        return False, "missing", "译文 PDF 尚未生成", path
+    blocks = store.read_blocks(paper_id)
+    if blocks is None:
+        return False, "parsing", "论文还在解析中", path
+    target = _norm_lang(lang)
+    manifest = build_manifest(
+        blocks, paper_id, target, report=read_report(DATA_DIR, paper_id, target)
+    )
+    allowed, code, message = coverage_guard(manifest)
+    if not allowed:
+        return False, code, message, path
+    # 排版算法/字号策略升级后，旧 PDF 必须重建，否则用户继续看到旧版式。
+    try:
+        meta = json.loads((path.parent / "meta.json").read_text(encoding="utf-8"))
+    except Exception:
+        meta = {}
+    if meta.get("algo_ver") != PDF_ALGO_VER or meta.get("lang") not in (None, target):
+        return False, "stale", "译文 PDF 需要按新版排版重建", path
+    return True, "", "", path
+
+
+def _remember_job(job: dict) -> dict:
+    _JOB_CACHE[str(job["job_id"])] = job
+    return job
+
+
+def _job_by_id(job_id: str) -> dict | None:
+    job = _JOB_CACHE.get(job_id)
+    if job is not None:
+        return job
+    for path in iter_job_paths(DATA_DIR):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if data.get("job_id") == job_id:
+            return _remember_job(data)
+    return None
+
+
+def _active_job(paper_id: str, lang: str) -> dict | None:
+    candidates = [
+        job
+        for job in _JOB_CACHE.values()
+        if job.get("paper_id") == paper_id
+        and job.get("lang") == lang
+        and job.get("status") in ACTIVE_STATUSES
+    ]
+    if not candidates:
+        job = read_translation_job(DATA_DIR, paper_id, lang)
+        if job is not None:
+            _remember_job(job)
+            if job.get("status") in ACTIVE_STATUSES:
+                candidates = [job]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: int(item.get("updated_at") or 0))
+
+
+def _job_blocks_since(job: dict, since: int) -> tuple[list[dict], int]:
+    ids = published_ids(job)[max(0, since) :]
+    if not ids:
+        return [], max(0, since)
+    all_blocks = store.read_blocks(str(job["paper_id"])) or []
+    by_id = {str(block.get("id")): block for block in all_blocks}
+    blocks = [by_id[bid] for bid in ids if bid in by_id]
+    return blocks, max(0, since) + len(ids)
+
+
+def _job_payload(job: dict, since: int = 0) -> dict:
+    blocks, next_cursor = _job_blocks_since(job, since)
+    payload = public_job(job, blocks=blocks, since=next_cursor)
+    payload["next_cursor"] = next_cursor
+    all_blocks = store.read_blocks(str(job["paper_id"])) or []
+    manifest = build_manifest(
+        all_blocks,
+        str(job["paper_id"]),
+        str(job.get("lang") or "zh-Hans"),
+    )
+    payload["coverage"] = manifest["coverage"]
+    payload["pending"] = manifest["pending"]
+    payload["eligible"] = manifest["eligible_total"]
+    return payload
+
+
+def _launch_translation_job(
+    job: dict,
+    cfg: LLMConfigIn,
+    auto_highlights: bool = False,
+) -> None:
+    job["status"] = "queued"
+    job["error"] = None
+    job["cancel_requested"] = False
+    job["resume_available"] = False
+    job["finished_at"] = 0
+    write_translation_job(DATA_DIR, job)
+    _remember_job(job)
+    task = asyncio.create_task(
+        _run_translation_job(
+            str(job["paper_id"]),
+            str(job["job_id"]),
+            cfg,
+            auto_highlights=auto_highlights,
+        )
+    )
+    _JOB_TASKS[str(job["job_id"])] = task
+    task.add_done_callback(lambda _t: _JOB_TASKS.pop(str(job["job_id"]), None))
+
+
+def _recover_translation_jobs() -> None:
+    """进程重启后：running/queued 任务转为 paused，进度保留，等待用户续跑。"""
+    for path in iter_job_paths(DATA_DIR):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not job.get("job_id"):
+            continue
+        if job.get("status") in {"running", "queued"}:
+            job["status"] = "paused"
+            job["resume_available"] = True
+            job["error"] = {
+                "code": "interrupted",
+                "message": "服务重启，任务已暂停；点击继续即可从断点接着翻译。",
+            }
+            write_translation_job(DATA_DIR, job)
+        _remember_job(job)
+
+
+@app.post("/api/papers/{paper_id}/translation/jobs")
+async def start_translation_job(paper_id: str, req: TranslationJobIn) -> dict:
+    """启动（或复用）整篇翻译任务；返回 job_id，后续用轮询/重连接口取进度。"""
+    if not store.get(paper_id):
+        raise HTTPException(status_code=404, detail="论文不存在")
+    blocks = store.read_blocks(paper_id)
+    if blocks is None:
+        raise HTTPException(status_code=409, detail="还在解析中，请稍后再试")
+    target = _norm_lang(req.target_lang)
+
+    if req.resume_job_id:
+        job = _job_by_id(req.resume_job_id)
+        if job is None or job.get("paper_id") != paper_id:
+            raise HTTPException(status_code=404, detail="翻译任务不存在")
+        if job.get("status") not in {"paused", "failed", "cancelled"}:
+            raise HTTPException(status_code=409, detail="任务不在可续跑状态")
+        job["failures"] = []
+        job["failed"] = 0
+        _launch_translation_job(job, req.config, req.auto_highlights)
+        return _job_payload(job)
+
+    existing = _active_job(paper_id, target)
+    if existing is not None:
+        return _job_payload(existing)
+
+    manifest = build_manifest(blocks, paper_id, target)
+    if manifest["eligible_total"] == 0:
+        raise HTTPException(status_code=409, detail="本篇没有可翻译的正文块")
+    pages = sorted({p for p in (req.pages or []) if 1 <= p <= 10_000}) or None
+    block_ids = list(req.block_ids or []) or None
+    job = new_job(paper_id, target, pages=pages, block_ids=block_ids)
+    job["skipped"] = manifest["skipped"]
+    job["total"] = manifest["pending"] + manifest["failed"]
+    if job["total"] == 0:
+        job["status"] = "succeeded"
+        job["finished_at"] = int(time.time())
+        job["report"] = read_report(DATA_DIR, paper_id, target)
+        write_translation_job(DATA_DIR, job)
+        _remember_job(job)
+        return _job_payload(job)
+    _launch_translation_job(job, req.config, req.auto_highlights)
+    return _job_payload(job)
+
+
+@app.get("/api/papers/{paper_id}/translation/jobs/active")
+async def active_translation_job(
+    paper_id: str,
+    lang: str = "zh-Hans",
+    since: int = 0,
+) -> dict:
+    if not store.get(paper_id):
+        raise HTTPException(status_code=404, detail="论文不存在")
+    job = _active_job(paper_id, _norm_lang(lang))
+    if job is None:
+        raise HTTPException(status_code=404, detail="没有进行中的翻译任务")
+    return _job_payload(job, since=since)
+
+
+@app.get("/api/papers/{paper_id}/translation/jobs/{job_id}")
+async def get_translation_job(
+    paper_id: str,
+    job_id: str,
+    since: int = 0,
+) -> dict:
+    job = _job_by_id(job_id)
+    if job is None or job.get("paper_id") != paper_id:
+        raise HTTPException(status_code=404, detail="翻译任务不存在")
+    return _job_payload(job, since=since)
+
+
+@app.post("/api/papers/{paper_id}/translation/jobs/{job_id}/resume")
+async def resume_translation_job(
+    paper_id: str,
+    job_id: str,
+    req: TranslationJobResumeIn,
+) -> dict:
+    job = _job_by_id(job_id)
+    if job is None or job.get("paper_id") != paper_id:
+        raise HTTPException(status_code=404, detail="翻译任务不存在")
+    if job.get("status") not in {"paused", "failed", "cancelled"}:
+        raise HTTPException(status_code=409, detail="任务不在可续跑状态")
+    job["failures"] = []
+    job["failed"] = 0
+    _launch_translation_job(job, req.config)
+    return _job_payload(job)
+
+
+@app.post("/api/papers/{paper_id}/translation/jobs/{job_id}/cancel")
+async def cancel_translation_job(paper_id: str, job_id: str) -> dict:
+    job = _job_by_id(job_id)
+    if job is None or job.get("paper_id") != paper_id:
+        raise HTTPException(status_code=404, detail="翻译任务不存在")
+    job["cancel_requested"] = True
+    if job.get("status") in {"queued", "paused"}:
+        job["status"] = "cancelled"
+        job["finished_at"] = int(time.time())
+        job["resume_available"] = False
+    write_translation_job(DATA_DIR, job)
+    return _job_payload(job)
+
+
+@app.head("/api/papers/{paper_id}/translated-pdf")
+async def translated_pdf_head(paper_id: str, lang: str = "zh-Hans") -> Response:
+    """前端进入双栏前先 HEAD 一下，避免 pdf.js 去加载不存在的译文 PDF。"""
+    ready, code, message, _path = _translated_pdf_gate(paper_id, lang)
+    if not ready:
+        raise HTTPException(
+            status_code=404,
+            detail=message,
+            headers={"X-Translation-Code": code},
+        )
+    return Response(status_code=204)
+
+
+@app.get("/api/papers/{paper_id}/translated-pdf")
+async def translated_pdf(paper_id: str, lang: str = "zh-Hans") -> FileResponse:
+    ready, code, message, path = _translated_pdf_gate(paper_id, lang)
+    if not ready:
+        raise HTTPException(
+            status_code=404,
+            detail=message,
+            headers={"X-Translation-Code": code},
+        )
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        filename=f"{paper_id}.{lang}.pdf",
+    )
+
+
+@app.post("/api/papers/{paper_id}/translated-pdf/build")
+async def build_translated_pdf_route(
+    paper_id: str,
+    lang: str = "zh-Hans",
+    body_size: float = AUTO_BODY_SIZE,
+) -> dict:
+    """按当前 blocks 重新生成页级译文 PDF（翻译完成后由前端调用）。"""
+    if not store.get(paper_id):
+        raise HTTPException(status_code=404, detail="论文不存在")
+    pdf = store.pdf_path(paper_id)
+    if not pdf:
+        raise HTTPException(status_code=404, detail="论文 PDF 不存在")
+    blocks = store.read_blocks(paper_id)
+    if blocks is None:
+        raise HTTPException(status_code=400, detail="论文尚未解析")
+    target = _norm_lang(lang)
+    manifest = build_manifest(
+        blocks, paper_id, target, report=read_report(DATA_DIR, paper_id, target)
+    )
+    allowed, code, message = coverage_guard(manifest)
+    if not allowed:
+        # 0 覆盖时绝不产出「看起来翻译完成、实际仍是原文」的 PDF。
+        raise HTTPException(
+            status_code=409,
+            detail=message,
+            headers={"X-Translation-Code": code},
+        )
+    out_dir = DATA_DIR / "papers" / f"{paper_id}_translated" / target
+    blocks_path = store.blocks_path(paper_id)
+    cache_key = (
+        hashlib.sha256(blocks_path.read_bytes()).hexdigest()[:16]
+        if blocks_path
+        else ""
+    )
+    result = await asyncio.to_thread(
+        build_translated_pdf,
+        pdf,
+        blocks,
+        out_dir,
+        lang=target,
+        body_size=body_size,
+        cache_key=cache_key,
+    )
+    result["coverage"] = manifest["coverage"]
+    result["status"] = (
+        "partial" if manifest["coverage"] < 1.0 or manifest["failed"] else "succeeded"
+    )
+    result["translation"] = {
+        "eligible": manifest["eligible_total"],
+        "translated": manifest["translated"],
+        "failed": manifest["failed"],
+        "pending": manifest["pending"],
+        "skipped": manifest["skipped"],
+        "excluded": manifest["excluded"],
+    }
+    return result
 
 
 @app.get("/api/papers/{paper_id}/thumb")
@@ -2170,12 +2598,11 @@ async def _prepare_dossier_events(
     req: AskReq,
     standalone: str,
     expanded: list[str],
-    web_task: asyncio.Task | None = None,
 ) -> AsyncIterator[tuple[str, object]]:
     """论文档案直供：整篇材料一次拼好，本地 BM25 只用于出处与重点段落。
 
     产出 `("tool", {...})`（档案载入 / 联网检索）与最终 `("prep", _AskPrep)`。
-    与旧检索管道的区别：不调用模型改写检索词、不让模型逐轮调工具找段落。
+    联网不是默认动作：先看档案能不能回答，确实缺信息才按缺口去搜。
     """
     tools: list[dict] = []
     paper_started = time.time()
@@ -2310,105 +2737,113 @@ async def _prepare_dossier_events(
     web_status = {"attempted": False, "engine": "", "engines": [], "count": 0}
     web_started = time.time()
     web_failed = False
-    try:
-        if req.web:
-            web_status["attempted"] = True
-            yield (
-                "tool",
-                {
-                    "type": "tool",
-                    "phase": "start",
-                    "callId": "web_search",
-                    "name": "web_search",
-                    "input": {"query": standalone, "keywords": expanded[:6]},
-                    "startedAt": web_started,
-                },
-            )
-            try:
-                base = await web_task if web_task is not None else await web_search.search(
-                    standalone, 4
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:  # noqa: BLE001
-                log.info("联网检索失败：%s", e)
-                base = []
-                web_failed = True
-            base = base or []
-            web_results.extend(base)
+    plan: qa_engine.WebPlan | None = None
 
-            insufficient = qa_engine.needs_external(standalone, top_score) or not hits
-            need_more = insufficient
-            if need_more or len(web_results) < 2:
-                zh_words = [w for w in expanded if re.search(r"[\u4e00-\u9fff]", w)]
-                en_words = [w for w in expanded if not re.search(r"[\u4e00-\u9fff]", w)]
-                extra_queries = [standalone]
-                if zh_words and zh_words[0] != standalone:
-                    extra_queries.append(" ".join(zh_words[:8]))
-                en_query = " ".join(en_words[:6])
-                extra = await web_search.search_many(
-                    extra_queries,
-                    limit=4,
-                    total_limit=5,
-                    academic=need_more or len(web_results) < 2,
-                    academic_query=en_query or " ".join(expanded[:6]) or standalone,
-                )
-                web_results = web_search.dedupe([*base, *extra])
+    # 联网前先规划：论文档案能否回答？缺什么？检索式按缺口写。
+    # 常规问题（档案已覆盖）在这里就结束，不联网、也不产生联网工具卡片。
+    if req.web:
+        plan = await qa_engine.plan_web_search(
+            standalone,
+            hits,
+            paper_title=dossier.title,
+            paper_brief="\n".join(
+                [f"章节：{t}" for t, _ in dossier.outline[:12]]
+                + [(c.display or "")[:200] for c in dossier.chunks[:6] if c.display]
+            ),
+            expanded=expanded,
+            has_quotes=bool(quote_texts),
+        )
+        if not (plan and plan.needed):
+            web_status["skipped"] = True
+            web_status["reason"] = plan.goal or "论文材料已覆盖，未联网"
 
-            web_results = web_results[:6]
-            engines = sorted({w.get("engine", "") for w in web_results if w.get("engine")})
-            web_status["count"] = len(web_results)
-            web_status["engines"] = engines
-            web_status["engine"] = engines[0] if engines else ""
-
-            web_items = [
-                {
-                    "label": f"W{i}",
-                    "title": item.get("title", ""),
-                    "url": item.get("url", ""),
-                    "snippet": (item.get("content") or "")[:120],
-                    "engine": item.get("engine", ""),
-                }
-                for i, item in enumerate(web_results, 1)
-            ]
-            web_tool = {
+    if plan and plan.needed:
+        web_status["attempted"] = True
+        web_status["goal"] = plan.goal
+        yield (
+            "tool",
+            {
                 "type": "tool",
-                "phase": "end",
+                "phase": "start",
                 "callId": "web_search",
                 "name": "web_search",
-                "status": "error" if web_failed and not web_items else "done",
-                "summary": (
-                    f"联网检索 {len(web_items)} 条" if web_items else "未获取到网络结果"
-                ),
-                "items": web_items,
-                "meta": {
-                    "elapsedMs": int((time.time() - web_started) * 1000),
-                    "count": len(web_items),
-                    "engines": engines,
+                "input": {
+                    "query": plan.queries[0] if plan.queries else "",
+                    "queries": plan.queries,
+                    "goal": plan.goal,
                 },
                 "startedAt": web_started,
-                "endedAt": time.time(),
+            },
+        )
+        try:
+            web_results = await web_search.search_many(
+                plan.queries,
+                limit=4,
+                total_limit=6,
+                academic=True,
+                academic_query=plan.academic_query,
+            )
+            if not web_results and plan.queries:
+                web_results = await web_search.search(plan.queries[0], 4)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.info("联网检索失败：%s", e)
+            web_results = []
+            web_failed = True
+
+        web_results = web_results[:6]
+        engines = sorted({w.get("engine", "") for w in web_results if w.get("engine")})
+        web_status["count"] = len(web_results)
+        web_status["engines"] = engines
+        web_status["engine"] = engines[0] if engines else ""
+
+        web_items = [
+            {
+                "label": f"W{i}",
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+                "snippet": (item.get("content") or "")[:120],
+                "engine": item.get("engine", ""),
             }
-            tools.append(web_tool)
-            yield ("tool", web_tool)
-            for i, w in enumerate(web_results, 1):
-                sources.append(
-                    {
-                        "type": "web",
-                        "label": f"W{i}",
-                        "title": w.get("title", ""),
-                        "url": w.get("url", ""),
-                        "engine": w.get("engine", ""),
-                        "snippet": (w.get("content") or "")[:90],
-                    }
-                )
-    finally:
-        if web_task is not None and not web_task.done():
-            web_task.cancel()
+            for i, item in enumerate(web_results, 1)
+        ]
+        web_tool = {
+            "type": "tool",
+            "phase": "end",
+            "callId": "web_search",
+            "name": "web_search",
+            "status": "error" if web_failed and not web_items else "done",
+            "summary": (
+                f"联网检索 {len(web_items)} 条" if web_items else "未获取到网络结果"
+            ),
+            "items": web_items,
+            "meta": {
+                "elapsedMs": int((time.time() - web_started) * 1000),
+                "count": len(web_items),
+                "engines": engines,
+                "goal": plan.goal,
+            },
+            "startedAt": web_started,
+            "endedAt": time.time(),
+        }
+        tools.append(web_tool)
+        yield ("tool", web_tool)
+        for i, w in enumerate(web_results, 1):
+            sources.append(
+                {
+                    "type": "web",
+                    "label": f"W{i}",
+                    "title": w.get("title", ""),
+                    "url": w.get("url", ""),
+                    "engine": w.get("engine", ""),
+                    "snippet": (w.get("content") or "")[:90],
+                }
+            )
 
     body_block = ""
-    # 论文档案不足（没命中、问题指向论文之外）且联网可用时，再深读几篇正文
-    insufficient = not hits or qa_engine.needs_external(standalone, top_score)
+    # 只有「规划器确认论文缺信息」时才深读正文，避免常规问题也去抓网页
+    insufficient = bool(plan and plan.needed)
     if web_results and insufficient:
         fetch_started = time.time()
         yield (
@@ -2728,11 +3163,10 @@ async def _prepare_ask(
     req: AskReq,
     standalone: str,
     expanded: list[str],
-    web_task: asyncio.Task | None = None,
 ) -> _AskPrep:
     """非流式调用：把事件流跑完，只取最终结果。"""
     async for kind, payload in _prepare_dossier_events(
-        paper_id, req, standalone, expanded, web_task
+        paper_id, req, standalone, expanded
     ):
         if kind == "prep":
             return payload  # type: ignore[return-value]
@@ -2765,7 +3199,8 @@ _TUTOR_TOOLS = [
         description=(
             "联网搜索公开网页与学术源。只返回标题、URL 和摘要；"
             "需要原理、公式、推导、细节时继续用 web_fetch 读取具体网页。"
-            "论文没有写、或需要领域外/最新知识时使用。"
+            "只在论文确实没写、或需要论文之外的最新知识时使用；"
+            "query 必须是按缺口写好的概念/术语组合，不要照抄用户原句。"
         ),
         parameters={
             "type": "object",
@@ -2818,9 +3253,11 @@ def _tutor_agent_system(paper_id: str, req: AskReq, memory: str = "") -> str:
     ]
     if req.web:
         lines += [
-            "2. 论文没写、或需要外部/最新知识时，用 web_search；",
-            "3. web_search 只给摘要；需要原理、公式、细节时用 web_fetch 读取具体网页正文；",
-            "4. 不要重复搜同一内容；信息足够就停止调用工具并直接回答；最多 6 次工具调用。",
+            "2. 先用 paper_search 判断论文能否回答；论文能答就不要再联网。",
+            "3. 只有论文确实没写、或需要论文之外的最新进展/领域知识时才用 web_search；"
+            "query 按缺口写清概念与术语，不要直接照抄用户原句；",
+            "4. web_search 只给摘要；需要原理、公式、细节时用 web_fetch 读取具体网页正文；",
+            "5. 不要重复搜同一内容；信息足够就停止调用工具并直接回答；最多 6 次工具调用。",
         ]
     else:
         lines += [
@@ -3172,25 +3609,17 @@ async def ask_paper(paper_id: str, req: AskReq) -> dict:
             return _cached_answer(user_msg, cached)
 
         recent = mem.recent_before(paper_id, user_msg["id"], 40)
-        # 联网检索与问题改写并行，几乎不额外增加等待时间
-        web_task = (
-            asyncio.create_task(web_search.search(req.question, 4)) if req.web else None
-        )
-        try:
-            standalone, expanded = await qa_engine.rewrite_and_expand(req.question, recent)
-        except BaseException:
-            if web_task is not None:
-                web_task.cancel()
-            raise
+        # 联网在档案准备阶段按需触发（先判断缺口再搜），这里不再预跑一次原问题检索
+        standalone, expanded = await qa_engine.rewrite_and_expand(req.question, recent)
         brief = mem.build_brief(paper_id, standalone, exclude_message_id=user_msg["id"])
 
-        prep = await _prepare_ask(paper_id, req, standalone, expanded, web_task)
+        prep = await _prepare_ask(paper_id, req, standalone, expanded)
         text = await qa_engine.answer(
             standalone,
             prep.context,
             brief,
             recent,
-            web_empty=req.web and not prep.used_web,
+            web_empty=bool(prep.web_status.get("attempted")) and not prep.used_web,
         )
 
         latency = round(time.time() - t0, 1)
@@ -3276,7 +3705,6 @@ async def ask_stream(paper_id: str, req: AskReq) -> StreamingResponse:
 
     async def gen():
         t0 = time.time()
-        web_task: asyncio.Task | None = None
         try:
             yield _sse({"type": "status", "stage": "retrieving", "web": req.web})
             recent = mem.recent_before(paper_id, user_msg["id"], 40)
@@ -3285,19 +3713,10 @@ async def ask_stream(paper_id: str, req: AskReq) -> StreamingResponse:
             use_agent = (
                 env("PAPEREAD_TUTOR_AGENT", "0") != "0" and llm_mod.supports_tools()
             )
-            web_task = (
-                asyncio.create_task(web_search.search(req.question, 4))
-                if req.web and not use_agent
-                else None
+            # 联网在档案准备阶段按需触发（先判断缺口再搜），不预跑原问题检索
+            standalone, expanded = await qa_engine.rewrite_and_expand(
+                req.question, recent
             )
-            try:
-                standalone, expanded = await qa_engine.rewrite_and_expand(
-                    req.question, recent
-                )
-            except BaseException:
-                if web_task is not None:
-                    web_task.cancel()
-                raise
             brief = mem.build_brief(
                 paper_id, standalone, exclude_message_id=user_msg["id"]
             )
@@ -3354,13 +3773,13 @@ async def ask_stream(paper_id: str, req: AskReq) -> StreamingResponse:
 
             prep: _AskPrep | None = None
             async for kind, payload in _prepare_dossier_events(
-                paper_id, req, standalone, expanded, web_task
+                paper_id, req, standalone, expanded
             ):
                 if kind == "tool":
                     yield _sse(payload)  # type: ignore[arg-type]
                 else:
                     prep = payload  # type: ignore[assignment]
-            web_task = None
+
             if prep is None:
                 raise RuntimeError("检索过程没有产出结果")
 
@@ -3381,7 +3800,7 @@ async def ask_stream(paper_id: str, req: AskReq) -> StreamingResponse:
                 prep.context,
                 brief,
                 recent,
-                web_empty=req.web and not prep.used_web,
+                web_empty=bool(prep.web_status.get("attempted")) and not prep.used_web,
             ):
                 if not piece:
                     continue
@@ -3413,8 +3832,7 @@ async def ask_stream(paper_id: str, req: AskReq) -> StreamingResponse:
             log.exception("流式问答失败 %s", paper_id)
             yield _sse({"type": "error", "message": str(e)[:300]})
         finally:
-            if web_task is not None and not web_task.done():
-                web_task.cancel()
+
             _release_claim(claim)
 
     background = BackgroundTask(_release_claim, claim) if claim is not None else None
@@ -3610,11 +4028,39 @@ def _reset_for_language(paper_id: str, lang: str) -> bool:
     row = store.get(paper_id) or {}
     if (row.get("translation_lang") or "zh-Hans") == lang:
         return False
+    # 切换语种：同篇其他语种的活动任务必须作废，否则它会继续把译文写回
+    # 已经被清空的 blocks。
+    for old_job in list(_JOB_CACHE.values()):
+        if old_job.get("paper_id") != paper_id:
+            continue
+        if old_job.get("lang") == lang:
+            continue
+        if old_job.get("status") not in {"running", "queued", "paused"}:
+            continue
+        old_job["cancel_requested"] = True
+        old_job["status"] = "cancelled"
+        old_job["resume_available"] = False
+        old_job["error"] = {
+            "code": "language_changed",
+            "message": "目标语言已切换，旧语种任务已取消。",
+        }
+        try:
+            write_translation_job(DATA_DIR, old_job)
+        except Exception:
+            pass
+        task = _JOB_TASKS.get(str(old_job.get("job_id")))
+        if task is not None:
+            task.cancel()
     blocks = store.read_blocks(paper_id) or []
     for block in blocks:
         block["translated"] = ""
     store.write_blocks(paper_id, blocks)
     store.update(paper_id, glossary={}, translated=0, translation_lang=lang)
+    # 旧语种的验收报告一并作废，避免新语种沿用它显示「已完成」。
+    try:
+        report_path(DATA_DIR, paper_id, lang).unlink(missing_ok=True)
+    except Exception:
+        pass
     # 旧译文对应的重点引用也失效了
     store.clear_highlights(paper_id)
     return True
@@ -3718,13 +4164,14 @@ async def _translate_pages(
     async with _lock_for(paper_id):
         _reset_for_language(paper_id, lang)
         all_blocks = store.read_blocks(paper_id) or []
+        # 可译口径统一由 manifest 提供：公式碎片、目录点线、参考文献都不再
+        # 反复进入待译队列，避免「前端说还有、服务端说 0 块」。
+        before = build_manifest(all_blocks, paper_id, lang)
+        eligible_ids = set(before["eligible_ids"])
         targets = [
             (i, b) for i, b in enumerate(all_blocks)
             if (pages is None or b.get("page") in pages)
-            # 历史数据的图注块 translatable=False，这里按 kind 放行，
-            # 否则图表栏的 captionZh 永远为空。
-            and (b.get("translatable") or b.get("kind") == "caption")
-            and (b.get("text") or "").strip()
+            and b.get("id") in eligible_ids
             and not b.get("translated")
         ]
         if not targets:
@@ -3751,7 +4198,8 @@ async def _translate_pages(
             everything = [Block(**{**b, "bbox": tuple(b["bbox"])}) for b in all_blocks]
             glossary = await build_glossary(everything, target_name=_target_name(lang))
 
-        await translate_paper(
+        started_at = time.time()
+        stats = await translate_paper(
             objs,
             glossary,
             concurrency=8,
@@ -3770,6 +4218,15 @@ async def _translate_pages(
             glossary=glossary,
             translation_lang=lang,
         )
+        after = build_manifest(all_blocks, paper_id, lang)
+        report = build_report(
+            after,
+            started_at=started_at,
+            new_translated=int(stats.get("translated") or 0),
+            extra_failed=int(stats.get("failed") or 0),
+            usage={"calls": len(targets)},
+        )
+        write_report(DATA_DIR, paper_id, lang, report)
         return [all_blocks[i] for i, _ in targets]
 
 
@@ -3805,6 +4262,12 @@ async def translate_stream(paper_id: str, req: TranslateReq) -> StreamingRespons
     key = f"{paper_id}:{','.join(map(str, pages or ['*']))}"
     if key in _translating:
         raise HTTPException(status_code=429, detail="这一页正在翻译中")
+    active_job = _active_job(paper_id, _norm_lang(req.target_lang))
+    if active_job is not None and active_job.get("status") == "running":
+        raise HTTPException(
+            status_code=409,
+            detail="整篇翻译任务进行中，完成或暂停后再按页补充翻译",
+        )
 
     backend = OpenAICompatBackend(
         LLMConfig(
@@ -3821,9 +4284,33 @@ async def translate_stream(paper_id: str, req: TranslateReq) -> StreamingRespons
     async def gen():
         _translating.add(key)
         done = 0
+        started_at = time.time()
+        failures: dict[int, dict] = {}
+        report: dict = {}
+        final_manifest: dict = {}
         all_blocks: list[dict] = []
         lang = _norm_lang(req.target_lang)
         target_name = _target_name(lang)
+
+        def snapshot(
+            force_status: str | None = None,
+            error: dict | None = None,
+        ) -> tuple[dict, dict]:
+            final = build_manifest(all_blocks, paper_id, lang)
+            built = build_report(
+                final,
+                started_at=started_at,
+                new_translated=done,
+                failures=list(failures.values()),
+                usage={"calls": done + len(failures)},
+            )
+            if force_status:
+                built["status"] = force_status
+            if error:
+                built["error"] = error
+            write_report(DATA_DIR, paper_id, lang, built)
+            return final, built
+
         try:
             async with _lock_for(paper_id):
                 if _reset_for_language(paper_id, lang):
@@ -3838,27 +4325,43 @@ async def translate_stream(paper_id: str, req: TranslateReq) -> StreamingRespons
                                 and (pages is None or b.get("page") in pages)
                                 and (b.get("translated") or "").strip()):
                             yield _sse({"type": "block", "block": b})
+
+                # 可译口径的唯一来源：参考文献/图内文字/公式碎片不再进入待译队列。
+                manifest = build_manifest(all_blocks, paper_id, lang)
+                eligible_ids = set(manifest["eligible_ids"])
                 targets = [
                     (i, b) for i, b in enumerate(all_blocks)
                     if (pages is None or b.get("page") in pages)
                     and (req.block_ids is None or b.get("id") in req.block_ids)
-                    # 历史数据的图注块 translatable=False，这里按 kind 放行，
-                    # 否则图表栏的 captionZh 永远为空。
-                    and (b.get("translatable") or b.get("kind") == "caption")
-                    and (b.get("text") or "").strip()
-                    # 流式接口直接调 translate_block，不会走 translate_paper 的
-                    # 内部过滤；目录点线/公式碎片必须在这里挡住。
-                    and _is_translatable(b.get("text") or "")
+                    and b.get("id") in eligible_ids
                     and not b.get("translated")
                 ]
                 if req.block_ids is not None:
                     rank = {block_id: i for i, block_id in enumerate(req.block_ids)}
                     targets.sort(key=lambda item: rank[item[1]["id"]])
                 if not targets:
-                    yield _sse({"type": "done", "translated": 0})
+                    final_manifest, report = snapshot()
+                    yield _sse({
+                        "type": "done",
+                        "translated": report.get("translated", 0),
+                        "new": 0,
+                        "failed": report.get("failed", 0),
+                        "skipped": report.get("skipped", 0),
+                        "total": report.get("total", 0),
+                        "coverage": report.get("coverage", 0.0),
+                        "status": report.get("status", "blocked"),
+                        "report": report,
+                    })
                     return
 
-                yield _sse({"type": "start", "pages": pages, "total": len(targets)})
+                yield _sse({
+                    "type": "start",
+                    "pages": pages,
+                    "total": len(targets),
+                    "eligible": manifest["eligible_total"],
+                    "translated": manifest["translated"],
+                    "skipped": manifest["skipped"],
+                })
 
                 objs = [Block(**{**b, "bbox": tuple(b["bbox"])}) for _, b in targets]
                 glossary = (store.get(paper_id) or {}).get("glossary") or {}
@@ -3871,25 +4374,42 @@ async def translate_stream(paper_id: str, req: TranslateReq) -> StreamingRespons
                     )
                     store.update(paper_id, glossary=glossary)
 
-                sem = asyncio.Semaphore(8)
+                limiter = _model_limiter()
 
                 async def one(i: int, b: Block) -> tuple[int, Block]:
-                    async with sem:
-                        prev_tail = objs[i - 1].translated[-120:] if i > 0 else ""
-                        next_head = objs[i + 1].text[:120] if i + 1 < len(objs) else ""
-                        for attempt in range(2):
-                            try:
+                    prev_tail = objs[i - 1].translated[-120:] if i > 0 else ""
+                    next_head = objs[i + 1].text[:120] if i + 1 < len(objs) else ""
+                    last_exc: BaseException | None = None
+                    for attempt in range(3):
+                        try:
+                            # 退避等待不占并发槽位，限流时才能尽快恢复吞吐。
+                            async with limiter:
                                 tex = await translate_block(
                                     b, glossary, prev_tail, next_head,
                                     temperature=0.25 if attempt == 0 else 0.15,
                                     target_name=target_name,
                                 )
-                                if quality_ok(b.text, tex, lang=lang) or attempt == 1:
-                                    b.translated = tex
-                                    return i, b
-                            except Exception as e:
-                                log.warning("单段翻译失败：%s", e)
-                        return i, b
+                            if quality_ok(b.text, tex, lang=lang) or attempt == 2:
+                                b.translated = tex
+                                limiter.on_success()
+                                return i, b
+                        except Exception as e:
+                            last_exc = e
+                            code, message = classify_error(e)
+                            limiter.on_error(code)
+                            log.warning("单段翻译失败（%s）：%s", code, e)
+                            if attempt < 2:
+                                await asyncio.sleep(retry_delay(attempt, code))
+                    if not b.translated and last_exc is not None:
+                        code, message = classify_error(last_exc)
+                        failures[i] = {
+                            "block_id": b.id,
+                            "page": b.page,
+                            "code": code,
+                            "message": message,
+                            "attempts": 3,
+                        }
+                    return i, b
 
                 tasks = [asyncio.create_task(one(i, b)) for i, b in enumerate(objs)]
                 try:
@@ -3912,6 +4432,7 @@ async def translate_stream(paper_id: str, req: TranslateReq) -> StreamingRespons
                         translated=sum(1 for b in all_blocks if b.get("translated")),
                         translation_lang=lang,
                     )
+                    final_manifest, report = snapshot()
 
                 # 这一页翻完，顺手抽研究目标 / 方法 / 结论；事件里带上结果，
                 # 前端立刻用不同颜色画到正文并更新「阅读重点」。
@@ -3935,15 +4456,41 @@ async def translate_stream(paper_id: str, req: TranslateReq) -> StreamingRespons
                             {"type": "highlights", "page": page, "highlights": items}
                         )
 
-            yield _sse({"type": "done", "translated": done})
+            yield _sse({
+                "type": "done",
+                "translated": report.get("translated", 0),
+                "new": done,
+                "failed": report.get("failed", 0),
+                "skipped": report.get("skipped", 0),
+                "total": report.get("total", 0),
+                "coverage": report.get("coverage", 0.0),
+                "status": report.get("status", "partial"),
+                "report": report,
+            })
         except asyncio.CancelledError:
             # 客户端断开：把已完成的部分保存后静默退出
             if all_blocks:
                 store.write_blocks(paper_id, all_blocks)
+                snapshot(force_status="partial")
             raise
         except Exception as e:
             log.exception("流式翻译失败 %s", paper_id)
-            yield _sse({"type": "error", "message": str(e)[:300]})
+            code, message = classify_error(e)
+            if all_blocks:
+                try:
+                    store.write_blocks(paper_id, all_blocks)
+                    snapshot(
+                        force_status="failed",
+                        error={"code": code, "message": message},
+                    )
+                except Exception:
+                    pass
+            yield _sse({
+                "type": "error",
+                "code": code,
+                "message": message,
+                "detail": str(e)[:300],
+            })
         finally:
             _translating.discard(key)
 
@@ -3958,6 +4505,343 @@ async def translate_stream(paper_id: str, req: TranslateReq) -> StreamingRespons
     )
 
 
+def _job_targets(
+    paper_id: str,
+    job: dict,
+    blocks: list[dict],
+) -> tuple[dict, list[tuple[int, dict]]]:
+    lang = str(job.get("lang") or "zh-Hans")
+    manifest = build_manifest(blocks, paper_id, lang)
+    eligible = set(manifest["eligible_ids"])
+    pages = set(job.get("pages") or [])
+    wanted = set(job.get("block_ids") or [])
+    targets: list[tuple[int, dict]] = []
+    for index, block in enumerate(blocks):
+        bid = str(block.get("id") or "")
+        if bid not in eligible or (block.get("translated") or "").strip():
+            continue
+        page = int(block.get("page") or 0)
+        if pages and page not in pages:
+            continue
+        if wanted and bid not in wanted:
+            continue
+        targets.append((index, block))
+    return manifest, targets
+
+
+async def _translate_job_block(
+    job: dict,
+    block: Block,
+    glossary: dict[str, str],
+    target_name: str,
+    prev_tail: str,
+    next_head: str,
+    limiter: AdaptiveLimiter,
+) -> str:
+    """单块翻译：自适应并发 + 指数退避 + 超长块切分。"""
+    job["concurrency"] = limiter.limit
+    chunks = split_text(block.text)
+    outputs: list[str] = []
+    for index, chunk in enumerate(chunks):
+        current = (
+            replace(block, id=f"{block.id}#c{index}", text=chunk)
+            if len(chunks) > 1
+            else block
+        )
+        last_error: BaseException | None = None
+        for attempt in range(3):
+            try:
+                # 只把模型调用放进限流器：退避等待期间释放槽位，
+                # 否则限流时并发会被睡眠中的任务占满。
+                async with limiter:
+                    tex = await translate_block(
+                        current,
+                        glossary,
+                        prev_tail,
+                        next_head,
+                        temperature=0.25 if attempt == 0 else 0.15,
+                        target_name=target_name,
+                    )
+                outputs.append(tex)
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+                code, message = classify_error(exc)
+                limiter.on_error(code)
+                if code in FATAL_CODES:
+                    raise FatalTranslationError(code, message) from exc
+                if attempt >= 2:
+                    raise
+                await asyncio.sleep(retry_delay(attempt, code))
+        if last_error is not None:
+            raise last_error
+    merged = "\n\n".join(outputs).strip()
+    if not merged:
+        raise RuntimeError("模型返回空译文")
+    limiter.on_success()
+    return merged
+
+
+def _flush_job(paper_id: str, job: dict, all_blocks: list[dict]) -> None:
+    store.write_blocks(paper_id, all_blocks)
+    job["published_ids"] = list(job.get("translated_ids") or [])
+    write_translation_job(DATA_DIR, job)
+
+
+def _finish_job(
+    paper_id: str,
+    job: dict,
+    all_blocks: list[dict],
+    *,
+    fatal: dict | None = None,
+) -> dict:
+    lang = str(job.get("lang") or "zh-Hans")
+    manifest = build_manifest(all_blocks, paper_id, lang)
+    started = int(job.get("started_at") or time.time())
+    report = build_report(
+        manifest,
+        started_at=started,
+        new_translated=int(job.get("done") or 0),
+        failures=list(job.get("failures") or []),
+        usage={"calls": int(job.get("done") or 0) + len(job.get("failures") or [])},
+    )
+    write_report(DATA_DIR, paper_id, lang, report)
+    job["report"] = report
+    job["failed"] = int(report.get("failed") or 0)
+    job["skipped"] = int(report.get("skipped") or 0)
+
+    if job.get("cancel_requested"):
+        # 显式取消 / 切换语种优先；任务被 cancel 时携带的 interrupted
+        # 不能把状态覆盖回 paused。
+        job["status"] = "cancelled"
+        if fatal is not None and fatal.get("code") not in {"interrupted", None}:
+            job["error"] = fatal
+    elif fatal is not None:
+        code = str(fatal.get("code") or "unknown")
+        job["error"] = fatal
+        job["status"] = "failed" if code in FATAL_CODES else "paused"
+    elif report.get("status") == "succeeded":
+        job["status"] = "succeeded"
+    elif report.get("status") == "failed":
+        job["status"] = "failed"
+    else:
+        job["status"] = "partial"
+
+    job["finished_at"] = int(time.time())
+    job["resume_available"] = (
+        job["status"] in {"paused", "failed", "cancelled"}
+        and int(report.get("pending") or 0) > 0
+    )
+    write_translation_job(DATA_DIR, job)
+    return job
+
+
+async def _run_translation_job(
+    paper_id: str,
+    job_id: str,
+    cfg: LLMConfigIn,
+    auto_highlights: bool = False,
+) -> None:
+    """后台翻译任务：HTTP 断开不影响运行；每页落盘，重启后可续跑。"""
+    job = _job_by_id(job_id)
+    if job is None:
+        return
+    lang = str(job.get("lang") or "zh-Hans")
+    target_name = _target_name(lang)
+    first_start = not job.get("started_at")
+    job["status"] = "running"
+    job["started_at"] = int(job.get("started_at") or time.time())
+    job["cancel_requested"] = False
+    job["error"] = None
+    job["resume_available"] = False
+    write_translation_job(DATA_DIR, job)
+
+    limiter = _model_limiter()
+    all_blocks: list[dict] = []
+    active_tasks: set[asyncio.Task] = set()
+    fatal: dict | None = None
+    consecutive_errors = 0
+    flush_counter = 0
+    try:
+        from paperead.llm import set_backend
+
+        set_backend(
+            OpenAICompatBackend(
+                LLMConfig(
+                    api_key=cfg.api_key,
+                    base_url=cfg.base_url.rstrip("/"),
+                    model=cfg.model,
+                    timeout=cfg.timeout,
+                )
+            )
+        )
+        async with _lock_for(paper_id):
+            if first_start and _reset_for_language(paper_id, lang):
+                job["translated_ids"] = []
+                job["published_ids"] = []
+                job["done"] = 0
+            all_blocks = store.read_blocks(paper_id) or []
+            manifest, targets = _job_targets(paper_id, job, all_blocks)
+            job["total"] = len(job.get("translated_ids") or []) + len(targets)
+            job["skipped"] = manifest["skipped"]
+            _flush_job(paper_id, job, all_blocks)
+            if not targets:
+                _finish_job(paper_id, job, all_blocks)
+                return
+
+            glossary = (store.get(paper_id) or {}).get("glossary") or {}
+            if not glossary:
+                try:
+                    everything = [
+                        Block(**{**block, "bbox": tuple(block["bbox"])})
+                        for block in all_blocks
+                    ]
+                    glossary = await build_glossary(everything, target_name=target_name)
+                    store.update(paper_id, glossary=glossary)
+                except Exception as exc:
+                    code, message = classify_error(exc)
+                    log.warning("术语表构建失败（%s）：%s", code, exc)
+
+            page_groups: dict[int, list[tuple[int, dict]]] = {}
+            for index, block in targets:
+                page_groups.setdefault(int(block.get("page") or 0), []).append(
+                    (index, block)
+                )
+
+            for page in sorted(page_groups):
+                if job.get("cancel_requested") or fatal is not None:
+                    break
+                job["current_page"] = page
+                items = page_groups[page]
+                tasks: list[asyncio.Task] = []
+                for pos, (index, block) in enumerate(items):
+                    obj = Block(**{**block, "bbox": tuple(block["bbox"])})
+                    prev_tail = ""
+                    if pos > 0:
+                        prev_tail = (items[pos - 1][1].get("translated") or "")[-120:]
+                    next_head = ""
+                    if pos + 1 < len(items):
+                        next_head = (items[pos + 1][1].get("text") or "")[:120]
+
+                    async def one(
+                        idx: int = index,
+                        current: Block = obj,
+                        prev: str = prev_tail,
+                        nxt: str = next_head,
+                    ):
+                        try:
+                            tex = await _translate_job_block(
+                                job,
+                                current,
+                                glossary,
+                                target_name,
+                                prev,
+                                nxt,
+                                limiter,
+                            )
+                            return idx, current, tex, None
+                        except BaseException as exc:  # noqa: BLE001
+                            return idx, current, None, exc
+
+                    task = asyncio.create_task(one())
+                    tasks.append(task)
+                    active_tasks.add(task)
+                    task.add_done_callback(active_tasks.discard)
+
+                for fut in asyncio.as_completed(tasks):
+                    idx, current, tex, exc = await fut
+                    if exc is not None:
+                        if isinstance(exc, FatalTranslationError):
+                            fatal = {"code": exc.code, "message": exc.message}
+                            for task in tasks:
+                                task.cancel()
+                            break
+                        code, message = classify_error(exc)
+                        job.setdefault("failures", []).append(
+                            {
+                                "block_id": current.id,
+                                "page": current.page,
+                                "code": code,
+                                "message": message,
+                                "attempts": 3,
+                            }
+                        )
+                        job["failed"] = len(job.get("failures") or [])
+                        limiter.on_error(code)
+                        consecutive_errors += 1
+                        if (
+                            code in {"network", "rate_limit"}
+                            and int(job.get("done") or 0) == 0
+                            and consecutive_errors >= 8
+                        ):
+                            fatal = {
+                                "code": "endpoint_unavailable",
+                                "message": "模型服务连续失败，任务已暂停；检查网络/额度后可继续。",
+                            }
+                            for task in tasks:
+                                task.cancel()
+                            break
+                    else:
+                        current.translated = str(tex or "")
+                        all_blocks[idx] = current.to_dict()
+                        if current.id not in (job.get("translated_ids") or []):
+                            job.setdefault("translated_ids", []).append(current.id)
+                        job["done"] = len(job.get("translated_ids") or [])
+                        consecutive_errors = 0
+                        limiter.on_success()
+                    flush_counter += 1
+                    if flush_counter >= 4:
+                        _flush_job(paper_id, job, all_blocks)
+                        flush_counter = 0
+
+                _flush_job(paper_id, job, all_blocks)
+                if fatal is not None:
+                    break
+
+            _flush_job(paper_id, job, all_blocks)
+            _finish_job(paper_id, job, all_blocks, fatal=fatal)
+    except asyncio.CancelledError:
+        if all_blocks:
+            _flush_job(paper_id, job, all_blocks)
+            _finish_job(
+                paper_id,
+                job,
+                all_blocks,
+                fatal={
+                    "code": "interrupted",
+                    "message": "任务被中断，进度已保存，可继续翻译。",
+                },
+            )
+        raise
+    except Exception as exc:
+        code, message = classify_error(exc)
+        log.exception("翻译任务失败 %s/%s", paper_id, job_id)
+        if all_blocks:
+            _flush_job(paper_id, job, all_blocks)
+            _finish_job(
+                paper_id,
+                job,
+                all_blocks,
+                fatal={"code": code, "message": message},
+            )
+        else:
+            job["status"] = "failed"
+            job["error"] = {"code": code, "message": message}
+            job["finished_at"] = int(time.time())
+            job["resume_available"] = True
+            write_translation_job(DATA_DIR, job)
+    finally:
+        # 任务被取消/异常时，别让已派生的块继续写回。
+        for task in list(active_tasks):
+            task.cancel()
+        job["concurrency"] = limiter.limit
+        try:
+            write_translation_job(DATA_DIR, job)
+        except Exception:
+            pass
+
+
 async def _parse_task(paper_id: str, vision_config: LLMConfig | None = None) -> None:
     row = store.get(paper_id)
     pdf = store.pdf_path(paper_id)
@@ -3970,6 +4854,19 @@ async def _parse_task(paper_id: str, vision_config: LLMConfig | None = None) -> 
     assets = store.papers_dir / f"{paper_id}_assets"
     try:
         parsed = await asyncio.to_thread(parse_pdf, pdf, paper_id, assets)
+        if not parsed.blocks:
+            # 无文本层/扫描版：不能标 ready，否则用户进入阅读页只会看到空白，
+            # 翻译入口也会永远「0 块待译」且没有原因。
+            store.write_blocks(paper_id, [])
+            store.update(
+                paper_id,
+                status="failed",
+                blocks=0,
+                pages=parsed.page_count,
+                error="没有解析出正文块：可能是扫描版或 PDF 没有文本层",
+            )
+            log.warning("解析为空（疑似扫描版）：%s", paper_id)
+            return
         # 配了识图模型就把显示公式转成 LaTeX；阅读页优先用 KaTeX 矢量渲染，
         # 识别失败或没配置时自动回落到裁图，不影响阅读。
         cfg = vision_config or _vision_config

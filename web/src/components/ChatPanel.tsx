@@ -29,16 +29,24 @@ import { Katex } from './Katex'
 import { ChatNav } from './ChatNav'
 import { ReaderToolCard } from './ReaderToolCard'
 import {
+  IconAudioLines,
   IconCheck,
   IconClose,
   IconFolder,
+  IconGlobe,
   IconLightbulb,
+  IconMic,
   IconPlus,
   IconSend,
   IconSettings,
   IconSettings2,
   IconStop,
 } from './icons'
+import {
+  createVoiceRecognizer,
+  voiceSupported,
+  type VoiceRecognizer,
+} from '../lib/voice'
 
 type TurnStatus = 'retrieving' | 'streaming' | 'done' | 'error' | 'stopped'
 
@@ -204,6 +212,8 @@ export function ChatPanel({
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState('')
   const [dragging, setDragging] = useState(false)
+  const [listening, setListening] = useState(false)
+  const [voiceError, setVoiceError] = useState('')
   const [settings, setSettings] = useState<ModelSettings>(loadModelSettings)
   const [pickerOpen, setPickerOpen] = useState(false)
   const [libraryOpen, setLibraryOpen] = useState(false)
@@ -219,12 +229,15 @@ export function ChatPanel({
   const busyRef = useRef(false)
   const stickRef = useRef(true)
   const abortRef = useRef<AbortController | null>(null)
+  const voiceRef = useRef<VoiceRecognizer | null>(null)
+  const voiceBaseRef = useRef('')
 
   const modelOptions = useMemo(
     () => settings.models.filter((m) => m.kind === 'answer' && isModelReady(m)),
     [settings],
   )
   const current = useMemo(() => readyModel(settings, 'answer'), [settings])
+  const voiceReady = useMemo(() => voiceSupported(), [])
 
   // 左侧纵向导航：一轮提问对应一个圆点，提问内容作为悬浮摘要
   const navItems = useMemo(
@@ -676,9 +689,55 @@ export function ChatPanel({
     }
   }
 
+  const stopVoice = () => {
+    voiceRef.current?.stop()
+    voiceRef.current = null
+    setListening(false)
+  }
+
+  // 语音输入：识别结果实时写进输入框，用户仍可继续编辑再发送。
+  // 不支持或没权限时给出明确文案，不做成点了没反应的装饰按钮。
+  const toggleVoice = () => {
+    if (listening) {
+      stopVoice()
+      return
+    }
+    setVoiceError('')
+    const rec = createVoiceRecognizer({
+      onText: (text) => {
+        setInput(`${voiceBaseRef.current}${text.replace(/^\s+/, '')}`)
+      },
+      onError: (message) => {
+        setVoiceError(message)
+        setListening(false)
+        voiceRef.current = null
+      },
+      onEnd: () => {
+        setListening(false)
+        voiceRef.current = null
+      },
+    })
+    if (!rec) {
+      setVoiceError('当前环境不支持语音输入，请用 Chrome / Edge 打开，或直接输入文字。')
+      return
+    }
+    voiceBaseRef.current = input.trim() ? `${input.trimEnd()} ` : ''
+    try {
+      rec.start()
+      voiceRef.current = rec
+      setListening(true)
+    } catch {
+      setVoiceError('语音输入启动失败，请重试。')
+      setListening(false)
+    }
+  }
+
+  useEffect(() => () => voiceRef.current?.abort(), [])
+
   const submit = () => {
     const q = input.trim()
     if (!q || busyRef.current) return
+    stopVoice()
     setInput('')
     void ask(q)
   }
@@ -1025,165 +1084,190 @@ export function ChatPanel({
               }
             }}
           />
-          {busy ? (
-            <button
-              className="send stop"
-              onClick={() => abortRef.current?.abort()}
-              title="停止生成"
-            >
-              <IconStop />
-            </button>
-          ) : (
-            <button className="send" disabled={!input.trim()} onClick={submit} title="发送">
-              <IconSend />
-            </button>
-          )}
-        </div>
-        <div className="composer-meta">
-          {canUpload && (
-            <div className="attach-picker" ref={libraryRef}>
-              <input
-                ref={fileInput}
-                type="file"
-                multiple
-                hidden
-                onChange={(event) => {
-                  void addFiles(Array.from(event.target.files ?? []))
-                  event.target.value = ''
-                }}
-              />
-              <button
-                className="chat-attach"
-                type="button"
-                title="上传附件（支持多选、拖拽、粘贴）"
-                disabled={uploading}
-                onClick={() => fileInput.current?.click()}
-              >
-                <IconPlus />
-                附件
-              </button>
-              <button
-                className="chat-attach"
-                type="button"
-                title="从这篇论文的附件库里勾选"
-                aria-haspopup="menu"
-                aria-expanded={libraryOpen}
-                onClick={() => setLibraryOpen((v) => !v)}
-              >
-                <IconFolder />
-                附件库
-              </button>
-              {libraryOpen && (
-                <div className="attach-library" role="menu">
-                  <div className="attach-library-head">论文附件库</div>
-                  {libraryLoading ? (
-                    <div className="attach-library-empty">正在读取…</div>
-                  ) : libraryItems.length === 0 ? (
-                    <div className="attach-library-empty">
-                      还没有附件，先上传一个。
+          <div className="composer-tools">
+            <div className="composer-tools-left">
+              {canUpload && (
+                <div className="attach-picker" ref={libraryRef}>
+                  <input
+                    ref={fileInput}
+                    type="file"
+                    multiple
+                    hidden
+                    onChange={(event) => {
+                      void addFiles(Array.from(event.target.files ?? []))
+                      event.target.value = ''
+                    }}
+                  />
+                  <button
+                    className="composer-tool"
+                    type="button"
+                    title="上传附件（支持多选、拖拽、粘贴）"
+                    disabled={uploading}
+                    onClick={() => fileInput.current?.click()}
+                  >
+                    <IconPlus />
+                  </button>
+                  <button
+                    className="composer-tool"
+                    type="button"
+                    title="从这篇论文的附件库里勾选"
+                    aria-haspopup="menu"
+                    aria-expanded={libraryOpen}
+                    onClick={() => setLibraryOpen((v) => !v)}
+                  >
+                    <IconFolder />
+                  </button>
+                  {libraryOpen && (
+                    <div className="attach-library" role="menu">
+                      <div className="attach-library-head">论文附件库</div>
+                      {libraryLoading ? (
+                        <div className="attach-library-empty">正在读取…</div>
+                      ) : libraryItems.length === 0 ? (
+                        <div className="attach-library-empty">
+                          还没有附件，先上传一个。
+                        </div>
+                      ) : (
+                        <ul className="attach-library-list">
+                          {libraryItems.map((item) => {
+                            const picked = attachments.some(
+                              (one) => one.name === item.name,
+                            )
+                            return (
+                              <li key={item.name}>
+                                <button
+                                  className="attach-library-item"
+                                  type="button"
+                                  data-picked={picked}
+                                  role="menuitemcheckbox"
+                                  aria-checked={picked}
+                                  title={item.name}
+                                  onClick={() => toggleLibraryFile(item)}
+                                >
+                                  <span className="attach-library-check">
+                                    {picked && <IconCheck />}
+                                  </span>
+                                  <span className="attach-library-name">
+                                    {item.name}
+                                  </span>
+                                  <span className="attach-library-size">
+                                    {sizeText(item.size)}
+                                  </span>
+                                </button>
+                              </li>
+                            )
+                          })}
+                        </ul>
+                      )}
+                      <div className="attach-library-foot">
+                        勾选后随问题一起引用，下次提问可继续复用。
+                      </div>
                     </div>
-                  ) : (
-                    <ul className="attach-library-list">
-                      {libraryItems.map((item) => {
-                        const picked = attachments.some(
-                          (one) => one.name === item.name,
-                        )
-                        return (
-                          <li key={item.name}>
-                            <button
-                              className="attach-library-item"
-                              type="button"
-                              data-picked={picked}
-                              role="menuitemcheckbox"
-                              aria-checked={picked}
-                              title={item.name}
-                              onClick={() => toggleLibraryFile(item)}
-                            >
-                              <span className="attach-library-check">
-                                {picked && <IconCheck />}
-                              </span>
-                              <span className="attach-library-name">
-                                {item.name}
-                              </span>
-                              <span className="attach-library-size">
-                                {sizeText(item.size)}
-                              </span>
-                            </button>
-                          </li>
-                        )
-                      })}
-                    </ul>
                   )}
-                  <div className="attach-library-foot">
-                    勾选后随问题一起引用，下次提问可继续复用。
-                  </div>
                 </div>
               )}
-            </div>
-          )}
-          <div className="model-picker" ref={pickerRef}>
-            {current ? (
-              <>
-                <button
-                  className="model-select"
-                  onClick={() => setPickerOpen((v) => !v)}
-                  title="切换回答模型"
-                  aria-haspopup="menu"
-                  aria-expanded={pickerOpen}
-                >
-                  <span className="model-select-dot" />
-                  <span className="model-select-name">{current.label}</span>
-                  <span className="model-select-caret" aria-hidden>
-                    ▾
-                  </span>
-                </button>
-                {pickerOpen && (
-                  <div className="model-menu" role="menu">
-                    <div className="model-menu-head">回答模型</div>
-                    {modelOptions.map((m) => (
-                      <button
-                        key={m.id}
-                        className="model-menu-item"
-                        data-active={m.id === current.id}
-                        role="menuitem"
-                        onClick={() => chooseModel(m.id)}
-                      >
-                        <span className="model-menu-main">
-                          <b>{m.label}</b>
-                          <code>{m.model}</code>
-                        </span>
-                        {m.id === current.id && <IconCheck />}
-                      </button>
-                    ))}
-                    <button
-                      className="model-menu-manage"
-                      onClick={() => {
-                        setPickerOpen(false)
-                        onOpenSettings?.()
-                      }}
-                    >
-                      <IconSettings /> 管理模型…
-                    </button>
-                  </div>
-                )}
-              </>
-            ) : (
-              <button className="model-select is-empty" onClick={onOpenSettings}>
-                <IconSettings2 /> 配置回答模型
+              <button
+                type="button"
+                className="composer-tool"
+                data-active={useWeb}
+                aria-pressed={useWeb}
+                title="联网搜索：先看论文能不能回答，确实缺信息才联网"
+                onClick={() => setUseWeb((v) => !v)}
+              >
+                <IconGlobe />
+
               </button>
-            )}
+              <button
+                type="button"
+                className="composer-tool"
+                data-listening={listening}
+                aria-pressed={listening}
+                title={
+                  !voiceReady
+                    ? '当前环境不支持语音输入，请用 Chrome / Edge 打开'
+                    : listening
+                      ? '停止语音输入'
+                      : '语音输入'
+                }
+                onClick={toggleVoice}
+              >
+                {listening ? <IconAudioLines /> : <IconMic />}
+
+              </button>
+            </div>
+            <div className="composer-tools-right">
+              <div className="model-picker" ref={pickerRef}>
+                {current ? (
+                  <>
+                    <button
+                      className="model-select"
+                      onClick={() => setPickerOpen((v) => !v)}
+                      title="切换回答模型"
+                      aria-haspopup="menu"
+                      aria-expanded={pickerOpen}
+                    >
+                      <span className="model-select-dot" />
+                      <span className="model-select-name">{current.label}</span>
+                      <span className="model-select-caret" aria-hidden>
+                        ▾
+                      </span>
+                    </button>
+                    {pickerOpen && (
+                      <div className="model-menu" role="menu">
+                        <div className="model-menu-head">回答模型</div>
+                        {modelOptions.map((m) => (
+                          <button
+                            key={m.id}
+                            className="model-menu-item"
+                            data-active={m.id === current.id}
+                            role="menuitem"
+                            onClick={() => chooseModel(m.id)}
+                          >
+                            <span className="model-menu-main">
+                              <b>{m.label}</b>
+                              <code>{m.model}</code>
+                            </span>
+                            {m.id === current.id && <IconCheck />}
+                          </button>
+                        ))}
+                        <button
+                          className="model-menu-manage"
+                          onClick={() => {
+                            setPickerOpen(false)
+                            onOpenSettings?.()
+                          }}
+                        >
+                          <IconSettings /> 管理模型…
+                        </button>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <button className="model-select is-empty" onClick={onOpenSettings}>
+                    <IconSettings2 /> 配置模型
+                  </button>
+                )}
+              </div>
+              {busy ? (
+                <button
+                  className="send stop"
+                  onClick={() => abortRef.current?.abort()}
+                  title="停止生成"
+                >
+                  <IconStop />
+                </button>
+              ) : (
+                <button
+                  className="send"
+                  disabled={!input.trim()}
+                  onClick={submit}
+                  title="发送"
+                >
+                  <IconSend />
+                </button>
+              )}
+            </div>
           </div>
-          <label
-            className="web-toggle"
-            title="论文里没有写的内容，会尝试从公开网络检索后回答"
-          >
-            <input
-              type="checkbox"
-              checked={useWeb}
-              onChange={(e) => setUseWeb(e.target.checked)}
-            />
-            允许联网检索
-          </label>
+          {voiceError && <p className="composer-voice-note">{voiceError}</p>}
         </div>
       </div>
     </div>

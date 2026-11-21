@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import html as html_lib
 import os
 import re
 from bisect import bisect_left
@@ -28,8 +29,13 @@ from statistics import median
 import pymupdf
 import pymupdf.table as _pymupdf_table
 
-from .inline_math import STRONG_MATH_FONTS as _INLINE_MATH_FONTS
-from .inline_math import build_inline_math, spans_with_offsets
+from .fonts.registry import is_anchor_font
+from .inline_math import (
+    SYMBOLS,
+    build_inline_math,
+    build_symbol_fallbacks,
+    spans_with_offsets,
+)
 from .regions import PageRegions, build_page_regions
 from .textnorm import (
     has_dot_leader,
@@ -129,10 +135,12 @@ _NUM_HEADING_ZH_RE = re.compile(r"^\d+(?:\.\d+)*\.?\s*")
 _ZH_MEASURE_RE = re.compile(r"^(?:倍|个|次|分|米|秒|年|月|日|%|％)")
 # 图注 / 表注。编号既可能是阿拉伯数字（Table 3），也可能是罗马数字
 # （MDPI/IEEE 常见的 TABLE II），还可能是补充材料编号（Table S1）。
-_CAP_NUM = r"(?:\d+(?:\.\d+)*|[IVXLCDM]+|[A-Z]\d+)"
+_CAP_NUM = r"(?:\d+(?:\.\d+)*|[IVXLCDM]+|[A-Z]\d+|(?-i:[A-Z])\.\d+)"
 # 编号后不能紧跟字母/数字/汉字：`表2所示` 是正文引用，不是表题。
 _CAP_END = r"(?![0-9A-Za-z\u3400-\u9fff])"
-_CAP_EN_PREFIX = r"(?:(?:Supplementary|Extended\s+Data)\s+)?(?:Figure|Fig\.|FIGURE|Table|TABLE|Tab\.)"
+# Algorithm 也是漂浮在正文之外的编号浮框，题注形态与图表一致：
+# 「Algorithm 1 Preference-centric knowledge diffusion.」标题行即它的表头。
+_CAP_EN_PREFIX = r"(?:(?:Supplementary|Extended\s+Data)\s+)?(?:Figure|Fig\.|FIGURE|Table|TABLE|Tab\.|Algorithm|ALGORITHM)"
 _CAP_ZH_PREFIX = r"(?:附\s*)?[图表]"
 _CAPTION_RE = re.compile(
     rf"^(?:{_CAP_EN_PREFIX}\s*{_CAP_NUM}|{_CAP_ZH_PREFIX}\s*{_CAP_NUM}){_CAP_END}",
@@ -140,6 +148,7 @@ _CAPTION_RE = re.compile(
 )
 _TABLE_CAP_RE = re.compile(
     rf"^(?:(?:(?:Supplementary|Extended\s+Data)\s+)?(?:Table|TABLE|Tab\.)\s*{_CAP_NUM}"
+    rf"|(?:Algorithm|ALGORITHM)\s*{_CAP_NUM}"
     rf"|(?:附\s*)?表\s*{_CAP_NUM}){_CAP_END}",
     re.IGNORECASE,
 )
@@ -148,6 +157,13 @@ _TABLE_CAP_RE = re.compile(
 _CAPTION_NUM_ONLY_RE = re.compile(
     rf"^(?:{_CAP_EN_PREFIX}\s*{_CAP_NUM}|{_CAP_ZH_PREFIX}\s*{_CAP_NUM})"
     rf"\s*[:：\.\-–—|]?$",
+    re.IGNORECASE,
+)
+# 算法浮框：题注只取标题行，`Input:` 等伪代码首行不能并进表头。
+_ALG_CAPTION_RE = re.compile(r"^(?:Algorithm|ALGORITHM)\b")
+_ALG_BODY_LINE_RE = re.compile(
+    r"^(?:Input|Output|Require|Ensure|Procedure|Function|Data|Result)\b\s*[:：]"
+    r"|^\d+\s*[:：.]",
     re.IGNORECASE,
 )
 # 中文编号后若是这些词开头，是正文里的「如表 2 所示」而不是表题。
@@ -201,9 +217,18 @@ def _is_caption_text(text: str) -> bool:
     # 编号后先出现小写子图字母，再跟标题正文。
     if re.match(r"^[a-z]\s+[A-Z]", rest):
         return True
+    # `Fig. 2(B)–(C), we introduce ...` 是正文里的跨子图引用句，不是图注：
+    # 编号后紧跟一组括号子图标记，再以逗号/连接号接一个小写主语或动词。
+    if first in "(（" and re.match(
+        r"^[（(][^)）]{1,8}[)）]"
+        r"(?:\s*(?:[-–—,;]|and|or|to)\s*[（(][^)）]{1,8}[)）])*"
+        r"\s*[-–—,;]\s*(?:we|the|this|these|it|they|its|our|as|in|for)\b",
+        rest,
+        re.IGNORECASE,
+    ):
+        return False
     return first.isupper() or first.isdigit() or first in "（(“\"'["
-# 数学字体（Computer Modern 数学族）
-_MATH_FONTS = ("CMMI", "CMEX", "CMSY", "MSBM", "MTMI", "MTEX", "EUSM", "EUFM", "Symbol")
+
 # CMEX10 把大括号画成 0x08/0x09 的延伸部件；不映射就会在正文里变成
 # 控制字符，集合语义（{x_t^front, x_t^down}）随之丢失。
 _CMEX_BRACES = {"\x08": "{", "\x09": "}"}
@@ -352,7 +377,7 @@ def _span_style(span: dict) -> tuple[float, bool, bool]:
     bold = bool(flags & 16) or bool(
         re.search(r"Bold|Medi|Heavy|Black|Semibold|-Bd", font, re.IGNORECASE)
     )
-    math = any(font.startswith(m) for m in _MATH_FONTS)
+    math = is_anchor_font(font)
     return size, bold, math
 
 
@@ -408,14 +433,28 @@ def _line_from_dict(raw: dict, page_no: int) -> Line | None:
             spans.append(span)
     if not spans:
         return None
-    raw_text, ranges = spans_with_offsets(spans)
-    raw_text, offsets = squeeze_cjk_spaces(raw_text)
-    if offsets != list(range(len(raw_text) + 1)):
+    # 连字（ﬃ → ffi）与控制字符必须在计算偏移前展开：`_normalize_text`
+    # 会改变文本长度，若先算 ranges 再 normalize，后续行内公式/异常符号的
+    # start/end 会整体错位（实测会把相邻正文裁进公式小图）。
+    spans = [
+        {**span, "text": _normalize_text(span.get("text") or "")}
+        for span in spans
+    ]
+    spans = [span for span in spans if span["text"].strip()]
+    if not spans:
+        return None
+    text, ranges = spans_with_offsets(spans)
+    text, offsets = squeeze_cjk_spaces(text)
+    if offsets != list(range(len(text) + 1)):
         ranges = [(offsets[start], offsets[end], span) for start, end, span in ranges]
-    text = _normalize_text(raw_text)
     if not text.strip():
         return None
     inline_math = [m.to_dict() for m in build_inline_math(spans, ranges)]
+    # 私用区/替换符没有可用字形（前端显示成「□」），又不在数学字体组里时，
+    # 单独标成 fallback：能识图就恢复 LaTeX，识不了就用原 PDF 裁图垫后。
+    inline_math += [
+        m.to_dict() for m in build_symbol_fallbacks(text, ranges, inline_math)
+    ]
     # 按字符数加权的主字号 / 粗体 / 数学字体
     weights = Counter()
     bold_chars = 0
@@ -464,7 +503,7 @@ def _merge_visual_lines(raw_lines: list[dict]) -> list[dict]:
         return raw_lines
     prose = [
         s for s in spans
-        if not any((s.get("font") or "").startswith(p) for p in _INLINE_MATH_FONTS)
+        if not is_anchor_font(s.get("font") or "")
     ]
     if not prose:
         return raw_lines
@@ -712,13 +751,38 @@ def _caption_lines(lines: list[Line]) -> set[int]:
     return skip
 
 
-_ABSTRACT_HEAD_RE = re.compile(r"^\s*(?:Abstract|ABSTRACT|摘\s*要)\b")
+# 宽字距标题（"A B S T R A C T"、"K E Y W O R D S"）在 PDF 文本层里是一串
+# 带空格的单字母 token，语义识别必须容忍这种排版，否则整段摘要会落回正文。
+_HEAD_GAP = r"[\s\u00a0\u2000-\u200b\u00ad]*"
+
+
+def _spaced_label(word: str) -> str:
+    return _HEAD_GAP.join(word)
+
+
+_ABSTRACT_HEAD_RE = re.compile(
+    rf"^\s*(?:Abstract|ABSTRACT|{_spaced_label('ABSTRACT')}|摘{_HEAD_GAP}要)"
+    r"(?![A-Za-z\u3400-\u9fff])"
+)
+_ABSTRACT_LABEL_RE = re.compile(
+    rf"^\s*(?:{_spaced_label('ABSTRACT')}|{_spaced_label('摘要')})\s*[:：.—–-]?\s*$",
+    re.IGNORECASE,
+)
 _KEYWORDS_HEAD_RE = re.compile(
-    r"^\s*(?:Keywords?|KEY\s*WORDS|Index\s+Terms|关\s*键\s*词)\b", re.IGNORECASE
+    rf"^\s*(?:Keywords?|{_spaced_label('KEYWORDS')}|Index{_HEAD_GAP}Terms|"
+    rf"{_spaced_label('INDEXTERMS')}|关{_HEAD_GAP}键{_HEAD_GAP}词)"
+    r"(?![A-Za-z\u3400-\u9fff])",
+    re.IGNORECASE,
 )
 _INTRO_HEAD_RE = re.compile(
-    r"^\s*(?:(?:\d+|[IVXLC]+)\.?\s+)?(?:Introduction|INTRODUCTION|引\s*言|绪\s*论)\b"
+    rf"^\s*(?:(?:\d+|[IVXLC]+)\.?\s+)?(?:Introduction|INTRODUCTION|"
+    rf"{_spaced_label('INTRODUCTION')}|引{_HEAD_GAP}言|绪{_HEAD_GAP}论)"
+    r"(?![A-Za-z\u3400-\u9fff])"
 )
+
+
+def _is_abstract_head(text: str) -> bool:
+    return bool(_ABSTRACT_HEAD_RE.match(text) or _ABSTRACT_LABEL_RE.match(text))
 # 作者姓名前的编号/符号：1st / 2nd / 3 / * / †。IEEE 用 1st/2nd，其它期刊用
 # 上标数字或符号，统一剥掉后再判断姓名形态。
 _AUTHOR_PREFIX_RE = re.compile(
@@ -791,7 +855,7 @@ class FrontMatter:
         return (
             self.abstract is not None
             and abs(ln.y0 - self.abstract[0]) < 1.0
-            and _ABSTRACT_HEAD_RE.match(ln.text) is not None
+            and _is_abstract_head(ln.text)
         )
 
     def in_keywords(self, ln: Line) -> bool:
@@ -893,10 +957,30 @@ def _body_flow_start(lines: list[Line], start_y: float, page_width: float) -> fl
 def _detect_front_matter(
     lines: list[Line], body_size: float, page_height: float, page_width: float
 ) -> FrontMatter:
-    """识别首页前置区与摘要/关键词范围。"""
+    """识别首页前置区与摘要/关键词范围。
+
+    摘要标题不一定在第 1 页：Elsevier 等版式第 1 页只放 Highlights/封面，
+    第 2 页顶部才是标题、作者与 ABSTRACT。前置区页以「最早出现摘要标题的
+    页」为准，找不到摘要标题时仍回退到第 1 页。
+    """
     front = FrontMatter()
+    visible = [ln for ln in lines if not ln.is_margin and ln.text.strip()]
+    pages = sorted({ln.page for ln in visible})
+    if not pages:
+        return front
+    front_page = pages[0]
+    abs_ln = None
+    for pno in pages[:3]:
+        cand = next(
+            (ln for ln in visible if ln.page == pno and _is_abstract_head(ln.text)),
+            None,
+        )
+        if cand is not None:
+            abs_ln = cand
+            front_page = pno
+            break
     page_lines = sorted(
-        [ln for ln in lines if ln.page == 1 and not ln.is_margin and ln.text.strip()],
+        [ln for ln in visible if ln.page == front_page],
         key=lambda l: (l.y0, l.x0),
     )
     if len(page_lines) < 6:
@@ -904,7 +988,8 @@ def _detect_front_matter(
     line_h = median([ln.height for ln in page_lines]) or max(body_size * 1.2, 1.0)
     top = page_lines[0].y0
     head_candidates = [ln for ln in page_lines if ln.y0 < page_height * 0.8]
-    abs_ln = next((ln for ln in head_candidates if _ABSTRACT_HEAD_RE.match(ln.text)), None)
+    if abs_ln is None:
+        abs_ln = next((ln for ln in head_candidates if _is_abstract_head(ln.text)), None)
     kw_ln = next((ln for ln in head_candidates if _KEYWORDS_HEAD_RE.match(ln.text)), None)
     intro_ln = next((ln for ln in head_candidates if _INTRO_HEAD_RE.match(ln.text)), None)
     if intro_ln is not None and intro_ln.y0 <= top + line_h:
@@ -919,7 +1004,11 @@ def _detect_front_matter(
         return overlap > min(ln.width, ref.width) * 0.25
 
     def _range_end(start: Line, col: int, stops: list[Line | None]) -> float:
-        ends = [ln.y0 for ln in stops if ln is not None and ln.y0 > start.y0 + 1]
+        ends = [
+            ln.y0
+            for ln in stops
+            if ln is not None and ln.y0 > start.y0 + 1 and _same_flow(ln, start, col)
+        ]
         same_col = sorted(
             [
                 ln
@@ -955,7 +1044,7 @@ def _detect_front_matter(
     if abs_ln is not None:
         col = abs_ln.col if abs_ln.col in (0, 1) else -1
         end = _range_end(abs_ln, col, [kw_ln, intro_ln])
-        front.page = 1
+        front.page = front_page
         front.head_end = min(abs_ln.y0, body_y) if body_y > 0 else abs_ln.y0
         if end > abs_ln.y0 + 1:
             front.abstract = (abs_ln.y0, end)
@@ -970,16 +1059,16 @@ def _detect_front_matter(
                     max(ln.x1 for ln in abstract_lines),
                 )
     elif intro_ln is not None:
-        front.page = 1
+        front.page = front_page
         front.head_end = min(intro_ln.y0, body_y) if body_y > 0 else intro_ln.y0
     elif kw_ln is not None:
-        front.page = 1
+        front.page = front_page
         front.head_end = min(kw_ln.y0, body_y) if body_y > 0 else kw_ln.y0
     elif body_y > top + line_h * 2 and body_y < page_height * 0.65:
         # 没有 Abstract/Introduction/Keywords 标记时，只切出「标题+作者区」，
         # 不自动把后面的第一段文字当摘要：有的论文首页直接是正文/参考文献，
         # 自动造 abstract 会把引用条目、表格说明一起吞掉。
-        front.page = 1
+        front.page = front_page
         front.head_end = body_y
         # Nature 类版式：标题下有作者区、摘要通栏、正文双栏。只有确认
         # 「有作者区 + 能找到半栏正文起点」才把中间这段标成摘要。
@@ -1016,7 +1105,7 @@ def _detect_front_matter(
 
     # 首页辅助窄列：通讯/邮箱/单位与摘要并列，不属于摘要或正文流。
     # 以「摘要主列的左缘」为界，收集其左侧的小字号机构/邮箱行。
-    if front.page == 1 and abs_ln is not None:
+    if front.page and abs_ln is not None:
         start_y = min(front.head_end, abs_ln.y0) - 4.0
         end_y = front.keywords[1] if front.keywords is not None else (
             front.abstract[1] if front.abstract is not None else abs_ln.y0 + page_height * 0.4
@@ -1180,10 +1269,9 @@ def _split_row_runs(row: list[Line], gutter: float | None) -> list[list[Line]]:
         if gutter is not None and prev_x1 <= gutter + 1 and m.x0 >= gutter - 1:
             split = True
         elif (
-            gutter is None
-            and gap > max(18.0, 2.4 * max(m.size, 1.0))
-            and len(m.text) >= 6
-            and len(runs[-1][-1].text) >= 6
+            gap > max(18.0, 2.4 * max(m.size, 1.0))
+            and len(m.text.strip()) >= 6
+            and len(runs[-1][-1].text.strip()) >= 6
         ):
             split = True
         if split:
@@ -1206,6 +1294,43 @@ def _run_column(run: list[Line], col: int, gutter: float | None) -> int:
     return -1
 
 
+# 公式碎片之间允许跨过的「正体词」只应是公式里的 front/down/query 这类
+# 术语；and/the/of/for 是正文词，跨过去会把正文裁进公式小图。
+_MATH_BRIDGE_STOPWORDS = {
+    "and", "the", "of", "for", "with", "to", "in", "on", "as", "is", "are",
+    "be", "by", "from", "we", "it", "its", "this", "that", "these", "those",
+    "when", "where", "while", "which", "whose", "than", "then", "also",
+    "such", "using", "used", "can", "may", "not", "all", "any", "each",
+    "per", "via", "if", "or", "at", "into", "over", "under",
+}
+
+
+def _math_bridge_latex(bridge: str) -> str | None:
+    """两个公式片段之间的桥接文本 → LaTeX；无法安全表达时返回 None。
+
+    合并碎片时不能一律降级裁图：两侧都已成功重建时，桥接的逗号/括号/
+    运算符（以及 front/down 这类正体词）完全可以拼回同一段 LaTeX。
+    """
+    text = bridge.strip()
+    if not text:
+        return ""
+    if re.fullmatch(r"[A-Za-z]{2,12}", text):
+        return r"\text{" + text + "}"
+    out: list[str] = []
+    for ch in text:
+        if ch.isspace():
+            continue
+        if ch in SYMBOLS:
+            out.append(SYMBOLS[ch])
+        elif ch.isascii() and (
+            ch.isalnum() or ch in "()[]{},.=+*/-<>|:!'"
+        ):
+            out.append(ch)
+        else:
+            return None
+    return "".join(out)
+
+
 def _merge_math_fragments(text: str, inline_math: list[dict]) -> list[dict]:
     """把视觉行合并后相邻的公式碎片拼回一段。
 
@@ -1222,13 +1347,22 @@ def _merge_math_fragments(text: str, inline_math: list[dict]) -> list[dict]:
         cur = {**item}
         if merged:
             prev = merged[-1]
+            # 异常符号兜底按精确区间裁图，不能跨过中间文本合并；
+            # 否则一张小图会覆盖到旁边的正文词。
+            if prev.get("symbol") or cur.get("symbol"):
+                merged.append(cur)
+                continue
             gap = int(cur["start"]) - int(prev["end"])
             middle = text[int(prev["end"]): int(cur["start"])]
             bridge = middle.strip()
             # 只跨过空白、公式符号或公式里的正体短词（front / down）
             if -1 <= gap <= 12 and (
                 not bridge
-                or (bridge.isalpha() and len(bridge) <= 12)
+                or (
+                    bridge.isalpha()
+                    and len(bridge) <= 12
+                    and bridge.lower() not in _MATH_BRIDGE_STOPWORDS
+                )
                 or not re.search(r"[A-Za-z]{2,}", bridge)
             ):
                 bbox = prev.get("bbox") or cur.get("bbox")
@@ -1240,8 +1374,26 @@ def _merge_math_fragments(text: str, inline_math: list[dict]) -> list[dict]:
                     ]
                 prev["start"] = min(int(prev["start"]), int(cur["start"]))
                 prev["end"] = max(int(prev["end"]), int(cur["end"]))
-                prev["fallback"] = True
-                prev["latex"] = ""
+                # 两侧都已重建成功时，桥接的逗号/括号/运算符可以拼回同一段
+                # LaTeX；只有一侧不可重建或拼接后括号不平衡才降级裁图。
+                merged_tex = None
+                if (
+                    (prev.get("latex") or "")
+                    and not prev.get("fallback")
+                    and (cur.get("latex") or "")
+                    and not cur.get("fallback")
+                ):
+                    bridge_tex = _math_bridge_latex(middle)
+                    if bridge_tex is not None:
+                        candidate = prev["latex"] + bridge_tex + cur["latex"]
+                        if candidate.count("{") == candidate.count("}"):
+                            merged_tex = candidate
+                if merged_tex:
+                    prev["latex"] = merged_tex
+                    prev["fallback"] = False
+                else:
+                    prev["latex"] = ""
+                    prev["fallback"] = True
                 prev["source"] = text[int(prev["start"]): int(prev["end"])]
                 if bbox:
                     prev["bbox"] = bbox
@@ -1405,22 +1557,31 @@ def _reading_order(
         # 单栏正文仍按 y 顺序；但首页可能有「左侧通讯/单位窄列 + 右侧摘要
         # 主列」的并列版式，直接按 (y,x) 排序会让两列逐行交错。先把首页
         # 的 head / aux / abstract / keywords 分别成流，再接其余正文。
-        if front is not None and front.page == 1:
-            page1 = [ln for ln in body if ln.page == 1]
-            others = [ln for ln in body if ln.page != 1]
-            head = [ln for ln in page1 if front.in_head(ln.bbox)]
-            aux = [ln for ln in page1 if front.in_aux(ln.bbox)]
-            abs_ = [ln for ln in page1 if front.in_abstract(ln)]
-            kws = [ln for ln in page1 if front.in_keywords(ln)]
+        if front is not None and front.page > 0:
+            fp = front.page
+            own = [ln for ln in body if ln.page == fp]
+            before = sorted(
+                [ln for ln in body if ln.page < fp],
+                key=lambda ln: (ln.page, ln.y0, ln.x0),
+            )
+            after = sorted(
+                [ln for ln in body if ln.page > fp],
+                key=lambda ln: (ln.page, ln.y0, ln.x0),
+            )
+            head = [ln for ln in own if front.in_head(ln.bbox)]
+            aux = [ln for ln in own if front.in_aux(ln.bbox)]
+            abs_ = [ln for ln in own if front.in_abstract(ln)]
+            kws = [ln for ln in own if front.in_keywords(ln)]
             used = {id(ln) for ln in [*head, *aux, *abs_, *kws]}
-            rest = [ln for ln in page1 if id(ln) not in used]
+            rest = [ln for ln in own if id(ln) not in used]
             return (
-                _band_major(head)
+                before
+                + _band_major(head)
                 + _band_major(aux)
                 + _band_major(abs_)
                 + _band_major(kws)
                 + sorted(rest, key=lambda ln: (ln.y0, ln.x0))
-                + sorted(others, key=lambda ln: (ln.page, ln.y0, ln.x0))
+                + after
             )
         return sorted(body, key=lambda ln: (ln.page, ln.y0, ln.x0))
 
@@ -1444,12 +1605,12 @@ def _reading_order(
         # 若交给下面的锚点/归栏逻辑，摘要末行会被当成右栏文字排到正文后面。
         # 先按 y 逐行输出摘要区，再从正文里移除这些行。
         if front is not None and front.page == page:
-            front_lines = [
-                ln for ln in plines
-                if front.in_abstract(ln) or front.in_keywords(ln)
-            ]
+            abs_lines = [ln for ln in plines if front.in_abstract(ln)]
+            kw_lines = [ln for ln in plines if front.in_keywords(ln)]
+            front_lines = abs_lines + kw_lines
             if front_lines:
-                ordered.extend(_band_major(front_lines))
+                ordered.extend(_band_major(abs_lines))
+                ordered.extend(_band_major(kw_lines))
                 front_ids = {id(ln) for ln in front_lines}
                 plines = [ln for ln in plines if id(ln) not in front_ids]
 
@@ -1850,6 +2011,35 @@ def _local_edges(ordered: list[Line]) -> dict[int, tuple[float, float]]:
     return out
 
 
+def _looks_like_body_line(ln: Line, body_size: float) -> bool:
+    """图区内仍按正文保留的行：长行，或写满栏宽的多词正文字号行。
+
+    区域层已经会裁掉成段正文，但 `vector_labels` 生长出来的图区可能把
+    单行定义/假设段落框进去；这里做第二道保护，避免整行被当图内标注丢掉。
+    正文里夹着 κ/λ 等数学字体时 `ln.math` 可能为真，不能因此直接否决；
+    只有数学字符占比很高、词数又少的行才是真正的公式/图内标签。
+    """
+    text = (ln.text or "").strip()
+    if not text:
+        return False
+    words = len(text.split())
+    small = body_size > 0 and ln.size < body_size * 0.95
+    # 定义/引理/假设段常比正文小一号，但句子完整、词数多，仍按正文保护。
+    prose = (
+        len(text) >= 80
+        and words >= 12
+        and re.search(r"[.;:]\s", text)
+    )
+    if small and not prose:
+        return False
+    ratio = ln.math_chars / max(ln.total_chars, 1)
+    if ratio >= 0.6 and words < 8:
+        return False
+    if len(text) >= 220:
+        return True
+    return (ln.bbox[2] - ln.bbox[0]) >= 260 and words >= 8
+
+
 def _build_blocks(
     ordered: list[Line],
     body_size: float,
@@ -2021,6 +2211,7 @@ def _build_blocks(
             if (
                 page_regions.figure_at(ln.bbox) is not None
                 and not _is_caption_text(ln.text)
+                and not _looks_like_body_line(ln, body_size)
             ):
                 continue
 
@@ -2264,6 +2455,96 @@ _AUTHOR_NOTE_RE = re.compile(
     r"E-?mail\s*[:：]|@|\bNSF\b|\bNASA\b|\bFellow(?:ship)?\b)",
     re.IGNORECASE,
 )
+# 文末/页底的作者简介与声明：和作者单位一样属于元数据，阅读时折叠展示，
+# 不进正文流、不参与翻译。
+_TAIL_META_HEAD_RE = re.compile(
+    r"^(?:[\d*†‡§¶#]+\s*)?(?:"
+    r"credit\s+authorship\s+contribution(?:\s+statement)?|"
+    r"authorship\s+contribution\s+statement|"
+    r"authors?\s+contributions?|"
+    r"funding(?:\s+and\s+acknowledg(?:e)?ments?)?|"
+    r"competing\s+interests?|"
+    r"conflicts?\s+of\s+interest|"
+    r"declaration\s+of\s+(?:competing\s+)?interests?|"
+    r"(?:data|code)\s+availability(?:\s+statement)?|"
+    r"availability\s+of\s+(?:data|code|materials)|"
+    r"acknowledg(?:e)?ments?(?:\s+and\s+disclosure\s+of\s+funding)?|"
+    r"author\s+(?:biograph(?:y|ies)|information)|"
+    r"about\s+the\s+authors?|biograph(?:y|ies)|"
+    r"corresponding\s+authors?|"
+    r"orcid|e-?mail\s+addresses?|"
+    r"supplementary\s+material|supporting\s+information|"
+    r"ethics\s+(?:statement|approval)|"
+    r"consent\s+(?:to\s+participate|for\s+publication)|"
+    r"patient\s+consent|"
+    r"received|accepted|revised|published"
+    r")\b",
+    re.IGNORECASE,
+)
+_CONTACT_RE = re.compile(
+    r"(?:Corresponding\s+authors?|E-?mail\s*(?:address(?:es)?)?\s*[:：]|"
+    r"[\w.+-]+@[\w-]+\.[A-Za-z]{2,}|\bORCID\s*(?:\(s\))?\s*[:：])",
+    re.IGNORECASE,
+)
+_DECLARATION_RE = re.compile(
+    r"\b(?:supported|funded|grant|award|declare|declared|contributed|contribution|"
+    r"designed|wrote|acknowledge|available|approved|consent|competing|interests?|"
+    r"initiated|conceptualization|methodology|investigation|supervised|performed|"
+    r"analy[sz]ed)\b",
+    re.IGNORECASE,
+)
+_DECL_START_RE = re.compile(r"^(?:This|These|The|Our|We|It|All|No)\b")
+_CREDIT_ACTION_RE = re.compile(
+    r"\b(?:designed|wrote|conceived|performed|analy[sz]ed|initiated|supervised|"
+    r"contributed|contribution|conceptualization|methodology|investigation)\b",
+    re.IGNORECASE,
+)
+_BIO_RE = re.compile(
+    r"(?:received\s+(?:his|her|their)\s+(?:Ph\.?\s?D|B\.?\s?S|M\.?\s?S|M\.?D|doctor|bachelor|master)|"
+    r"(?:his|her|their)\s+research\s+interests|"
+    r"research\s+interests\s+(?:include|are|focus)|"
+    r"is\s+(?:a|an)\s+(?:full\s+|associate\s+|assistant\s+)?"
+    r"(?:professor|researcher|lecturer|scientist|engineer|physician)|"
+    r"works?\s+(?:at|in)\s+(?:the\s+)?"
+    r"(?:department|institute|university|college|laboratory))",
+    re.IGNORECASE,
+)
+
+
+def _is_tail_metadata(
+    b: Block,
+    text: str,
+    body_size: float,
+    page_height: float,
+    last_page: int,
+    in_refs: bool,
+) -> bool:
+    """判断块是不是文末/页底的作者简介、通讯方式或声明类信息。"""
+    if not text or len(text) > 1600:
+        return False
+    head = _TAIL_META_HEAD_RE.match(text)
+    head_hit = head is not None
+    bio_hit = _BIO_RE.search(text) is not None
+    contact_hit = _CONTACT_RE.search(text) is not None
+    if not (head_hit or bio_hit or contact_hit):
+        return False
+    if _REF_START_RE.match(text) and _REF_YEAR_RE.search(text) and not head_hit:
+        return False
+    bottom = b.bbox[3] >= page_height * 0.68
+    small = body_size > 0 and b.size > 0 and b.size < body_size * 0.95
+    if head_hit:
+        rest = text[head.end():].lstrip()
+        if not rest or rest[:1] in ":：":
+            return True
+        # 段落型声明：标签后要能看出是「声明内容」（This work was supported /
+        # The authors declare / 作者贡献动作），而不是以 Funding/Data 开头的正文句。
+        declared = bool(_DECLARATION_RE.search(rest)) and (
+            bool(_DECL_START_RE.match(rest)) or bool(_CREDIT_ACTION_RE.search(rest)) or in_refs
+        )
+        if not declared:
+            return False
+        return bottom or small or in_refs or b.page >= max(1, last_page - 1)
+    return (bottom or small) and (bio_hit or contact_hit)
 
 
 def _pick_title_index(blocks: list[Block], page_height: float) -> int | None:
@@ -2569,6 +2850,8 @@ def _classify(
     section = ""
     front_matter = True          # 仍在首页标题区（Abstract 之前）
     body_started = False         # 已进入 Introduction，之后不再有作者单位
+    in_tail_meta = False         # 已进入文末作者简介/声明区
+    last_page = max((b.page for b in blocks), default=1)
     title_idx = _pick_title_index(blocks, page_height)
     _merge_title_lines(blocks, title_idx)
 
@@ -2589,6 +2872,36 @@ def _classify(
             # 图注/表注随论文一起翻译：前端图表栏优先展示配对 caption 块的
             # translated（captionZh），保持 False 会让图注永远只有英文。
             b.translatable = True
+            continue
+
+        # 已进入文末作者简介/声明区：其后的连续段落整段折叠，直到新的章节标题
+        # 或参考文献条目出现。否则声明正文会被参考文献状态吞成 reference。
+        if in_tail_meta:
+            if (
+                b.kind in ("equation", "figure", "table")
+                or _looks_reference_entry(t)
+                or (b.kind == "heading" and not _TAIL_META_HEAD_RE.match(t))
+            ):
+                in_tail_meta = False
+            elif len(t) >= 20:
+                b.kind = "footnote"
+                b.translatable = False
+                b.level = 0
+                b.section = section
+                continue
+
+        # 文末/页底的作者简介、通讯方式与声明类信息：和作者单位一样折叠，
+        # 不进入正文流、不翻译。放行首页作者卡片区（那里的邮箱属于作者块）。
+        if (
+            b.kind in ("para", "heading")
+            and not (front is not None and front.page == b.page and front.in_head(b.bbox))
+            and _is_tail_metadata(b, t, body_size, page_height, last_page, in_refs)
+        ):
+            b.kind = "footnote"
+            b.translatable = False
+            b.level = 0
+            b.section = section
+            in_tail_meta = bool(in_refs or b.page >= max(1, last_page - 1))
             continue
 
         # 首页辅助窄列（通讯作者/邮箱/单位）与摘要并列，属于元数据，不是正文。
@@ -2663,7 +2976,7 @@ def _classify(
                 front_matter
                 and b.page == 1
                 and (front is None or front.page == 0)
-                and not re.match(r"^(Abstract|摘\s*要)", t, re.IGNORECASE)
+                and not _is_abstract_head(t)
             ):
                 if _NAME_RE.search(t) and len(t) < 300:
                     b.kind = "author"
@@ -2680,12 +2993,12 @@ def _classify(
                 # Nature 等 PDF 的参考文献区未必有可识别的 References 标题，
                 # 进入下一个正常章节（Methods 等）时结束参考文献状态。
                 in_refs = False
-            if re.match(r"^(Abstract|摘\s*要)\b", t, re.IGNORECASE):
+            if _is_abstract_head(t):
                 front_matter = False
                 # 很多期刊（如 Nature）没有 Introduction 标题；摘要之后就是正文，
                 # 否则正文里的 "laboratory / Institute" 会被误判成作者单位。
                 body_started = True
-            if re.match(r"^(\d+\.?\s*)?(Introduction|摘\s*要)\b", t, re.IGNORECASE):
+            if _INTRO_HEAD_RE.match(t) or _is_abstract_head(t):
                 body_started = True
             continue
 
@@ -3384,6 +3697,12 @@ def _merge_caption_continuations(
             if _CJK_RE.search(b.text) and len(n.text.strip()) > 60:
                 break
             same_size = (not b.size or not n.size) or abs(b.size - n.size) <= 1.5
+            # 算法框的题注只取标题行：`Input:`/`Output:`/编号行属于伪代码本体。
+            # 并进 caption 会让表头变成一大段代码，算法体也会从正文里消失。
+            if _ALG_CAPTION_RE.match(b.text) and (
+                len(b.text) >= 120 or _ALG_BODY_LINE_RE.match(n.text.strip())
+            ):
+                break
             if n.kind == "heading":
                 # 纯编号表注后的居中大标题可能被判成 heading；
                 # 真章节标题通常更长或字号更大，用长度 + 字号挡住。
@@ -3443,6 +3762,43 @@ def _cover_ratio(inner: pymupdf.Rect, outer: pymupdf.Rect) -> float:
     return inter.width * inter.height / (inner.width * inner.height)
 
 
+def _table_cell_text(page: pymupdf.Page, bbox, raw_blocks=None) -> str:
+    """Read characters in geometric order, keeping punctuation on its visual row."""
+    rect = pymupdf.Rect(bbox)
+    chars = []
+    for block in raw_blocks if raw_blocks is not None else page.get_text("rawdict", clip=rect)["blocks"]:
+        if not pymupdf.Rect(block["bbox"]).intersects(rect):
+            continue
+        for line in block.get("lines", []):
+            if not pymupdf.Rect(line["bbox"]).intersects(rect):
+                continue
+            for span in line["spans"]:
+                for char in span["chars"]:
+                    c = char["c"]
+                    box = pymupdf.Rect(char["bbox"])
+                    if c.strip() and rect.contains(pymupdf.Point((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2)):
+                        chars.append((box, c))
+    rows = []
+    for box, c in sorted(chars, key=lambda item: (item[0].y0, item[0].x0)):
+        cy = (box.y0 + box.y1) / 2
+        match = next((row for row in rows if abs(row[0] - cy) < max(3, box.height * 0.45)), None)
+        if match is None:
+            match = [cy, []]
+            rows.append(match)
+        match[1].append((box, c))
+    result = []
+    for _, row in sorted(rows, key=lambda r: r[0]):
+        text = ''
+        previous = None
+        for box, c in sorted(row, key=lambda item: item[0].x0):
+            if previous is not None and box.x0 - previous.x1 > max(1.5, previous.height * .23):
+                text += ' '
+            text += c
+            previous = box
+        result.append(text)
+    return '\n'.join(result)
+
+
 def _page_tables(page: pymupdf.Page, strategy: str = "lines") -> list[tuple[pymupdf.Rect, str, int]]:
     """单页表格识别。lines 策略找有线框的表，text 策略找纯空白分隔的无框表。"""
     try:
@@ -3461,6 +3817,28 @@ def _page_tables(page: pymupdf.Page, strategy: str = "lines") -> list[tuple[pymu
                 if hasattr(tab, meth):
                     html = getattr(tab, meth)() or ""
                     break
+            # Reconstruct text from character positions: PDF extraction order can
+            # place a decimal point after all digits despite its visual position.
+            # Keep the detector's cell geometry and preserve its empty cells.
+            if html.startswith("<table") and hasattr(tab, "rows"):
+                originals = tab.extract()
+                raw_blocks = page.get_text("rawdict", clip=rect)["blocks"]
+                second = [str(v).strip() for v in originals[1] if v and str(v).strip()] if len(originals) > 1 else []
+                multi_header = (len(second) >= 2 and any(not v for v in originals[1])
+                                and all(re.search(r"[A-Za-z]", v) for v in second))
+                rendered = []
+                for row_index, row in enumerate(tab.rows):
+                    cells = []
+                    for col_index, cell in enumerate(row.cells):
+                        original = (originals[row_index][col_index] or "") if row_index < len(originals) and col_index < len(originals[row_index]) else ""
+                        value = _table_cell_text(page, cell, raw_blocks) if cell else ""
+                        if not value:
+                            value = original
+                        tag = "th" if row_index == 0 or (row_index == 1 and multi_header) else "td"
+                        cells.append(f"<{tag}>{html_lib.escape(value).replace(chr(10), '<br/>')}</{tag}>")
+                    rendered.append("<tr>" + "".join(cells) + "</tr>")
+                if rendered:
+                    html = "<table>" + "".join(rendered) + "</table>"
             rows.append((rect, html, int(getattr(tab, "col_count", 0) or 0)))
         except Exception:
             continue
@@ -4179,7 +4557,15 @@ def _drop_float_text_fragments(blocks: list[Block], body_size: float) -> list[Bl
                     len(text) <= 120
                     or len(_WORD_RE.findall(text)) <= 6
                 ):
-                    continue
+                    # 定义/引理/假设段的字号可能比正文略小，但句子完整、
+                    # 词数多；它们是正文，不是图内坐标轴/图例标注。
+                    prose = (
+                        len(text) >= 80
+                        and len(_WORD_RE.findall(text)) >= 12
+                        and re.search(r"[.;:]\s", text)
+                    )
+                    if not prose:
+                        continue
         out.append(b)
     for i, b in enumerate(out):
         b.order = i
@@ -4912,8 +5298,13 @@ def _crop_inline_math(
     规则能可靠重建的走 LaTeX；规则覆盖不到的保留原裁图，保证字母和排版
     不会因为猜错而变形。
     """
+    # 同篇内相同公式片段（如重复出现的 √、希腊字母集合）共享同一张裁图，
+    # 避免公式密集论文产生成百上千张重复 PNG。
+    cache: dict[tuple[str, int], str] = {}
     for b in blocks:
-        if b.kind not in ("para", "abstract", "list"):
+        # 图注/表注/参考文献里也可能有行内公式；前端 RichText 同样按
+        # inline_math 渲染，漏裁会让这些位置留下方块。
+        if b.kind not in ("para", "abstract", "list", "caption", "reference"):
             continue
         for index, item in enumerate(b.inline_math):
             if not item.get("fallback") or item.get("image_path"):
@@ -4923,6 +5314,12 @@ def _crop_inline_math(
                 continue
             rect = pymupdf.Rect(bbox)
             if rect.is_empty or rect.width < 1 or rect.height < 1:
+                continue
+            key = ((item.get("source") or "").strip(), round(rect.height))
+            cached = cache.get(key)
+            if cached and Path(cached).exists():
+                item["image_path"] = cached
+                item["latex"] = ""
                 continue
             rect = pymupdf.Rect(rect.x0 - 1, rect.y0 - 1, rect.x1 + 1, rect.y1 + 1)
             page = doc[b.page - 1]
@@ -4936,6 +5333,7 @@ def _crop_inline_math(
             if path:
                 item["image_path"] = path
                 item["latex"] = ""
+                cache[key] = path
     return blocks
 
 
@@ -5165,6 +5563,15 @@ def _extract_vector_text_figures(
                     if b.kind in ("heading", "title"):
                         if (body_size <= 0 or b.size >= body_size * 0.95) and not anchored(b):
                             continue
+                    # 完整长句（定义/引理/假设）是正文：图注 bbox 可能压到
+                    # 本行，`anchored` 因此为真，但不能把它收进图内标注。
+                    prose = (
+                        len(b.text.strip()) >= 80
+                        and len(b.text.split()) >= 12
+                        and bool(re.search(r"[.;:]\s", b.text))
+                    )
+                    if prose and not disclaim(b):
+                        continue
                     # 正文风格（正文字号 + 够长 + 够宽）是图的边界；
                     # 图内长标注（8.5pt 对 10pt 正文）字号略小，不能按
                     # 「≥0.95 倍正文」当正文，否则整张图会被下文挡住。
@@ -5548,6 +5955,71 @@ def _collapse_vector_figure_pages(
     return out
 
 
+def _extract_ruled_algorithms(doc, blocks: list[Block], out_dir: Path) -> list[Block]:
+    """Recover captioned algorithm floats bounded by matching horizontal rules."""
+    additions: list[Block] = []
+    for pno, page in enumerate(doc, 1):
+        ruled_tables = [
+            pymupdf.Rect(b.bbox) for b in blocks
+            if b.page == pno and b.kind == "table"
+        ]
+        rules = []
+        for drawing in page.get_drawings():
+            rect = pymupdf.Rect(drawing["rect"])
+            if rect.width >= 80 and rect.height <= 2:
+                rules.append(rect)
+        for raw in page.get_text("dict")["blocks"]:
+            for line in raw.get("lines", []):
+                title = "".join(span["text"] for span in line["spans"]).strip()
+                # 题注层已把 Algorithm 纳入表题体系；这里复用同一判据，
+                # 顺序编号与附录编号（Algorithm A.1）都能兜底。
+                if not re.match(r"^(?:Algorithm|ALGORITHM)\s", title):
+                    continue
+                if not _is_table_caption(title):
+                    continue
+                heading = pymupdf.Rect(line["bbox"])
+                if any(
+                    t.x0 - 2 <= (heading.x0 + heading.x1) / 2 <= t.x1 + 2
+                    and t.y0 - 2 <= (heading.y0 + heading.y1) / 2 <= t.y1 + 2
+                    for t in ruled_tables
+                ):
+                    # 结构化表格路径已经产出该算法框，避免重复裁一张
+                    continue
+                tops = [r for r in rules if heading.y0 - 15 <= r.y0 <= heading.y1
+                        and r.x0 <= heading.x0 + 8 and r.x1 >= heading.x1 - 8]
+                if not tops:
+                    continue
+                top = min(tops, key=lambda r: abs(r.y0 - heading.y0))
+                bottoms = [r for r in rules if r.y0 > heading.y1 + 25
+                           and abs(r.x0 - top.x0) < 5 and abs(r.x1 - top.x1) < 5]
+                if not bottoms:
+                    continue
+                bottom = min(bottoms, key=lambda r: r.y0)
+                rect = pymupdf.Rect(top.x0 - 2, min(top.y0, heading.y0) - 2,
+                                    top.x1 + 2, bottom.y0 + 2) & page.rect
+                img = _crop(page, rect, out_dir / f"p{pno:03d}_algorithm{len(additions)}.png", target_px=TABLE_TARGET_PX)
+                if img:
+                    additions.append(Block(id='', order=0, page=pno, kind='table', text='',
+                                           bbox=tuple(rect), image_path=img, caption=title,
+                                           translatable=False))
+    for algorithm in additions:
+        rect = pymupdf.Rect(algorithm.bbox)
+        inside = [i for i, b in enumerate(blocks) if b.page == algorithm.page
+                  and rect.contains(pymupdf.Point((b.bbox[0] + b.bbox[2]) / 2,
+                                                   (b.bbox[1] + b.bbox[3]) / 2))]
+        if inside:
+            pos = inside[0]
+            blocks = [b for i, b in enumerate(blocks) if i not in set(inside)]
+            blocks.insert(pos, algorithm)
+        else:
+            pos = next ( (i for i, b in enumerate(blocks) if b.page > algorithm.page
+                          or (b.page == algorithm.page and b.bbox[1] > rect.y1)), len(blocks))
+            blocks.insert(pos, algorithm)
+    for i, b in enumerate(blocks):
+        b.order, b.id = i, f"b{i:04d}"
+    return blocks
+
+
 def parse_pdf(
     pdf_path: str | Path,
     paper_id: str = "",
@@ -5674,6 +6146,7 @@ def parse_pdf(
             out = Path(figure_dir)
             if paper_id:
                 out = out / paper_id
+            blocks = _extract_ruled_algorithms(doc, blocks, out / "tables")
             blocks = _extract_tables(doc, blocks, out / "tables", detected)
             blocks = _absorb_table_notes(blocks, body_size)
             blocks = _extract_figures(doc, blocks, out / "figures", body_size, detected)

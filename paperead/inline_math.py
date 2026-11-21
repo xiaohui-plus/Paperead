@@ -14,8 +14,10 @@ r"""正文行内公式重建：把 PDF span 的字体/字号/基线还原成 LaT
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
+from .fonts.registry import is_anchor_font, is_aux_font, is_math_font
 from .textnorm import keep_space_between
 
 # 强数学字体：只有这些字体能作为「这一行是公式」的锚点。
@@ -23,6 +25,9 @@ from .textnorm import keep_space_between
 # CMR10），绝不能单独作为公式证据——否则整篇正文都会被重建为行内公式。
 STRONG_MATH_FONTS = (
     "CMMI", "CMSY", "CMEX", "MSBM", "MTMI", "MTEX", "EUSM", "EUFM", "Symbol",
+    # STIX 数学字体家族（MDPI/Elsevier 常见）：数学斜体、花体、粗体都在
+    # STIXMath* 下，只认 Computer Modern 会把 𝑖/𝑁 与 PUA 花体漏成正文方块。
+    "STIXMath",
 )
 # 辅助字体：只能并入已经由强数学字体开启的公式组（括号、数字、Mpc/SPD 等正体词）。
 AUX_MATH_FONTS = ("CMR",)
@@ -47,9 +52,39 @@ SYMBOLS = {
     "∈": r"\in", "∩": r"\cap", "∪": r"\cup", "⊤": r"\top",
     "∂": r"\partial", "∇": r"\nabla", "→": r"\to", "∣": r"\mid",
     "%": r"\%", "∥": r"\parallel", "≃": r"\simeq", "∼": r"\sim",
+    # 常见关系/算子：KaTeX 未必认识原 Unicode，必须显式映射为命令。
+    "≜": r"\triangleq", "⊆": r"\subseteq", "⊂": r"\subset",
+    "⊇": r"\supseteq", "⊃": r"\supset", "⊕": r"\oplus",
+    "⊗": r"\otimes", "⟂": r"\perp", "⋯": r"\cdots", "⋅": r"\cdot",
+    "≅": r"\cong", "∘": r"\circ", "∅": r"\varnothing",
+    "∀": r"\forall", "∃": r"\exists", "¬": r"\neg",
+    "∧": r"\wedge", "∨": r"\vee", "∝": r"\propto",
+    "⇒": r"\Rightarrow", "⇔": r"\Leftrightarrow", "↦": r"\mapsto",
+    "∖": r"\setminus", "≺": r"\prec", "≻": r"\succ",
+    "⟨": r"\langle", "⟩": r"\rangle", "〈": r"\langle", "〉": r"\rangle",
+    "‖": r"\Vert", "⌈": r"\lceil", "⌉": r"\rceil",
+    "⌊": r"\lfloor", "⌋": r"\rfloor", "…": r"\ldots",
+    "′": "'", "″": "''",
+    # 常见双线体字母：NFKC 会把 𝔼 归一成 E，先按原字符映射成 \mathbb。
+    "ℝ": r"\mathbb{R}", "ℕ": r"\mathbb{N}", "ℤ": r"\mathbb{Z}",
+    "ℚ": r"\mathbb{Q}", "ℂ": r"\mathbb{C}", "𝔼": r"\mathbb{E}",
 }
 # 明确无法只靠字符还原结构的符号
 HARD_CHARS = set("∑∏∫∮√")
+# PDF 字体把数学字形塞进私用区（STIX PUA）或 ToUnicode 失败时留下替换符；
+# 前端没有对应字形，会渲染成「□」。这类字符不能猜，只能交给识图或裁图垫后。
+ABNORMAL_RE = re.compile(r"[\ue000-\uf8ff\ufffd]")
+
+
+def _norm_math_char(ch: str) -> str:
+    """Unicode 数学字母区（𝑈/𝑖/𝑁）归一化成可渲染的 ASCII。
+
+    `unicodedata.normalize('NFKC', '𝑖')` → `i`，避免把 U+1D456 原样塞进
+    LaTeX（KaTeX 未必认识）或留下缺字形方块。
+    """
+    if 0x1D400 <= ord(ch) <= 0x1D7FF or 0x2100 <= ord(ch) <= 0x214F:
+        return unicodedata.normalize("NFKC", ch)
+    return ch
 
 
 @dataclass
@@ -60,6 +95,9 @@ class InlineMath:
     bbox: tuple[float, float, float, float] | None = None
     fallback: bool = False
     source: str = ""
+    # 异常符号兜底（私用区/替换符）不能参与公式碎片合并，否则会把相邻
+    # 正文词一起裁进小图，出现「and the rest of」这种正文被截图覆盖。
+    symbol: bool = False
 
     def to_dict(self) -> dict:
         data = {
@@ -69,21 +107,24 @@ class InlineMath:
             "fallback": self.fallback,
             "source": self.source,
         }
+        if self.symbol:
+            data["symbol"] = True
         if self.bbox:
             data["bbox"] = [round(v, 1) for v in self.bbox]
         return data
 
 
 def _is_math(font: str) -> bool:
-    return any(font.startswith(prefix) for prefix in MATH_FONTS)
+    # 角色由 fonts.registry 统一解析；历史前缀表仍保留给外部导入兼容。
+    return is_math_font(font)
 
 
 def _is_strong_math(font: str) -> bool:
-    return any(font.startswith(prefix) for prefix in STRONG_MATH_FONTS)
+    return is_anchor_font(font)
 
 
 def _is_aux_math(font: str) -> bool:
-    return any(font.startswith(prefix) for prefix in AUX_MATH_FONTS)
+    return is_aux_font(font)
 
 
 def _is_hard(font: str) -> bool:
@@ -129,7 +170,12 @@ def _letter(span: dict, text: str) -> str:
     font = span.get("font") or ""
     if not text:
         return ""
-    if any(ch in HARD_CHARS for ch in text) or _is_hard(font):
+    # 私用区字形没有可靠的 Unicode 语义：硬猜会把「𝒰」猜成错误字母。
+    # 返回空串让调用方把整段标成 fallback，由裁图/识图垫后。
+    if ABNORMAL_RE.search(text):
+        return ""
+    text = "".join(_norm_math_char(ch) for ch in text)
+    if any(ch in HARD_CHARS for ch in text):
         return ""
 
     # 省略号在 PDF 里常被拆成多个「·」，合成 \cdots 避免出现 \cdot\cdot\cdot
@@ -157,19 +203,63 @@ def _letter(span: dict, text: str) -> str:
     for ch in text:
         if ch.isspace():
             continue
+        # 双线体/特殊符号先按原字符映射，再做 Unicode 数学字母归一化。
+        if ch in SYMBOLS:
+            out.append(SYMBOLS[ch])
+            continue
+        ch = _norm_math_char(ch)
         if ch in GREEK:
             out.append(GREEK[ch])
-        elif ch in SYMBOLS:
-            out.append(SYMBOLS[ch])
         elif font.startswith("CMSY"):
             # Computer Modern Symbol：大写字母是花体（\mathcal），其余按常见符号
             if ch.isascii() and ch.isalpha() and ch.isupper():
                 out.append(r"\mathcal{" + ch + "}")
             else:
                 out.append(ch)
+        elif not ch.isascii():
+            # 数学字体里出现韩文/私用区/未分配码点，说明 PDF 的 ToUnicode
+            # 映射错乱（实测数学斜体 i 被映射成韩文 U+D456），前端没有
+            # 对应字形。把乱码塞进 LaTeX 只会渲染成方块，交给裁图兜底。
+            if unicodedata.category(ch) in ("Co", "Cn", "Lo", "Cs"):
+                return ""
+            # 未收录的非 ASCII 运算符（KaTeX 不保证支持原字符）同样不猜。
+            return ""
         else:
             out.append(ch)
     return "".join(out)
+
+
+def build_symbol_fallbacks(
+    text: str,
+    ranges: list[tuple[int, int, dict]],
+    existing: list[dict] | None = None,
+) -> list[InlineMath]:
+    """把正文里无法渲染的私用区/替换符片段标成 fallback。
+
+    这些字符在前端没有字形，会显示成「□」。`build_inline_math` 只处理
+    「强数学字体组」；正文里孤立出现的异常符号（例如 STIX 花体 U）不在
+    公式组内，必须单独补一个裁图区间，否则整段正文永久带着方块。
+    """
+    covered = [
+        (int(m.get("start", 0)), int(m.get("end", 0)))
+        for m in (existing or [])
+    ]
+    out: list[InlineMath] = []
+    for start, end, span in ranges:
+        if end <= start:
+            continue
+        seg = text[start:end] or (span.get("text") or "")
+        if not ABNORMAL_RE.search(seg):
+            continue
+        if any(a < end and b > start for a, b in covered):
+            continue
+        bbox = span.get("bbox")
+        out.append(
+            InlineMath(
+                start, end, "", tuple(bbox) if bbox else None, True, seg, symbol=True,
+            )
+        )
+    return out
 
 
 def build_inline_math(spans: list[dict], ranges: list[tuple[int, int, dict]]) -> list[InlineMath]:
@@ -224,8 +314,11 @@ def build_inline_math(spans: list[dict], ranges: list[tuple[int, int, dict]]) ->
                 atoms.append({"tex": tex, "sup": "", "sub": ""})
             else:
                 if not atoms:
-                    hard = True
-                    break
+                    # 组里没有基字符（孤立的上/下标，常见于公式被正文
+                    # span 切断）：按普通字符保留即可。为丢失上标位置
+                    # 而整组裁图，会让正文出现大量小图，代价更大。
+                    atoms.append({"tex": tex, "sup": "", "sub": ""})
+                    continue
                 atoms[-1][pos] += tex
         if hard or not atoms:
             bbox = None
@@ -235,7 +328,7 @@ def build_inline_math(spans: list[dict], ranges: list[tuple[int, int, dict]]) ->
                     min(b[0] for b in xs), min(b[1] for b in xs),
                     max(b[2] for b in xs), max(b[3] for b in xs),
                 )
-            out.append(InlineMath(start, end, "", bbox, True, raw))
+            out.append(InlineMath(start, end, "", bbox, True, raw, symbol=bool(ABNORMAL_RE.search(raw))))
         else:
             pieces = []
             for atom in atoms:

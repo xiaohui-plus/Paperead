@@ -24,6 +24,11 @@ export interface ModelProfile {
   provider: string
   /** 该服务商获取 API Key 的官方页面 */
   keyUrl?: string
+  /**
+   * 由支持识图的回答模型自动同步而来（不是用户手动添加的识图模型）。
+   * 同步记录会随回答模型的 Key 更新；用户自己配的识图模型不会被覆盖。
+   */
+  linkedFrom?: 'answer'
   createdAt: number
   updatedAt: number
 }
@@ -41,6 +46,8 @@ export interface ProviderModel {
   label: string
   note: string
   recommended?: boolean
+  /** 这个模型本身是否具备识图能力（多模态） */
+  vision?: boolean
 }
 
 export interface ProviderPreset {
@@ -105,6 +112,7 @@ export const PRESETS: ProviderPreset[] = [
         label: 'DeepSeek V4.1 Flash',
         note: '2026-09 最新，原生多模态；速度快、价格低',
         recommended: true,
+        vision: true,
       },
       {
         id: 'deepseek-v4-pro',
@@ -151,13 +159,20 @@ export const PRESETS: ProviderPreset[] = [
         label: 'Kimi K3.1 Pro',
         note: '2026-11 最新旗舰；原生多模态，1M 上下文',
         recommended: true,
+        vision: true,
       },
       {
         id: 'kimi-k3.1-pro-highspeed',
         label: 'Kimi K3.1 Pro 高速版',
         note: '同等能力，约 2–3 倍速度',
+        vision: true,
       },
-      { id: 'kimi-k3', label: 'Kimi K3', note: '上一代旗舰，多模态' },
+      {
+        id: 'kimi-k3',
+        label: 'Kimi K3',
+        note: '上一代旗舰，多模态',
+        vision: true,
+      },
     ],
   },
   {
@@ -176,6 +191,7 @@ export const PRESETS: ProviderPreset[] = [
         label: '豆包 Seed 2.0 Pro',
         note: '2026 最新；原生多模态，图表/长文理解强',
         recommended: true,
+        vision: true,
       },
       {
         id: 'doubao-seed-2-0-lite',
@@ -220,24 +236,28 @@ export const PRESETS: ProviderPreset[] = [
         label: 'DeepSeek V4.1 Flash',
         note: '2026-09 最新；原生多模态，性价比最高',
         recommended: true,
+        vision: true,
       },
       {
         id: 'zai-org/GLM-5.3-Flash',
         label: 'GLM-5.3-Flash',
         note: '2026-08 最新 GLM；原生多模态，1M 上下文',
         recommended: true,
+        vision: true,
       },
       {
         id: 'Qwen/Qwen3.8-27B',
         label: 'Qwen3.8-27B',
         note: '2026-08 最新 Qwen；原生视觉，256K 上下文',
         recommended: true,
+        vision: true,
       },
       {
         id: 'moonshotai/Kimi-K2.7-Code',
         label: 'Kimi K2.7 Code',
         note: '2026-06；多模态，代码/Agent 强',
         recommended: true,
+        vision: true,
       },
       {
         id: 'zai-org/GLM-5.3',
@@ -514,6 +534,7 @@ function normalizeSettings(raw: unknown): ModelSettings {
       apiKey: String(item.apiKey ?? ''),
       provider: String(item.provider ?? 'custom'),
       keyUrl: item.keyUrl ? String(item.keyUrl) : undefined,
+      linkedFrom: item.linkedFrom === 'answer' ? 'answer' : undefined,
       createdAt: Number(item.createdAt) || Date.now(),
       updatedAt: Number(item.updatedAt) || Date.now(),
     })
@@ -642,6 +663,105 @@ export function isModelReady(model: ModelProfile | null | undefined): boolean {
       model.model.trim() &&
       model.apiKey.trim().length >= 8,
   )
+}
+
+/**
+ * 这个模型是否自带识图（多模态）能力。
+ * 预设模型以显式标记为准（不靠名字猜）；自定义模型才用常见命名兜底，
+ * 避免把纯文本模型也同步成「识图模型」。
+ */
+export function modelSupportsVision(
+  model: Pick<ModelProfile, 'baseUrl' | 'model'>,
+): boolean {
+  const baseUrl = normalizeBaseUrl(model.baseUrl)
+  const presetModel = PRESETS.find(
+    (p) => p.baseUrl === baseUrl,
+  )?.models.find((m) => m.id === model.model)
+  if (presetModel) return Boolean(presetModel.vision)
+  return /(?:vision|vl|4o|omni|multimodal|seed-2|kimi-k[23]\.|deepseek-v4\.1)/.test(
+    String(model.model || '').toLowerCase(),
+  )
+}
+
+/**
+ * 保存回答模型后，把「也支持识图」的回答模型同步一份到识图角色：
+ *
+ * - 用户已经配过识图模型：保留其选择，只把这条配置列进识图模型列表；
+ * - 用户还没配：默认把这条同步配置设为当前识图模型；
+ * - 用户手动添加的同名识图配置（无 linkedFrom 标记）不会被覆盖。
+ *
+ * 返回同一个对象引用表示「无需改动」，调用方据此避免重复落盘。
+ */
+export function linkVisionToAnswer(
+  settings: ModelSettings,
+  answer: ModelProfile,
+): ModelSettings {
+  if (answer.kind !== 'answer' || !modelSupportsVision(answer)) return settings
+
+  const baseUrl = normalizeBaseUrl(answer.baseUrl)
+  const existing = settings.models.find(
+    (m) =>
+      m.kind === 'vision' &&
+      m.baseUrl === baseUrl &&
+      m.model === answer.model,
+  )
+  // 用户自己配的识图模型优先，绝不用回答模型覆盖它
+  if (existing && existing.linkedFrom !== 'answer') return settings
+
+  const picked = Boolean(
+    settings.active.vision &&
+      settings.models.some(
+        (m) => m.id === settings.active.vision && m.kind === 'vision',
+      ),
+  )
+  const userReady = settings.models.some(
+    (m) => m.kind === 'vision' && isModelReady(m),
+  )
+  const shouldActivate = !(picked || userReady)
+
+  if (existing) {
+    const unchanged =
+      existing.apiKey === answer.apiKey &&
+      existing.label === answer.label &&
+      existing.provider === answer.provider &&
+      (existing.keyUrl ?? '') === (answer.keyUrl ?? '') &&
+      (!shouldActivate || settings.active.vision === existing.id)
+    if (unchanged) return settings
+  }
+
+  const now = Date.now()
+  const models = [...settings.models]
+  let visionId = existing?.id ?? ''
+
+  if (existing) {
+    models[models.indexOf(existing)] = {
+      ...existing,
+      apiKey: answer.apiKey,
+      label: answer.label,
+      provider: answer.provider,
+      keyUrl: answer.keyUrl ?? existing.keyUrl,
+      updatedAt: now,
+    }
+  } else {
+    visionId = newModelId()
+    models.push({
+      ...answer,
+      id: visionId,
+      kind: 'vision',
+      linkedFrom: 'answer',
+      createdAt: now,
+      updatedAt: now,
+    })
+  }
+
+  return {
+    version: 2,
+    models,
+    active: {
+      ...settings.active,
+      vision: shouldActivate ? visionId : settings.active.vision,
+    },
+  }
 }
 
 /** 读取当前可用的回答模型。所有文字任务都应该走这里。 */

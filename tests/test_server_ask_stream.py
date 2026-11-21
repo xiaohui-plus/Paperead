@@ -274,6 +274,19 @@ def test_ask_stream_includes_web_sources_and_allows_common_sense(monkeypatch, tm
     assert [s["url"] for s in web_sources] == ["https://e.com/a", "https://e.com/b"]
     assert web_sources[0]["engine"] == "so360"
 
+    # 检索式来自「缺口规划」，不能把用户原句直接当关键词
+    web_start = next(
+        e
+        for e in events
+        if e["type"] == "tool"
+        and e.get("name") == "web_search"
+        and e.get("phase") == "start"
+    )
+    assert web_start["input"]["query"]
+    assert web_start["input"]["query"] != "自注意力机制是什么"
+    assert "是什么" not in web_start["input"]["query"]
+    assert web_start["input"]["goal"]
+
     user_prompt = backend.seen[0][-1]["content"]
     assert "[W1] 自注意力机制详解" in user_prompt
     assert "https://e.com/a" in user_prompt
@@ -341,12 +354,12 @@ def test_ask_stream_reports_web_attempt_without_results(monkeypatch, tmp_path):
     events = _events(res.text)
     sources_ev = next(e for e in events if e["type"] == "sources")
     assert sources_ev["usedWeb"] is False
-    assert sources_ev["webStatus"] == {
-        "attempted": True,
-        "engine": "",
-        "engines": [],
-        "count": 0,
-    }
+    status = sources_ev["webStatus"]
+    assert status["attempted"] is True
+    assert status["count"] == 0
+    assert status["engines"] == []
+    assert status["engine"] == ""
+    assert status["goal"]
     user_prompt = backend.seen[0][-1]["content"]
     assert "【联网状态】" in user_prompt
     assert "（通识）" in user_prompt
@@ -431,3 +444,117 @@ def test_ask_stream_deep_reads_when_paper_lacks_answer(monkeypatch, tmp_path):
     assert "检索增强与事实校验" in user_prompt
     assert "RAG 实践" in user_prompt
     assert "论文外的摘要 B" in user_prompt
+
+def test_ask_stream_skips_web_when_paper_already_covers_question(monkeypatch, tmp_path):
+    """论文档案能回答的问题不得联网：没有联网工具卡片，也不合成检索式。"""
+    main = _load_main(monkeypatch, tmp_path)
+    _use_fake_paper(main, monkeypatch)
+
+    backend = CapturingBackend(["成对结构编码使用最短路径距离与最短路数量。"])
+    llm_mod.set_backend(backend)
+    try:
+        with TestClient(main.app) as client:
+            res = client.post(
+                "/api/papers/p1/ask/stream",
+                json={
+                    "question": "What does pairwise structure encoding use?",
+                    "web": True,
+                },
+            )
+    finally:
+        llm_mod.set_backend(None)
+
+    events = _events(res.text)
+    sources_ev = next(e for e in events if e["type"] == "sources")
+    assert sources_ev["usedWeb"] is False
+    assert sources_ev["webStatus"]["attempted"] is False
+    assert sources_ev["webStatus"]["skipped"] is True
+    assert [t["name"] for t in sources_ev["tools"]] == ["paper_context"]
+    # 主动不联网时不能给模型「联网失败、只能用通识」的误导提示
+    user_prompt = backend.seen[0][-1]["content"]
+    assert "【联网状态】" not in user_prompt
+
+
+def test_ask_stream_respects_planner_when_it_says_paper_is_enough(monkeypatch, tmp_path):
+    """规划器判定论文材料足够时，即使问题带「是什么」也不联网。"""
+    main = _load_main(monkeypatch, tmp_path)
+    _use_fake_paper(main, monkeypatch)
+
+    async def plan_chat(messages, **kwargs):
+        return '{"needed": false, "goal": "论文已经解释了该结构"}'
+
+    monkeypatch.setattr(main.qa_engine, "chat", plan_chat)
+
+    backend = CapturingBackend(["论文里已解释。"])
+    llm_mod.set_backend(backend)
+    try:
+        with TestClient(main.app) as client:
+            res = client.post(
+                "/api/papers/p1/ask/stream",
+                json={"question": "自注意力机制是什么", "web": True},
+            )
+    finally:
+        llm_mod.set_backend(None)
+
+    events = _events(res.text)
+    sources_ev = next(e for e in events if e["type"] == "sources")
+    assert sources_ev["usedWeb"] is False
+    assert sources_ev["webStatus"]["attempted"] is False
+    assert sources_ev["webStatus"]["reason"] == "论文已经解释了该结构"
+
+
+def test_ask_stream_searches_with_planned_query_not_user_question(monkeypatch, tmp_path):
+    """需要联网时按规划出的检索式搜索，而不是把用户原句交给搜索引擎。"""
+    main = _load_main(monkeypatch, tmp_path)
+    _use_fake_paper(main, monkeypatch)
+
+    seen_queries: list[list[str]] = []
+
+    async def plan_chat(messages, **kwargs):
+        return (
+            '{"needed": true, "goal": "论文未解释幻觉缓解机制",'
+            ' "queries": ["多模态大模型 幻觉 缓解 综述"],'
+            ' "academic_query": "multimodal hallucination mitigation"}'
+        )
+
+    async def fake_many(queries, **kwargs):
+        seen_queries.append(list(queries))
+        return [
+            {
+                "title": "幻觉缓解综述",
+                "url": "https://e.com/a",
+                "content": "检索增强与事实校验可缓解幻觉",
+                "engine": "so360",
+            }
+        ]
+
+    monkeypatch.setattr(main.qa_engine, "chat", plan_chat)
+    monkeypatch.setattr(main.web_search, "search_many", fake_many)
+
+    question = "多模态大模型的幻觉问题怎么缓解"
+    backend = CapturingBackend(["用检索增强缓解。"])
+    llm_mod.set_backend(backend)
+    try:
+        with TestClient(main.app) as client:
+            res = client.post(
+                "/api/papers/p1/ask/stream",
+                json={"question": question, "web": True},
+            )
+    finally:
+        llm_mod.set_backend(None)
+
+    assert seen_queries == [["多模态大模型 幻觉 缓解 综述"]]
+    assert question not in seen_queries[0]
+
+    events = _events(res.text)
+    sources_ev = next(e for e in events if e["type"] == "sources")
+    assert sources_ev["usedWeb"] is True
+    assert sources_ev["webStatus"]["goal"] == "论文未解释幻觉缓解机制"
+    start = next(
+        e
+        for e in events
+        if e["type"] == "tool"
+        and e.get("name") == "web_search"
+        and e.get("phase") == "start"
+    )
+    assert start["input"]["queries"] == ["多模态大模型 幻觉 缓解 综述"]

@@ -314,10 +314,10 @@ def _parse_json(raw: str) -> dict | list | None:
 
 
 def needs_external(question: str, top_score: float) -> bool:
-    """是否需要联网。
+    """是否需要联网（旧判据，保留给对照与旧调用方）。
 
-    这里只判断「必须联网」的强信号；开关打开时调用方对每个问题都会做一次
-    基础检索，本函数用于决定是否再扩大检索范围（补英文关键词/学术源）。
+    只看问题措辞与匹配分，容易把「论文里其实写了的常规问题」也判成要联网。
+    新链路请用 `plan_web_search`：先由规划器确认论文缺什么，再决定查什么。
     """
     q = (question or "").strip()
     if not q:
@@ -327,6 +327,211 @@ def needs_external(question: str, top_score: float) -> bool:
     if _CONCEPT_RE.search(q) and top_score < 3.5:
         return True
     return top_score < 1.2      # 论文里基本没匹配上
+
+
+# ── 联网规划：先确认论文缺什么，再决定查什么 ──────────────────────
+#
+# 关键约束（用户明确要求）：
+# 1. 不是每个问题都要联网——论文档案能回答就不搜；
+# 2. 搜之前先说清「缺什么」，检索式按这个缺口写，而不是把用户原句当关键词。
+
+
+@dataclass
+class WebPlan:
+    """一次联网检索的目的与检索式。"""
+
+    needed: bool = False
+    goal: str = ""
+    queries: list[str] = field(default_factory=list)
+    academic_query: str = ""
+
+
+# 问句里的套话：检索式里必须去掉，否则搜到的都是问答页而不是概念资料
+_SEARCH_FRAME_RE = re.compile(
+    r"请问|帮我|帮忙|麻烦|能不能|可以|我想知道|想了解|告诉我|解释一下|介绍一下|"
+    r"说一下|简单说|具体说说|"
+    r"是什么|什么是|为什么|为何|怎么样|怎么办|怎么|如何|有哪些|有什么|"
+    r"吗|呢|吧|呀",
+    re.IGNORECASE,
+)
+
+# 明确指向「这篇论文本身」的词：命中说明问题仍在论文范围内，不该贸然联网
+_PAPER_SELF_RE = re.compile(
+    r"这篇|本文|该论文|这篇文章|作者|论文的|论文里|文中|摘要|引言|实验|数据集|"
+    r"基线|消融|结论|贡献|局限",
+    re.IGNORECASE,
+)
+
+_CN_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def _english_terms(text: str, limit: int = 8) -> list[str]:
+    words = [
+        t.lower()
+        for t in re.findall(r"[A-Za-z][A-Za-z\-]{2,}", text or "")
+        if t.lower() not in _STOP
+    ]
+    return list(dict.fromkeys(words))[:limit]
+
+
+def _strip_question_frame(text: str) -> str:
+    q = _SEARCH_FRAME_RE.sub(" ", text or "")
+    q = re.sub(r"[？?！!。，,、；;：:（）()\"'“”]+", " ", q)
+    return re.sub(r"\s+", " ", q).strip()
+
+
+def _goal_hint(question: str) -> str:
+    if _EXTERNAL_RE.search(question or ""):
+        return "需要论文之外的最新进展或横向对比"
+    if _CONCEPT_RE.search(question or ""):
+        return "需要论文未展开的概念原理或背景"
+    return "论文档案未覆盖该主题"
+
+
+def likely_external(
+    question: str, focus: list = None, has_quotes: bool = False
+) -> bool:
+    """本地预筛：这个问题有没有可能超出论文材料。
+
+    只是预筛，不代表一定联网——真正的决定交给 `plan_web_search` 的规划器。
+    目标是让「论文里能答的常规问题」连规划模型都不必调。
+    """
+    q = (question or "").strip()
+    if not q:
+        return False
+    if _EXTERNAL_RE.search(q):
+        return True
+    if has_quotes:
+        # 用户针对选中片段提问：先看引用与论文档案，不主动扩检
+        return False
+    focus = focus or []
+    if _CONCEPT_RE.search(q):
+        return not focus or focus[0].score < 3.5
+    if not focus:
+        # 档案一段都没命中：像在问论文本身就先不搜，问论文之外才交给规划器判断
+        return not _PAPER_SELF_RE.search(q)
+    return False
+
+
+def fallback_plan(
+    question: str,
+    focus: list = None,
+    expanded: list[str] | None = None,
+    goal: str = "",
+) -> WebPlan:
+    """规划器不可用时的检索式：去掉问句套话，只用概念词，不复用整句原问。"""
+    core = _strip_question_frame(question)
+    queries: list[str] = []
+    if core and _CN_RE.search(core):
+        queries.append(core[:80])
+    en_terms = _english_terms(question)
+    if en_terms:
+        queries.append(" ".join(en_terms)[:120])
+    if not queries:
+        words = [
+            w.strip()
+            for w in (expanded or [])
+            if isinstance(w, str) and w.strip() and not _CN_RE.search(w)
+        ]
+        if words:
+            queries.append(" ".join(words[:8])[:120])
+    if not queries:
+        queries = [" ".join(_strip_question_frame(question).split()[:8]) or question.strip()]
+
+    queries = [q for q in dict.fromkeys(queries) if q][:2]
+    academic = queries[1] if len(queries) > 1 else (queries[0] if queries else "")
+    return WebPlan(
+        needed=True,
+        goal=goal or _goal_hint(question),
+        queries=queries,
+        academic_query=academic,
+    )
+
+
+async def plan_web_search(
+    question: str,
+    focus: list = None,
+    paper_title: str = "",
+    paper_brief: str = "",
+    expanded: list[str] | None = None,
+    has_quotes: bool = False,
+) -> WebPlan:
+    """判断论文是否真的缺信息，缺什么，再据此生成检索式。
+
+    - 论文材料能回答：返回 `needed=False`，调用方不联网；
+    - 确实缺信息：返回检索目的（goal）与按目的写好的 1-2 条检索式；
+    - 模型不可用或输出不可解析：回退到本地「去套话 + 概念词」检索式。
+    """
+    q = (question or "").strip()
+    if not q:
+        return WebPlan(needed=False, goal="没有问题")
+    if not likely_external(q, focus, has_quotes):
+        return WebPlan(needed=False, goal="论文材料已覆盖")
+
+    focus_text = "\n".join(
+        f"- {getattr(f, 'snippet', '')[:160]}" for f in (focus or [])[:3]
+    )
+    hint = (paper_title or "").strip()
+    if paper_brief:
+        hint = f"{hint}\n{paper_brief[:800]}".strip()
+
+    try:
+        raw = await chat(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "你在决定论文阅读问答是否需要联网，以及要查什么。\n"
+                        "先判断论文材料能否回答用户问题：能答就 needed=false，不要联网；\n"
+                        "确实缺信息时，用 goal 一句话说清缺什么（例如「论文只给了本文变体，"
+                        "缺该机制的通用原理」），再按这个缺口写 1-2 条检索式。\n"
+                        "检索式要求：用概念、术语、方法名组合，不要直接复用用户原句，"
+                        "不要带「是什么/为什么/怎么」这类问句套话。\n"
+                        "只输出 JSON："
+                        '{"needed": true, "goal": "...", "queries": ["..."], '
+                        '"academic_query": "..."}'
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"论文：{hint or '（未提供）'}\n\n"
+                        f"论文中已定位到的相关段落：\n{focus_text or '（无命中）'}\n\n"
+                        f"用户问题：{q}"
+                    ),
+                },
+            ],
+            temperature=0.1,
+            max_tokens=400,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.info("联网规划失败，回退本地检索式：%s", e)
+        return fallback_plan(q, focus, expanded, _goal_hint(q))
+
+    data = _parse_json(raw)
+    if not isinstance(data, dict):
+        return fallback_plan(q, focus, expanded, _goal_hint(q))
+
+    goal = str(data.get("goal") or "").strip()[:200]
+    if data.get("needed") is False:
+        return WebPlan(needed=False, goal=goal or "论文材料已覆盖")
+
+    queries = [
+        w.strip()
+        for w in (data.get("queries") or [])
+        if isinstance(w, str) and w.strip()
+    ]
+    if not queries:
+        return fallback_plan(q, focus, expanded, goal or _goal_hint(q))
+
+    academic = str(data.get("academic_query") or "").strip()
+    queries = list(dict.fromkeys(queries))[:2]
+    return WebPlan(
+        needed=True,
+        goal=goal or _goal_hint(q),
+        queries=queries,
+        academic_query=academic or queries[0],
+    )
 
 
 ANSWER_SYS = """你是论文助教。材料按可信度分层，回答以【用户引用】和【论文档案】为准，

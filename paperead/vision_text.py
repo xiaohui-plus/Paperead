@@ -20,9 +20,12 @@ def _candidate(block):
     if block.kind not in ('para', 'abstract') or len(block.text.strip()) < 30:
         return False
     math = block.inline_math or []
+    # 私用区字形/替换符哪怕只有一个，也已经让正文出现「□」或乱码，
+    # 必须交给识图尝试恢复；不要等到凑够两个才触发。
+    if re.search(r'[\ufffd\ue000-\uf8ff]', block.text):
+        return True
     return (len(math) >= 3 or any(m.get('fallback') for m in math)
-            or len(re.findall(r'[∑∏∫√∂∇∞≤≥≠≈κλθεμσΩΘ→]', block.text)) >= 3
-            or len(re.findall(r'[�\ufffd\ue000-\uf8ff]', block.text)) >= 2)
+            or len(re.findall(r'[∑∏∫√∂∇∞≤≥≠≈κλθεμσΩΘ→]', block.text)) >= 3)
 
 
 def _images(pdf, block):
@@ -44,9 +47,16 @@ def _images(pdf, block):
 def _restore(raw, original):
     raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw.strip(), flags=re.I)
     data = json.loads(raw)
-    text, formulas = data['text'], data['formulas']
-    if not isinstance(text, str) or not isinstance(formulas, list) or not formulas:
+    text, formulas = data['text'], data.get('formulas') or []
+    if not isinstance(text, str) or not isinstance(formulas, list):
         raise ValueError('invalid response')
+    # 只有异常符号没有公式的段落，模型可以只返回纠正后的纯文本；
+    # 但普通公式段落必须有 formulas，否则按「结果不完整」拒绝。
+    abnormal = re.compile(r'[\ufffd\ue000-\uf8ff]')
+    if not formulas and not abnormal.search(original):
+        raise ValueError('invalid response')
+    if not formulas and abnormal.search(text):
+        raise ValueError('unrecoverable symbols remain')
     # Compare word sequences, allowing mathematical notation to change but rejecting omissions.
     words = lambda s: ' '.join(re.findall(r'[^\W\d_]{2,}', s.casefold()))
     old, new = words(original), words(text)
@@ -83,7 +93,8 @@ async def enrich_paragraphs(pdf, blocks, *, backend, concurrency=3):
                 content.extend({'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + base64.b64encode(image).decode('ascii')}} for image in images)
                 raw = await backend.chat([{'role': 'user', 'content': content}], temperature=0.0, max_tokens=3000)
                 text, spans = _restore(raw, block.text)
-                if len(spans) < len(block.inline_math or []) // 2:
+                abnormal = re.compile(r'[\ufffd\ue000-\uf8ff]')
+                if not abnormal.search(block.text) and len(spans) < len(block.inline_math or []) // 2:
                     raise ValueError('too few formulas recognized')
                 block.text, block.inline_math = text, spans
                 stats['ok'] += 1

@@ -744,9 +744,11 @@ class LibraryStore:
             return None
 
     def write_blocks(self, paper_id: str, blocks: list[dict[str, Any]]) -> None:
-        self.blocks_path(paper_id).write_text(
-            json.dumps(blocks, ensure_ascii=False), encoding="utf-8"
-        )
+        """原子写入：后台翻译任务与阅读页轮询可能同时读写这份快照。"""
+        path = self.blocks_path(paper_id)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(blocks, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
 
     def update_block_latex(self, paper_id: str, block_id: str, latex: str) -> bool:
         """把阅读时按需识别出的 LaTeX 回写到该论文的 blocks.json。

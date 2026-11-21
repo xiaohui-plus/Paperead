@@ -26,15 +26,40 @@ from typing import Awaitable, Callable, Iterable
 
 from .layout import Block
 from .llm import active_model, chat as llm_chat
-from .textnorm import has_dot_leader, is_dot_leader_only, strip_dot_leaders
+from .textnorm import (
+    has_dot_leader,
+    is_dot_leader_only,
+    strip_dot_leaders,
+    strip_unrenderable,
+)
 
 logger = logging.getLogger(__name__)
 
 
+_THINKING_PREFIXES = (
+    "deepseek",
+    "qwen3",
+    "qwen-3",
+    "qwq",
+    "kimi-k3",
+    "kimi-k2.5",
+    "o1",
+    "o3",
+    "o4",
+    "glm-z1",
+    "doubao-1.5-thinking",
+    "hunyuan-t1",
+)
+
+
 def _task_extra_body(model: str | None) -> dict | None:
-    """DeepSeek V4.1 默认开思考；翻译/术语表关掉思考，避免 reasoning 吃光 token。"""
+    """推理模型默认开思考；翻译/术语表关掉，避免 reasoning 吃光输出预算。
+
+    不同网关的开关字段不完全一致：这里先按 ``thinking`` 发送，调用失败且
+    错误信息提到 thinking 时 ``_translate_chat`` 会去掉该字段再试一次。
+    """
     name = (model or active_model() or "").lower()
-    if name.startswith("deepseek"):
+    if name.startswith(_THINKING_PREFIXES):
         return {"thinking": {"type": "disabled"}}
     return None
 
@@ -254,7 +279,7 @@ async def translate_block(
     out = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", out.strip()).strip()
     if not out:
         raise RuntimeError("模型返回空译文")
-    return restore(strip_dot_leaders(out), pieces)
+    return strip_unrenderable(restore(strip_dot_leaders(out), pieces))
 
 
 async def translate_text(
@@ -291,7 +316,7 @@ async def translate_text(
     out = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", out.strip()).strip()
     if not out:
         raise RuntimeError("模型返回空译文")
-    return restore(strip_dot_leaders(out), pieces)
+    return strip_unrenderable(restore(strip_dot_leaders(out), pieces))
 
 
 def quality_ok(

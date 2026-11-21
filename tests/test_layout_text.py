@@ -276,7 +276,7 @@ def test_formula_keeps_prose_word_between_math_spans():
     assert "front" in out[0].source
 
 
-def test_math_fragments_merge_and_fallback():
+def test_math_fragments_merge_and_keep_latex():
     text = "xt front t"
     frags = [
         {
@@ -290,8 +290,34 @@ def test_math_fragments_merge_and_fallback():
     ]
     merged = _merge_math_fragments(text, frags)
     assert len(merged) == 1
-    assert merged[0]["fallback"] is True
+    assert merged[0]["fallback"] is False
+    assert merged[0]["latex"] == r"x_{t}\text{front}t"
     assert merged[0]["start"] == 0 and merged[0]["end"] == 10
+
+
+def test_math_fragments_fallback_when_one_side_unrecoverable():
+    text = "x i"
+    frags = [
+        {"start": 0, "end": 1, "latex": "x", "fallback": False,
+         "source": "x", "bbox": [100, 400, 106, 410]},
+        {"start": 2, "end": 3, "latex": "", "fallback": True,
+         "source": "i", "bbox": [110, 400, 114, 410]},
+    ]
+    merged = _merge_math_fragments(text, frags)
+    assert len(merged) == 1
+    assert merged[0]["fallback"] is True
+
+
+def test_math_fragments_fallback_on_unmappable_bridge():
+    text = "x ☃ i"
+    frags = [
+        {"start": 0, "end": 1, "latex": "x", "fallback": False,
+         "source": "x", "bbox": [100, 400, 106, 410]},
+        {"start": 4, "end": 5, "latex": "i", "fallback": False,
+         "source": "i", "bbox": [120, 400, 124, 410]},
+    ]
+    merged = _merge_math_fragments(text, frags)
+    assert merged[0]["fallback"] is True
 
 # ── 首页窄摘要不应被同页更宽的行切成一行一段 ───────────────────────────
 def _body_line(text, x0, x1, y0, size=10.0, page=1, col=0):

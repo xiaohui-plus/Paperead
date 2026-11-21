@@ -1,4 +1,29 @@
-/** 目录页点线（dot leader）清理。 */
+/** 目录页点线（dot leader）清理，以及无字形字符兜底。 */
+
+/**
+ * 数据里可能残留的无字形字符：
+ * - U+E000–U+F8FF 私用区：PDF 把数学花体（𝒰/ℐ/𝒢/ℒ 等）塞进 PUA 且 ToUnicode 缺失时留下的；
+ * - U+FFFD 替换符：编码转换失败；
+ * - U+25A1 白方块：上游用方框当占位符。
+ * 浏览器没有对应字形时会画成「□」，看起来就是乱码。
+ */
+const UNRENDERABLE_RE = /[\uE000-\uF8FF\uFFFD\u25A1]/g
+
+/**
+ * 把无字形字符替换成**等长空格**。
+ * 长度不变，所以按字符偏移做的标注高亮、行内公式区间仍然有效；
+ * 用在正文渲染这类依赖 offset 的场景。
+ */
+export function blankUnrenderable(text: string): string {
+  if (!text) return text
+  return text.replace(UNRENDERABLE_RE, ' ')
+}
+
+/** 直接删掉无字形字符；用在标题、图注、复制文本等不依赖 offset 的展示场景。 */
+export function stripUnrenderable(text: string): string {
+  if (!text) return text
+  return text.replace(UNRENDERABLE_RE, '')
+}
 
 const DOT_LEADER_RE = /(?:[ \t]*[.．﹒·⋅•]){4,}|…{2,}/g
 const DOT_LEADER_TEST_RE = /(?:[ \t]*[.．﹒·⋅•]){4,}|…{2,}/
