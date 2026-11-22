@@ -1,0 +1,74 @@
+{
+ "version": "202611230109",
+ "generated_at": "2026-11-23T01:09:12",
+ "source": "M0rtzz/paper-notes",
+ "license": "CC BY-NC-SA 4.0",
+ "conferences": [
+  {
+   "conference": "AAAI2026",
+   "bytes": 5959993,
+   "sha256": "12922ba1b99d2be3c53fd381a6db22bdfcd491a944bdb116717c44e46c57d1ce",
+   "url": "https://gitee.com/deng_xiaohui/paperead/releases/download/notes-mirror-20261123/AAAI2026.tar.gz"
+  },
+  {
+   "conference": "ACL2025",
+   "bytes": 7361878,
+   "sha256": "59141c67dc2d48e9d2c5015f5ed682b080ab6b9d9116ada5cf9decbf75cfb73c",
+   "url": "https://gitee.com/deng_xiaohui/paperead/releases/download/notes-mirror-20261123/ACL2025.tar.gz"
+  },
+  {
+   "conference": "ACL2026",
+   "bytes": 7767896,
+   "sha256": "020726ab88eae1c24712673ca9a1b6ff1b3aa7aeb8592919e3ed849c486c43c3",
+   "url": "https://gitee.com/deng_xiaohui/paperead/releases/download/notes-mirror-20261123/ACL2026.tar.gz"
+  },
+  {
+   "conference": "CVPR2025",
+   "bytes": 6905006,
+   "sha256": "607f6a08bf197a05db267a8bd81c0769324d0e2bb4ec9a0ab72d6845e16a69e0",
+   "url": "https://gitee.com/deng_xiaohui/paperead/releases/download/notes-mirror-20261123/CVPR2025.tar.gz"
+  },
+  {
+   "conference": "CVPR2026",
+   "bytes": 26826533,
+   "sha256": "f3991528c3a7282967880ab140ca92b92cf094519afe1b46804779064dd2c277",
+   "url": "https://gitee.com/deng_xiaohui/paperead/releases/download/notes-mirror-20261123/CVPR2026.tar.gz"
+  },
+  {
+   "conference": "ECCV2024",
+   "bytes": 3617991,
+   "sha256": "f687c3f00fe0b1873d2617ea591f9d0131a44074e303652872cc05c4f3bcd68a",
+   "url": "https://gitee.com/deng_xiaohui/paperead/releases/download/notes-mirror-20261123/ECCV2024.tar.gz"
+  },
+  {
+   "conference": "ECCV2026",
+   "bytes": 3360426,
+   "sha256": "d453291e3e9963b39f03022d97a48d2507b4db3fcc61a3b4ed95cd522ef5ad71",
+   "url": "https://gitee.com/deng_xiaohui/paperead/releases/download/notes-mirror-20261123/ECCV2026.tar.gz"
+  },
+  {
+   "conference": "ICCV2025",
+   "bytes": 5305883,
+   "sha256": "b8d96eb5636c11823319a273567fd0c5860ca59f53160bbba565e3ad04c18bb5",
+   "url": "https://gitee.com/deng_xiaohui/paperead/releases/download/notes-mirror-20261123/ICCV2025.tar.gz"
+  },
+  {
+   "conference": "ICLR2026",
+   "bytes": 34346509,
+   "sha256": "b7a835bf23ee6851d355be40dba926472a61a6981b9a440ae045a39e8c1ff05c",
+   "url": "https://gitee.com/deng_xiaohui/paperead/releases/download/notes-mirror-20261123/ICLR2026.tar.gz"
+  },
+  {
+   "conference": "ICML2025",
+   "bytes": 4355056,
+   "sha256": "65796bd40fb2ce1a3901d280080467e4c44169c466675420ec39fd3e7888dcbc",
+   "url": "https://gitee.com/deng_xiaohui/paperead/releases/download/notes-mirror-20261123/ICML2025.tar.gz"
+  },
+  {
+   "conference": "ICML2026",
+   "bytes": 12291893,
+   "sha256": "5d1f1b621a4d0a07abee17f19e1926279c558871f051ef4673f6b09a817e9978",
+   "url": "https://gitee.com/deng_xiaohui/paperead/releases/download/notes-mirror-20261123/ICML2026.tar.gz"
+  }
+ ]
+}
