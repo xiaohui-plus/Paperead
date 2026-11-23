@@ -16,6 +16,13 @@ interface ToolchainStatus {
     installed: boolean
     version: string
   }
+  nodeDownload: {
+    status: 'idle' | 'running' | 'done' | 'error'
+    percent: number
+    error: string
+    installed: boolean
+    version: string
+  }
   engines: { name: string; path: string; version: string }[]
   bibtex: ToolInfo
   installer: { winget: boolean; package: string }
@@ -80,6 +87,7 @@ export function ToolchainPanel() {
   const [job, setJob] = useState<InstallJob | null>(null)
   const [copied, setCopied] = useState(false)
   const [startingPandoc, setStartingPandoc] = useState(false)
+  const [startingNode, setStartingNode] = useState(false)
 
   const load = useCallback(async (silent = false, refresh = false) => {
     if (!silent) setLoading(true)
@@ -99,13 +107,15 @@ export function ToolchainPanel() {
     void load()
   }, [load])
 
-  // pandoc 首次启动在后台下载，这里跟着进度刷新，下载完自动变成“已就绪”。
+  // pandoc 与公式引擎的 node 运行时都是首次启动在后台下载，这里跟着进度刷新，
+  // 下载完自动变成“已就绪”。
   const pandocState = status?.pandocDownload?.status
+  const nodeState = status?.nodeDownload?.status
   useEffect(() => {
-    if (pandocState !== 'running') return
+    if (pandocState !== 'running' && nodeState !== 'running') return
     const timer = window.setInterval(() => void load(true), 2000)
     return () => window.clearInterval(timer)
-  }, [pandocState, load])
+  }, [pandocState, nodeState, load])
 
   // 安装是后台任务：轮询到结束再重新检测一次，用户能看到引擎从“未检测到”变成“已就绪”。
   useEffect(() => {
@@ -173,10 +183,27 @@ export function ToolchainPanel() {
     }
   }
 
+  const startNode = async () => {
+    setStartingNode(true)
+    setError('')
+    try {
+      const res = await fetch('/api/toolchain/node', { method: 'POST' })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`)
+      await load(true)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '下载公式引擎组件失败')
+    } finally {
+      setStartingNode(false)
+    }
+  }
+
   const engine = status?.engines[0]
   const installing = job?.status === 'running' || starting
   const download = status?.pandocDownload
   const downloading = download?.status === 'running'
+  const nodeDownload = status?.nodeDownload
+  const nodeDownloading = nodeDownload?.status === 'running'
 
   return (
     <div className="modal-body toolchain-panel">
@@ -184,7 +211,8 @@ export function ToolchainPanel() {
         <div>
           <h3>写作工具</h3>
           <p>
-            首次启动会自动下载 pandoc（约 24MB，只需一次），之后离线可用。
+            首次启动会自动下载 pandoc（约 24MB）与公式引擎组件（约 32MB），
+            只需一次，之后离线可用。
             <br />
             导出 PDF 还需要本机的 LaTeX 引擎，可以在下面一键安装。
           </p>
@@ -219,6 +247,16 @@ export function ToolchainPanel() {
           ok={Boolean(status?.bibtex.found)}
           detail={status?.bibtex.version || ''}
         />
+        <ToolRow
+          name="公式引擎"
+          hint="MathJax 完整 TeX（node 运行时）"
+          ok={Boolean(status?.nodeDownload?.installed)}
+          detail={
+            status?.nodeDownload?.installed
+              ? `node ${status.nodeDownload.version}`
+              : ''
+          }
+        />
       </div>
 
       {status && !status.pandoc.found && (
@@ -244,6 +282,34 @@ export function ToolchainPanel() {
                   : download?.status === 'error'
                     ? '重试下载 pandoc'
                     : '下载 pandoc'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {status && !status.nodeDownload?.installed && (
+        <div className="toolchain-install">
+          <p>
+            {nodeDownloading
+              ? `公式引擎组件正在后台下载（${nodeDownload?.percent ?? 0}%），完成后自动启用。`
+              : nodeDownload?.status === 'error'
+                ? `公式引擎组件下载失败：${nodeDownload.error || '网络不可用'}`
+                : '公式排版需要 node 运行时（约 32MB），首次启动会自动下载，之后离线可用。'}
+          </p>
+          <div className="toolchain-actions">
+            <button
+              className="btn primary"
+              onClick={() => void startNode()}
+              disabled={nodeDownloading || startingNode}
+            >
+              <IconDownload />
+              {nodeDownloading
+                ? `正在下载 ${nodeDownload?.percent ?? 0}%`
+                : startingNode
+                  ? '正在启动…'
+                  : nodeDownload?.status === 'error'
+                    ? '重试下载公式引擎'
+                    : '下载公式引擎'}
             </button>
           </div>
         </div>

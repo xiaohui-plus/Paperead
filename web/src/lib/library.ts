@@ -356,6 +356,7 @@ export async function startTranslationJob(
   autoHighlights = true,
   resumeJobId?: string,
   blockIds?: string[],
+  rebuildPdf = false,
 ): Promise<TranslationJob> {
   return jsonFetch(`/api/papers/${encodeURIComponent(id)}/translation/jobs`, {
     method: 'POST',
@@ -367,6 +368,7 @@ export async function startTranslationJob(
       auto_highlights: autoHighlights,
       resume_job_id: resumeJobId,
       block_ids: blockIds,
+      rebuild_pdf: rebuildPdf,
     }),
   })
 }

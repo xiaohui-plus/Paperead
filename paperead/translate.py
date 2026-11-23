@@ -342,10 +342,16 @@ def quality_ok(
         low, high = 0.3, 2.4
     if not low <= ratio <= high:
         return False
-    expected = len(_PH_RE.findall(protect(source)[0]))
-    got = len(_PH_RE.findall(target))
-    if got and got != expected:
-        return False
+    # 译文是「已还原」的文本，占位符 ⟦P0⟧ 已经换回原文片段；这里直接检查
+    # 每个受保护片段是否还在译文里。以前比对占位符数量时译文永远不含 ⟦P0⟧，
+    # 校验等于没做，模型吞掉公式/引用编号也不会被发现。
+    _masked, pieces = protect(source)
+    if pieces:
+        compact_target = re.sub(r"\s+", "", target)
+        for piece in pieces:
+            needle = re.sub(r"\s+", "", piece)
+            if needle and needle not in compact_target:
+                return False
     return True
 
 

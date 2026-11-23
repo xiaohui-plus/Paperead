@@ -37,6 +37,11 @@ if ($LASTEXITCODE -ne 0) { throw "浏览器扩展打包失败" }
 & (Join-Path $PSScriptRoot "stage-tools.ps1")
 if ($LASTEXITCODE -ne 0) { throw "外部工具打包失败" }
 
+# MathJax 完整引擎要 node 运行时（解压后约 80MB，同样会顶破附件上限）：
+# 这里只产出「只含 node.exe」的精简包作为首启下载源。
+& (Join-Path $PSScriptRoot "stage-node.ps1")
+if ($LASTEXITCODE -ne 0) { throw "node 运行时打包失败" }
+
 npm run tauri -- build
 if ($LASTEXITCODE -ne 0) { throw "Tauri 安装包构建失败" }
 

@@ -29,6 +29,21 @@ $latestJson   = Join-Path $root "release\latest.json"
 $androidJson  = Join-Path $root "release\android.json"
 $sums         = Join-Path $root "release\SHA256SUMS.txt"
 
+# 首启后台下载的运行时与引擎都跟 App 版本解耦，清单/分卷只挂 latest 固定发行版：
+# - BabelDOC 引擎（server/babeldoc_setup.py）
+# - node 运行时（server/node_setup.py，MathJax 完整引擎依赖）
+# - pandoc（server/research/pandoc_setup.py）
+# 没有构建对应产物时自动跳过。
+$engineFiles = @(
+    Get-ChildItem (Join-Path $root "release") -File -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -match '^babeldoc-engine-.*\.json$' -or
+            $_.Name -match '^babeldoc-engine-.*\.zip\.part\d+$' -or
+            $_.Name -match '^node-.*-lite\.zip$' -or
+            $_.Name -match '^pandoc-.*-windows-x86_64\.zip$'
+        }
+)
+
 # ---------- 前置检查 ----------
 $missing = @()
 foreach ($f in @($installer, ($installer + ".sig"), $latestJson, $sums)) {
@@ -98,6 +113,7 @@ if (-not $SkipGithub) {
         # 本地产出的校验和（以及有 APK 时的安装包/清单）CI 手里没有：转正前先补传到同一个 release
         $extras = @($sums)
         if ($hasAndroid) { $extras += @($android.FullName, $androidJson) }
+        $extras += @($engineFiles | ForEach-Object { $_.FullName })
         foreach ($extra in $extras) {
             $name = Split-Path -Leaf $extra
             if (@($rel.assets) | Where-Object { $_.name -eq $name }) {
@@ -185,7 +201,7 @@ if (-not $SkipGitee) {
         }
     }
 
-    function Publish-GiteeFile($Release, [string]$Path) {
+    function Publish-GiteeFile($Release, [string]$Path, [switch]$KeepExisting) {
         # Gitee 偶发把 release id / 附件字段包成数组；统一取第一个标量再转换，
         # 否则 [int64]$old.size 会抛 "Cannot convert System.Object[] to System.Int64"。
         $releaseId = [int64](@($Release.id)[0])
@@ -198,6 +214,11 @@ if (-not $SkipGitee) {
             }
         }
         if ($old) {
+            # 引擎分卷按版本命名，同名同大小可直接复用，避免每次发版重传 200MB+
+            if ($KeepExisting -and [int64](@($old.size)[0]) -eq (Get-Item $Path).Length) {
+                Write-Host "  已存在且大小一致，跳过 $name"
+                return
+            }
             # 大小相同不代表内容相同（android.json 只改版本号时大小可能完全一致），
             # 同名附件一律以本地文件为准，避免 latest 固定发行版残留旧版本。
             Write-Host "  替换同名附件 $name"
@@ -237,6 +258,10 @@ if (-not $SkipGitee) {
     Write-Host "Gitee: 更新 latest 固定发行版的 latest.json"
     Publish-GiteeFile $latest $latestJson
     if ($hasAndroid) { Publish-GiteeFile $latest $androidJson }
+    if ($engineFiles.Count -gt 0) {
+        Write-Host "Gitee: 上传 BabelDOC 引擎附件（$($engineFiles.Count) 个）"
+        foreach ($f in $engineFiles) { Publish-GiteeFile $latest $f.FullName -KeepExisting }
+    }
 }
 
 # ---------- 下载自检 ----------

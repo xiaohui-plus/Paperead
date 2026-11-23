@@ -120,7 +120,7 @@ SIDEBAR_PROSE_CHARS = 120       # 成段正文否决阈值（字符数 + 句末�
 SIDEBAR_ROW_KINDS = ("para", "author", "affiliation", "footnote", "heading")
 
 # 译文 PDF 缓存版本：排版算法变更时递增，使旧缓存失效
-PDF_ALGO_VER = "p2-autofit-v77"
+PDF_ALGO_VER = "p2-autofit-v78"
 # 单页渲染失败时的并发保护与日志：整篇构建不能因为某一页抛异常而失败。
 log = logging.getLogger("paperead.pdf_export")
 
@@ -2199,6 +2199,11 @@ def render_page(
                     else BODY_FLOOR_SIZE
                 )
             bands = bands_by_block[id(block)]
+            # 这里必须取本块自己的排版范围/禁排区：这两个变量在上一轮循环里
+            # 会被覆盖成「页面最后一块」的值，试排与正式渲染因此可能得到不同
+            # 结论（表现为整段摘要保留英文）。实测 p1 摘要即由此丢译文。
+            layout_rect = layout_rects[id(block)]
+            obstacles = obstacles_by_block[id(block)]
             if (
                 len(bands) == 1
                 and inline_pixmaps.get(id(block))
@@ -2520,6 +2525,7 @@ def render_page(
             )
         bands = bands_by_block[id(block)]
         layout_rect = layout_rects[id(block)]
+        obstacles = obstacles_by_block[id(block)]
 
         # 单横带 + 有行内公式：走 token 流混排，公式裁图回到句子里。
         # 多横带（表格/公式绕排）暂时沿用纯文本排版。

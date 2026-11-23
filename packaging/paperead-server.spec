@@ -72,6 +72,7 @@ a = Analysis(
         "multipart",
         "certifi",
         "server.research.pandoc_setup",
+        "server.node_setup",
     ],
     excludes=[
         "tkinter",

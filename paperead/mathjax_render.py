@@ -34,6 +34,10 @@ _NEXT_ID = 0
 _UNSET = object()
 _NODE_EXE: object = _UNSET
 _AVAILABLE: bool | None = None
+_AVAILABLE_AT = 0.0
+# node 运行时是首启后台下载的：装好前探测必然失败。失败结果只缓存一小段，
+# 避免每块公式都重新起进程，同时下载完成后最多一分钟内自动转为可用。
+_RETRY_SECONDS = 60.0
 
 
 def _frozen_base() -> Path | None:
@@ -93,16 +97,42 @@ def _renderable() -> bool:
 
 
 def available() -> bool:
-    global _AVAILABLE
-    if _AVAILABLE is None:
-        with _LOCK:
-            if _AVAILABLE is None:
-                _AVAILABLE = (
-                    _vendor_dir().joinpath("tex2svg_server.js").is_file()
-                    and _node_exe() is not None
-                    and _renderable()
-                )
-    return _AVAILABLE
+    global _AVAILABLE, _AVAILABLE_AT
+    if _AVAILABLE:
+        return True
+    with _LOCK:
+        if _AVAILABLE:
+            return True
+        now = time.time()
+        if _AVAILABLE is False and now - _AVAILABLE_AT < _RETRY_SECONDS:
+            return False
+        ok = (
+            _vendor_dir().joinpath("tex2svg_server.js").is_file()
+            and _node_exe() is not None
+            and _renderable()
+        )
+        _AVAILABLE = ok
+        _AVAILABLE_AT = time.time()
+        return ok
+
+
+def reset_probe() -> None:
+    """让下一次 ``available()`` 重新探测（node 刚装好 / 资源发生变化时调用）。"""
+    global _AVAILABLE, _AVAILABLE_AT
+    with _LOCK:
+        _AVAILABLE = None
+        _AVAILABLE_AT = 0.0
+
+
+def set_node_path(path: str) -> None:
+    """运行时注册一个可用的 node（例如首启后台下载完成后），立即生效。"""
+    global _NODE_EXE
+    if not path:
+        return
+    os.environ["PAPEREAD_NODE"] = path
+    with _LOCK:
+        _NODE_EXE = path
+    reset_probe()
 
 
 def _kill() -> None:

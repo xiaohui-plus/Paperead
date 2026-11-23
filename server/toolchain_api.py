@@ -21,6 +21,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
+from server import node_setup
 from server.research import pandoc_setup
 from server.research.latex import find_winget, toolchain_status
 from server.winproc import popen_hidden
@@ -168,6 +169,7 @@ def status(refresh: bool = Query(False)) -> dict[str, Any]:
             "jobId": _CURRENT,
         },
         "pandocDownload": download,
+        "nodeDownload": node_setup.status(),
     }
 
 
@@ -175,6 +177,12 @@ def status(refresh: bool = Query(False)) -> dict[str, Any]:
 def install_pandoc() -> dict[str, Any]:
     """安装包不带 pandoc：首次启动自动下载，这里也给一个手动重试入口。"""
     return pandoc_setup.start()
+
+
+@router.post("/node")
+def install_node() -> dict[str, Any]:
+    """公式引擎所需的 node 运行时：首启后台下载，失败可在这里手动重试。"""
+    return node_setup.start()
 
 
 @router.post("/install")

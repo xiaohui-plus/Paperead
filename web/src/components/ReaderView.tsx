@@ -608,6 +608,8 @@ export function ReaderView({ paperId, onBack }: Props) {
     const pending = manifest
       ? manifest.pending > 0 || manifest.failed > 0
       : legacyPending
+    // 正文已译完但缺译文 PDF 时，改发一个「只出成品」的任务
+    let rebuildPdf = false
 
     // 双栏退出已在函数开头处理；这里只管进入：无待译块时直接展示已有译文。
     if (manifest && manifest.eligible_total === 0) {
@@ -622,11 +624,30 @@ export function ReaderView({ paperId, onBack }: Props) {
       return
     }
     if (!pending) {
-      setTranslateStarting(false)
-      setDualMode(true)
-      setDualCollapsed(true)
-      setPdfMode(false)
-      return
+      // 正文已有译文：确认译文 PDF 是否也生成了。老论文可能只有分块译文、
+      // 没有成品 PDF，这时自动补一次引擎任务，让「译文/对照」直接有内容可看。
+      let hasPdf = true
+      if (online) {
+        try {
+          const head = await fetch(
+            `/api/papers/${encodeURIComponent(paperId)}/translated-pdf?lang=${encodeURIComponent(
+              targetLangNow,
+            )}`,
+            { method: 'HEAD' },
+          )
+          hasPdf = head.ok
+        } catch {
+          hasPdf = true
+        }
+      }
+      if (hasPdf) {
+        setTranslateStarting(false)
+        setDualMode(true)
+        setDualCollapsed(true)
+        setPdfMode(false)
+        return
+      }
+      rebuildPdf = true
     }
 
     // 离线：沿用本机模型通道，不进入服务端任务。
@@ -723,6 +744,9 @@ export function ReaderView({ paperId, onBack }: Props) {
               [],
               targetLangNow,
               autoHighlights,
+              undefined,
+              undefined,
+              rebuildPdf,
             )
       setTranslationNotice(null)
       await pollTranslationJob(job, 0)
