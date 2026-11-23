@@ -306,6 +306,9 @@ class Block:
     latex: str = ""                 # 公式的 LaTeX（formula.py 识别后写入）
     eq_number: str = ""             # 公式编号（PDF 里印出来的 (3) / (2.1)）
     inline_math: list[dict] = field(default_factory=list)  # 正文行内公式（start/end/latex）
+    # 该块实际文字行矩形（逐页：page, x0, y0, x1, y1）。渲染层只读它，
+    # 不再用 bbox + 扩栏/收窄/下推去猜「这一段到底占哪里」。
+    text_rects: list[tuple] = field(default_factory=list)
     translatable: bool = True
     translated: str = ""
     # 跨栏/跨页块的逐页矩形 (page, x0, y0, x1, y1)。单矩形 bbox 取并集会覆盖
@@ -338,6 +341,11 @@ class Block:
         if len(self.bboxes) > 1:
             data["bboxes"] = [
                 [int(b[0]), *(round(v, 1) for v in b[1:])] for b in self.bboxes
+            ]
+        if self.text_rects:
+            data["text_rects"] = [
+                [int(r[0]), *(round(v, 1) for v in r[1:])]
+                for r in self.text_rects
             ]
         return data
 
@@ -2110,6 +2118,7 @@ def _build_blocks(
                     level=cur["level"],
                     size=cur.get("size", 0.0),
                     bboxes=[tuple(v) for v in cur["bboxes"]],
+                    text_rects=[tuple(v) for v in cur.get("text_rects") or []],
                     inline_math=inline_math,
                 )
             )
@@ -2131,6 +2140,7 @@ def _build_blocks(
             "page": ln.page, "kind": kind, "bbox": ln.bbox, "level": 0,
             "size": ln.size, "bold": ln.bold, "col": ln.col, "mixed": False,
             "bboxes": [[ln.page, ln.bbox[0], ln.bbox[1], ln.bbox[2], ln.bbox[3]]],
+            "text_rects": [[ln.page, ln.bbox[0], ln.bbox[1], ln.bbox[2], ln.bbox[3]]],
             "last_y1": ln.y1, "last_x0": ln.x0, "last_x1": ln.x1,
             "ref_left": ref_left, "ref_right": ref_right,
             "in_table": in_table(ln),
@@ -2406,6 +2416,7 @@ def _build_blocks(
                     {**item, "start": start_pos, "end": end_pos}
                 )
             _push_bbox(cur["bboxes"], ln.page, ln.bbox)
+            cur["text_rects"].append([ln.page, ln.bbox[0], ln.bbox[1], ln.bbox[2], ln.bbox[3]])
             # 只在同页同栏内扩 bbox。跨栏/跨页续段用一个矩形取并集会
             # 覆盖整页（甚至两页），后续按 bbox 做的图表/公式排除会误伤。
             if ln.col != cur["col"]:
@@ -2424,6 +2435,120 @@ def _build_blocks(
                 cur["col"] = ln.col
     flush_eq()
     flush()
+    # 兜底：标题、图注、表格、公式等直接构造的块没有逐行累积，用 bbox 补一条。
+    # 正文段落块已在 start()/续行处逐行记录，这里不会覆盖。
+    for block in blocks:
+        if not block.text_rects and block.bbox:
+            block.text_rects = [
+                (
+                    int(item[0]),
+                    float(item[1]),
+                    float(item[2]),
+                    float(item[3]),
+                    float(item[4]),
+                )
+                for item in (block.bboxes or [[block.page, *block.bbox]])
+            ]
+        elif block.text_rects and block.bbox:
+            # 解析行常把「左侧信息栏 + 右侧正文」拼成同一行，行矩形因此横跨
+            # 整页。块自己的 bbox 才是它的列范围，必须把行矩形裁到块横向范围，
+            # 否则 affiliation/ORCID 的 text_rects 会盖住整页正文，契约模式下
+            # 两段中文写在同一位置。
+            left = float(block.bbox[0]) - 1.5
+            right = float(block.bbox[2]) + 1.5
+            clipped: list[tuple] = []
+            for rect in block.text_rects:
+                page_no, x0, y0, x1, y1 = rect[0], *rect[1:]
+                nx0 = max(float(x0), left)
+                nx1 = min(float(x1), right)
+                if nx1 - nx0 > 1:
+                    clipped.append(
+                        (int(page_no), nx0, float(y0), nx1, float(y1))
+                    )
+            if clipped:
+                block.text_rects = clipped
+    return blocks
+
+
+def _clip_text_rects_to_bbox(blocks: list[Block]) -> list[Block]:
+    """把逐行 text_rects 裁到块最终 bbox 的横向范围。
+
+    首页「左信息栏 + 右正文」在解析行层面是同一行（x 跨整页），块的 bbox
+    要到列拆分后才收窄。必须在流水线末尾按最终 bbox 再裁一次，否则
+    affiliation/ORCID 的行矩形会盖住正文，契约模式把两段中文写在同一处。
+    """
+    for block in blocks:
+        if not block.text_rects or not block.bbox:
+            continue
+        left = float(block.bbox[0]) - 1.5
+        right = float(block.bbox[2]) + 1.5
+        if right <= left:
+            continue
+        clipped: list[tuple] = []
+        for rect in block.text_rects:
+            page_no, x0, y0, x1, y1 = rect[0], *rect[1:]
+            nx0 = max(float(x0), left)
+            nx1 = min(float(x1), right)
+            # 行矩形上下各内缩 1.0pt：相邻块共享行边界时只是「bbox 相切」，
+            # 不缩会一直被算成重叠；内缩后仍由擦除 inflate 0.8 兜住字形边缘。
+            ny0 = float(y0) + 1.0
+            ny1 = float(y1) - 1.0
+            if nx1 - nx0 > 1 and ny1 - ny0 > 1:
+                clipped.append((int(page_no), nx0, ny0, nx1, ny1))
+        if clipped:
+            block.text_rects = clipped
+    return blocks
+
+
+def _drop_covered_blocks(blocks: list[Block]) -> list[Block]:
+    """把「所有行都被另一个更大的块覆盖」的块标为不可译。
+
+    解析偶发把一个段落中的一行同时并进 heading（p18 基金声明实测），两块
+    各写一份译文就会在同一行叠字。大块会擦除并重写这段区域，小块不再单独
+    回填即可；不置空 text_rects，高亮定位仍可用。
+    """
+    for block in blocks:
+        if (
+            not block.translatable
+            or block.kind in ("figure", "table", "equation", "reference", "margin")
+            or not block.text_rects
+        ):
+            continue
+        own = [
+            pymupdf.Rect(rect[1], rect[2], rect[3], rect[4])
+            for rect in block.text_rects
+            if int(rect[0]) == block.page
+        ]
+        if not own:
+            continue
+        for other in blocks:
+            if other is block or other.page != block.page:
+                continue
+            if other.kind in ("figure", "table", "equation", "reference", "margin"):
+                continue
+            if len(other.text) <= len(block.text):
+                continue
+            cover = [
+                pymupdf.Rect(rect[1], rect[2], rect[3], rect[4])
+                for rect in (other.text_rects or [])
+                if int(rect[0]) == block.page
+            ]
+            if not cover:
+                continue
+            covered = 0
+            for rect in own:
+                area = rect.get_area()
+                if area <= 0:
+                    continue
+                if any(
+                    not (rect & band).is_empty
+                    and (rect & band).get_area() > area * 0.5
+                    for band in cover
+                ):
+                    covered += 1
+            if covered == len(own):
+                block.translatable = False
+                break
     return blocks
 
 
@@ -3148,6 +3273,15 @@ def _split_cross_column_blocks(
                 translatable = bool(block.translatable) and not _is_sidebar_whitelist(text)
             else:
                 translatable = kind in ("para", "abstract") and not _is_sidebar_whitelist(text)
+            child_rects = [
+                tuple(value)
+                for value in (block.text_rects or [])
+                if int(value[0]) == block.page
+                and float(value[3]) > c0 - 1
+                and float(value[1]) < c1 + 1
+                and float(value[2]) >= bbox[1] - 1.5
+                and float(value[4]) <= bbox[3] + 1.5
+            ] or [(block.page, bbox[0], bbox[1], bbox[2], bbox[3])]
             out.append(
                 Block(
                     id="",
@@ -3160,6 +3294,7 @@ def _split_cross_column_blocks(
                     section=block.section,
                     translatable=translatable,
                     column_role="sidebar" if on_side else "body",
+                    text_rects=child_rects,
                 )
             )
     # 整块就落在信息栏列内的块（作者单位 / 期刊信息 / citation 行）同样是
@@ -3225,6 +3360,10 @@ def _merge_body_paragraph_fragments(
             shift = len(target.text) + 1
             target.text = _join_text(target.text, block.text)
             target.bboxes = _merge_bbox_lists(target.bboxes, block.bboxes)
+            target.text_rects = sorted(
+                list(target.text_rects) + list(block.text_rects),
+                key=lambda rect: (int(rect[0]), float(rect[2]), float(rect[1])),
+            )
             target.bbox = (
                 # 左界取更靠两者右者：正文列左界固定，向左扩张只可能来自
                 # 混进来的信息栏标签，不能让它把正文块拉进侧栏。
@@ -6748,6 +6887,8 @@ def parse_pdf(
         # 完整段落再翻译，否则一句话会被切成几截分别送模型。
         blocks = _merge_body_paragraph_fragments(blocks, body_size)
         blocks = _strip_front_citation_noise(blocks, side_bands)
+        blocks = _clip_text_rects_to_bbox(blocks)
+        blocks = _drop_covered_blocks(blocks)
         if _DIAG_PATH:
             diag_local = _local_edges(ordered)
             _diag_dump({

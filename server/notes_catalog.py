@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from server.notes_http import http_get_text
+from server.notes_terms import QueryPlan, expand_query, normalize, term_hit
 
 TREE_URL = (
     "https://api.github.com/repos/M0rtzz/paper-notes/git/trees/main?recursive=1"
@@ -201,11 +202,23 @@ class NotesCatalog:
         self._updated_at = 0.0
         self._state = "idle"
         self._error = ""
+        # 检索用的规范化文本与结果缓存，避免每次分页都重扫 2 万条目录。
+        self._hay: dict[str, tuple[str, str, str]] = {}
+        self._en_index: dict[str, set[str]] = {}
+        self._index_ready = False
+        self._index_generation = 0
+        self._search_cache: dict[tuple[Any, ...], list[tuple[dict[str, Any], list[str], float]]] = {}
+        self._warming = False
         self.load()
 
     # ── 缓存 ────────────────────────────────────────────
 
     def load(self) -> None:
+        self._hay.clear()
+        self._en_index.clear()
+        self._index_ready = False
+        self._index_generation += 1
+        self._search_cache.clear()
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -222,6 +235,9 @@ class NotesCatalog:
                 self._desc = {str(key): str(value) for key, value in desc.items()}
         except (OSError, ValueError):
             self._desc = {}
+        if self._items:
+            # 首次搜索要扫 2 万条目录，启动后先预热规范化文本，避免第一次搜索卡 1-2 秒。
+            self._warm_async()
 
     def _save(self, items: list[dict[str, Any]]) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -277,7 +293,13 @@ class NotesCatalog:
                 self._updated_at = time.time()
                 self._state = "ready"
                 self._error = ""
+                self._hay.clear()
+                self._en_index.clear()
+                self._index_ready = False
+                self._index_generation += 1
+                self._search_cache.clear()
             self._save(items)
+            self._warm_async()
         except Exception as error:  # 网络/限流都只影响目录，不影响已缓存内容
             with self._lock:
                 self._state = "error"
@@ -439,6 +461,170 @@ class NotesCatalog:
         ranked = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
         return [{"word": word, "count": count} for word, count in ranked[:limit]]
 
+    def _build_index(self, generation: int | None = None) -> None:
+        """英文词倒排：短语候选取各单词路径的交集，再由精确匹配过滤。"""
+        if generation is None:
+            generation = self._index_generation
+        index: dict[str, set[str]] = {}
+        for row in list(self._items):
+            _title, _field, hay = self._hay_of(row)
+            path = str(row.get("path") or "")
+            for token in set(hay.split()):
+                index.setdefault(token, set()).add(path)
+        # 构建期间目录被刷新：丢弃旧索引，让新一轮预热接手。
+        if generation != self._index_generation:
+            return
+        self._en_index = index
+        self._index_ready = True
+
+    def _warm_async(self) -> None:
+        if self._warming or not self._items:
+            return
+        self._warming = True
+        generation = self._index_generation
+
+        def run() -> None:
+            try:
+                self._build_index(generation)
+            finally:
+                self._warming = False
+                if generation != self._index_generation and self._items:
+                    self._warm_async()
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _hay_of(self, row: dict[str, Any]) -> tuple[str, str, str]:
+        """(标题, 领域, 全文) 的规范化文本；英文以空格分隔，可直接整词比较。"""
+        path = str(row.get("path") or "")
+        cached = self._hay.get(path)
+        if cached is not None:
+            return cached
+        label = field_label(str(row.get("field") or ""))
+        title_hay = normalize(f"{row.get('title') or ''} {row.get('slug') or ''}")
+        field_hay = normalize(f"{row.get('field') or ''} {label}")
+        hay = normalize(
+            " ".join(
+                [
+                    str(row.get("title") or ""),
+                    str(row.get("slug") or ""),
+                    str(row.get("field") or ""),
+                    label,
+                    str(row.get("conference") or ""),
+                ]
+            )
+        )
+        cached = (title_hay, field_hay, hay)
+        self._hay[path] = cached
+        return cached
+
+    def _score_row(
+        self, plan: QueryPlan, row: dict[str, Any]
+    ) -> tuple[str, list[str], float] | None:
+        """任一概念/候选命中即返回；按概念覆盖度与命中字段排序。"""
+        title_hay, field_hay, hay = self._hay_of(row)
+        total = len(plan.concepts) or 1
+        hits: list[str] = []
+        concept_hits = 0
+        title_hits = 0
+        field_hits = 0
+
+        for concept in plan.concepts:
+            matched = False
+            in_title = False
+            in_field = False
+            for term in concept.terms:
+                if term_hit(term, hay):
+                    matched = True
+                    if term not in hits:
+                        hits.append(term)
+                if term_hit(term, title_hay):
+                    in_title = True
+                if term_hit(term, field_hay):
+                    in_field = True
+            if not matched:
+                continue
+            concept_hits += 1
+            if in_title:
+                title_hits += 1
+            if in_field:
+                field_hits += 1
+
+        if not concept_hits:
+            return None
+        coverage = concept_hits / total
+        score = round(coverage + (title_hits * 0.25 + field_hits * 0.12) / total, 4)
+        return str(row.get("path") or ""), hits[:12], score
+
+    def _candidate_rows(self, plan: QueryPlan) -> list[dict[str, Any]] | None:
+        """用英文倒排先缩小范围；中文概念仍按目录逐条比较。"""
+        if not self._index_ready:
+            return None
+
+        paths: set[str] = set()
+        chinese = [concept for concept in plan.concepts if concept.chinese]
+        for concept in plan.concepts:
+            if concept.chinese:
+                continue
+            for term in concept.terms:
+                tokens = term.split()
+                if not tokens:
+                    continue
+                groups = [self._en_index.get(token, set()) for token in tokens]
+                if any(not group for group in groups):
+                    continue
+                hit = set(groups[0])
+                for group in groups[1:]:
+                    hit &= group
+                paths |= hit
+
+        if chinese:
+            for row in self._items:
+                hay = self._hay_of(row)[2]
+                if any(
+                    any(term_hit(term, hay) for term in concept.terms)
+                    for concept in chinese
+                ):
+                    paths.add(str(row.get("path") or ""))
+
+        return [row for row in self._items if str(row.get("path") or "") in paths]
+
+    def _search_rows(
+        self, plan: QueryPlan, conference: str, field: str
+    ) -> list[tuple[dict[str, Any], list[str], float]]:
+        key = (
+            plan.raw.lower(),
+            conference,
+            field,
+            len(self._items),
+            self._updated_at,
+        )
+        cached = self._search_cache.get(key)
+        if cached is not None:
+            return cached
+
+        pool = self._candidate_rows(plan)
+        if pool is None:
+            pool = self._items
+
+        scored: list[tuple[float, str, dict[str, Any], list[str]]] = []
+        for row in pool:
+            if conference and row["conference"] != conference:
+                continue
+            if field and row["field"] != field:
+                continue
+            result = self._score_row(plan, row)
+            if result is None:
+                continue
+            path, hits, score = result
+            scored.append((score, path, row, hits))
+        scored.sort(key=lambda entry: (-entry[0], entry[1]))
+
+        rows = [(row, hits, score) for score, _path, row, hits in scored]
+        if len(self._search_cache) >= 32:
+            self._search_cache.clear()
+        self._search_cache[key] = rows
+        return rows
+
     def list(
         self,
         conference: str = "",
@@ -449,32 +635,44 @@ class NotesCatalog:
     ) -> dict[str, Any]:
         limit = max(1, min(int(limit), 200))
         offset = max(0, int(offset))
-        needle = query.strip().lower()
+        needle = query.strip()
 
-        rows = self._items
-        if conference:
-            rows = [row for row in rows if row["conference"] == conference]
-        if field:
-            rows = [row for row in rows if row["field"] == field]
+        payload: dict[str, Any]
         if needle:
-            rows = [
-                row
-                for row in rows
-                if needle in row["title"].lower()
-                or needle in row["slug"].lower()
-                or needle in row["field"].lower()
+            plan = expand_query(needle)
+            rows = self._search_rows(plan, conference, field)
+            total = len(rows)
+            page = rows[offset : offset + limit]
+            items = [
+                {
+                    **row,
+                    "label": field_label(row["field"]),
+                    "hits": hits,
+                    "score": score,
+                }
+                for row, hits, score in page
             ]
-
-        total = len(rows)
-        page = rows[offset : offset + limit]
-        return {
-            "items": [
+            payload = {"query": plan.to_dict()}
+        else:
+            rows = self._items
+            if conference:
+                rows = [row for row in rows if row["conference"] == conference]
+            if field:
+                rows = [row for row in rows if row["field"] == field]
+            total = len(rows)
+            page = rows[offset : offset + limit]
+            items = [
                 {
                     **row,
                     "label": field_label(row["field"]),
                 }
                 for row in page
-            ],
+            ]
+            payload = {}
+
+        return {
+            **payload,
+            "items": items,
             "matched": total,
             "offset": offset,
             "limit": limit,

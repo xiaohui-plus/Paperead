@@ -6,11 +6,15 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import httpx
+
+from server.winproc import run_hidden
 
 USER_AGENT = "Paperead/notes (+https://github.com/xiaohui-plus/Paperead)"
 MAX_PDF_BYTES = 100 * 1024 * 1024
@@ -18,7 +22,7 @@ MAX_PDF_BYTES = 100 * 1024 * 1024
 
 def _curl(url: str, timeout: int) -> bytes:
     try:
-        completed = subprocess.run(
+        completed = run_hidden(
             ["curl", "-sL", "--max-time", str(timeout), "-A", USER_AGENT, url],
             capture_output=True,
             timeout=timeout + 10,
@@ -76,7 +80,22 @@ def http_get_text(url: str, timeout: int = 12) -> str:
     return http_get_bytes(url, timeout=timeout).decode("utf-8", "replace")
 
 def http_get_prefix(url: str, limit: int = 8192, timeout: int = 6) -> str:
-    """只取文件开头若干字节：笔记的 front-matter 都在头部，不必下全文。"""
+    """只取文件开头若干字节：笔记的 front-matter 都在头部，不必下全文。
+
+    GitHub 系在本机会先被 httpx 重置、白等数秒，因此与正文一致走 curl 优先。
+    """
+    try:
+        completed = run_hidden(
+            ["curl", "-sL", "--max-time", str(timeout), "-A", USER_AGENT,
+             "-r", f"0-{limit - 1}", url],
+            capture_output=True,
+            timeout=timeout + 10,
+        )
+        if completed.returncode == 0 and completed.stdout:
+            return completed.stdout[:limit].decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        pass
+
     try:
         with httpx.Client(
             follow_redirects=True, timeout=timeout, headers={"User-Agent": USER_AGENT}
@@ -94,16 +113,47 @@ def http_get_prefix(url: str, limit: int = 8192, timeout: int = 6) -> str:
                     return b"".join(chunks)[:limit].decode("utf-8", "replace")
     except httpx.HTTPError:
         pass
-
-    completed = subprocess.run(
-        ["curl", "-sL", "--max-time", str(timeout), "-A", USER_AGENT,
-         "-r", f"0-{limit - 1}", url],
-        capture_output=True,
-        timeout=timeout + 10,
-    )
-    if completed.returncode == 0 and completed.stdout:
-        return completed.stdout[:limit].decode("utf-8", "replace")
     raise RuntimeError("摘要拉取失败")
+
+
+def http_get_prefix_many(
+    urls: list[str], limit: int = 8192, timeout: int = 12
+) -> list[str]:
+    """一次 curl 进程并发取多条文件头。
+
+    摘要按篇各起一个 curl 时，进入一个领域就是几十个控制台进程；这里用
+    ``--parallel`` 把整批压到一个进程里，输出落到独立临时文件后再按顺序读回。
+    """
+    if not urls:
+        return []
+
+    try:
+        folder = Path(tempfile.mkdtemp(prefix="paperead-prefix-"))
+    except OSError:
+        return [http_get_prefix(url, limit=limit, timeout=timeout) for url in urls]
+
+    try:
+        files = [folder / f"{index}.part" for index in range(len(urls))]
+        command = [
+            "curl", "-sL", "--parallel", "--parallel-max", "24",
+            "--max-time", str(timeout), "-A", USER_AGENT,
+        ]
+        for url, target in zip(urls, files):
+            command += ["-r", f"0-{limit - 1}", "-o", str(target), url]
+        try:
+            run_hidden(command, capture_output=True, timeout=timeout + 20)
+        except (OSError, subprocess.SubprocessError):
+            return ["" for _ in urls]
+
+        out: list[str] = []
+        for target in files:
+            try:
+                out.append(target.read_bytes()[:limit].decode("utf-8", "replace"))
+            except OSError:
+                out.append("")
+        return out
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def _race(urls: list[str], task) -> bytes | str:
@@ -151,7 +201,7 @@ def http_download(url: str, dest: Path, timeout: int = 600) -> int:
     except httpx.HTTPError:
         pass
 
-    completed = subprocess.run(
+    completed = run_hidden(
         ["curl", "-sL", "--max-time", str(timeout), "-A", USER_AGENT,
          "-o", str(dest), url],
         capture_output=True,

@@ -204,3 +204,54 @@ def test_auto_sync_migrates_existing_mirror_without_state(
     assert "CVPR2026" in status["skipped"]
     assert status["updated"] == []
     assert mirror._state["conferences"]["CVPR2026"]["sha256"] == _sha256(archive)
+
+def test_auto_sync_promotes_into_fresh_data_dir(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """全新数据目录里 docs/ 还不存在，安装也必须成功并可见。"""
+    archive = _archive(tmp_path)
+    mirror = NotesMirror(tmp_path / "data")
+    monkeypatch.setattr(
+        notes_mirror, "http_get_text", lambda *a, **k: _manifest_for(archive)
+    )
+
+    def fake_download(url, dest, timeout=0):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(archive.read_bytes())
+        return dest.stat().st_size
+
+    monkeypatch.setattr(notes_mirror, "http_download", fake_download)
+
+    status = _run(mirror)
+
+    assert not status["failed"], status["failed"]
+    assert "CVPR2026" in status["updated"]
+    assert mirror.note_path("CVPR2026/llm_reasoning/a.md") is not None
+
+
+def test_auto_sync_adopts_leftover_staging(tmp_path: Path, monkeypatch) -> None:
+    """旧版提升失败留下的已解压 staging 要被回收，避免重下整包。"""
+    archive = _archive(tmp_path)
+    mirror = NotesMirror(tmp_path / "data")
+    leftover = (
+        mirror.root / ".staging" / "CVPR2026-deadbeef" / "docs" / "CVPR2026"
+    )
+    leftover.mkdir(parents=True)
+    (leftover / "llm_reasoning").mkdir()
+    (leftover / "llm_reasoning" / "a.md").write_text(MD.decode("utf-8"), encoding="utf-8")
+
+    monkeypatch.setattr(
+        notes_mirror, "http_get_text", lambda *a, **k: _manifest_for(archive)
+    )
+    monkeypatch.setattr(
+        notes_mirror,
+        "http_download",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应下载")),
+    )
+
+    status = _run(mirror)
+
+    assert not status["failed"], status["failed"]
+    assert "CVPR2026" in status["skipped"]
+    assert mirror.note_path("CVPR2026/llm_reasoning/a.md") is not None
+    assert not any((mirror.root / ".staging").glob("CVPR2026-*"))

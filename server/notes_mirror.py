@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import shutil
 import tarfile
@@ -22,6 +23,8 @@ from typing import Any
 from server.notes_http import http_download, http_get_text
 
 CONF_RE = re.compile(r"^[A-Z]{2,8}\d{4}$")
+
+log = logging.getLogger("paperead.notes_mirror")
 
 MIRROR_MANIFEST_URL = (
     "https://gitee.com/deng_xiaohui/paperead/raw/master/mirror-manifest.json"
@@ -135,6 +138,8 @@ class NotesMirror:
             for item in entries
             if item.get("conference")
         }
+        # 上次提升失败/进程中断会留下已解压的 .staging，先回收，避免重下几百 MB。
+        self._adopt_staging()
         installed = set(self.installed(refresh=True)["conferences"])
         known = self._state.setdefault("conferences", {})
 
@@ -207,6 +212,7 @@ class NotesMirror:
                     self._save_state()
                 self._sync_state["updated"].append(conference)
             except Exception as error:  # 单会议失败不影响其他会议
+                log.warning("笔记镜像 %s 安装失败：%s", conference, error)
                 self._sync_state["failed"].append([conference, str(error)[:140]])
             finally:
                 archive.unlink(missing_ok=True)
@@ -228,6 +234,44 @@ class NotesMirror:
         if not folder.is_dir():
             return 0
         return sum(1 for _ in folder.rglob("*.md"))
+
+    def _adopt_staging(self) -> None:
+        """回收失败/中断留在 .staging 的完整会议目录，避免重复下载。
+
+        提升失败时旧版本会把解压好的 `docs/<会议>` 留在 staging 里，而
+        `installed()` 只看 `docs/`，于是本地明明有内容却仍判定未安装、
+        每篇笔记都回退在线拉取。
+        """
+        staging_root = self.root / ".staging"
+        if not staging_root.is_dir():
+            return
+
+        docs_root = self.root / "docs"
+        adopted = 0
+        for folder in sorted(staging_root.iterdir()):
+            if not folder.is_dir() or folder.name.endswith(".retired"):
+                continue
+            conference, sep, _ = folder.name.partition("-")
+            if not sep or not CONF_RE.fullmatch(conference):
+                continue
+            source = folder / "docs" / conference
+            target = docs_root / conference
+            if not source.is_dir() or target.exists():
+                continue
+            if not any(source.rglob("*.md")):
+                continue
+            docs_root.mkdir(parents=True, exist_ok=True)
+            try:
+                source.replace(target)
+            except OSError as error:
+                log.warning("笔记镜像 %s 回收失败：%s", conference, error)
+                continue
+            shutil.rmtree(folder, ignore_errors=True)
+            adopted += 1
+
+        if adopted:
+            log.info("笔记镜像已回收 %s 个会议", adopted)
+            self._cache = None
 
     def _replace_extract(self, archive: Path, conference: str) -> None:
         """解压到独立目录后整体替换，避免半途失败留下残缺镜像。"""
@@ -255,6 +299,7 @@ class NotesMirror:
         retired = self.root / ".staging" / f"{conference}.retired"
         if retired.exists():
             shutil.rmtree(retired, ignore_errors=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
             target.replace(retired)
         (docs / conference).replace(target)

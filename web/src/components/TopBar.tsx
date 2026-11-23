@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { Paper, ViewMode } from '../types'
 import { downloadMarkdown } from '../lib/markdown'
 import { tourBus } from '../tour/tourBus'
-import { IconAutoHighlight, IconBack, IconCollapse, IconDownload, IconExpand, IconExternalLink, IconMinus, IconPdf, IconPlus, IconPrint, IconReview, IconSettings, IconSidebar, IconTranslate, IconTranslateAll } from './icons'
+import { IconAutoHighlight, IconBack, IconCollapse, IconDownload, IconExpand, IconExternalLink, IconMinus, IconPdf, IconPlus, IconReview, IconSidebar, IconTranslate } from './icons'
 
 interface Props {
   paper: Paper
@@ -42,10 +42,10 @@ interface Props {
   onToggleAutoTranslate: () => void
   /** 全文翻译双栏模式 */
   dualMode?: boolean
-  onTranslateAll?: () => void
-  /** 双栏：是否显示左侧原文（关原文）与滚动联动 */
+  /** PDF 视图：在「原文 / 译文 / 对照」之间切换 */
+  onDualViewMode?: (mode: 'source' | 'zh' | 'dual') => void
+  /** 双栏：是否显示左侧原文，供「原文 / 译文 / 对照」选中态使用 */
   dualShowSource?: boolean
-  onToggleDualSource?: () => void
   dualSync?: boolean
   onToggleDualSync?: () => void
   /** 双栏页面放大倍率（1 = 适配宽度），仅对比阅读使用 */
@@ -62,6 +62,12 @@ const MODES: { key: ViewMode; label: string }[] = [
   { key: 'bilingual', label: '对照' },
   { key: 'zh', label: '译文' },
   { key: 'en', label: '原文' },
+]
+
+const PDF_MODES: { key: 'source' | 'zh' | 'dual'; label: string; title: string }[] = [
+  { key: 'source', label: '原文', title: '只看原版 PDF' },
+  { key: 'zh', label: '译文', title: '只看译文 PDF' },
+  { key: 'dual', label: '对照', title: '左原文 / 右译文对照' },
 ]
 
 export function TopBar({
@@ -96,9 +102,8 @@ export function TopBar({
   autoTranslate,
   onToggleAutoTranslate,
   dualMode = false,
-  onTranslateAll,
+  onDualViewMode,
   dualShowSource = true,
-  onToggleDualSource,
   dualSync = true,
   onToggleDualSync,
   dualZoom = 1,
@@ -110,8 +115,7 @@ export function TopBar({
 }: Props) {
   const pct = total ? Math.round((translated / total) * 100) : 0
 
-  const [busy, setBusy] = useState<'print' | 'download' | 'translated' | null>(null)
-  const [progress, setProgress] = useState('')
+  const [busy, setBusy] = useState<'download' | 'translated' | null>(null)
   const [toast, setToast] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null)
   const toastTimer = useRef<number | null>(null)
   const downloadRef = useRef<HTMLDetailsElement>(null)
@@ -177,28 +181,13 @@ export function TopBar({
     }
   }
 
-  // 打印整份原版 PDF；没有 PDF 时仍按重排内容打印
-  const handlePrint = async () => {
-    if (!canShowPdf) {
-      window.print()
-      return
-    }
-    if (busy) return
-    setBusy('print')
-    setProgress('正在准备打印…')
-    try {
-      const { printPdf } = await import('../lib/pdfFile')
-      await printPdf(pdfHref, (done, all) =>
-        setProgress(done < all ? `正在准备打印 ${done}/${all}` : '正在打开打印对话框…'),
-      )
-      notify('已打开打印对话框')
-    } catch (err) {
-      notify(err instanceof Error ? err.message : '打印准备失败', 'err')
-    } finally {
-      setBusy(null)
-      setProgress('')
-    }
-  }
+
+  const pdfModeActive = (key: 'source' | 'zh' | 'dual') =>
+    key === 'source'
+      ? !dualMode
+      : key === 'zh'
+        ? dualMode && !dualShowSource
+        : dualMode && dualShowSource
 
   return (
     <header className="topbar">
@@ -215,12 +204,11 @@ export function TopBar({
       </div>
 
       <div className="tools">
-        {showPanelToggle && onTogglePanel && (
+        {showPanelToggle && onTogglePanel && panelCollapsed && (
           <button
             className="icon-btn panel-toggle"
-            data-active={!panelCollapsed}
-            aria-pressed={!panelCollapsed}
-            title={panelCollapsed ? '展开阅读侧栏' : '收起阅读侧栏'}
+            title="展开阅读侧栏"
+            aria-label="展开阅读侧栏"
             onClick={onTogglePanel}
           >
             <IconSidebar />
@@ -246,16 +234,24 @@ export function TopBar({
             <IconTranslate />
           </button>
         )}
-        {canShowPdf && onTranslateAll && (pdfMode || dualMode) && (
-          <button
-            className="icon-btn tool-toggle"
-            data-active={dualMode}
-            aria-pressed={dualMode}
-            title={dualMode ? '退出全文翻译双栏' : '翻译全文：左原文 / 右译文双栏对照'}
-            onClick={onTranslateAll}
-          >
-            <IconTranslateAll />
-          </button>
+        {canShowPdf && onDualViewMode && (pdfMode || dualMode) && (
+          <div className="segmented" role="tablist" aria-label="PDF 阅读模式">
+            {PDF_MODES.map((m) => {
+              const active = pdfModeActive(m.key)
+              return (
+                <button
+                  key={m.key}
+                  role="tab"
+                  aria-selected={active}
+                  data-active={active}
+                  title={m.title}
+                  onClick={() => onDualViewMode(m.key)}
+                >
+                  {m.label}
+                </button>
+              )
+            })}
+          </div>
         )}
         {!pdfMode && !dualMode && (
           <div className="segmented" data-tour="reader-mode" role="tablist" aria-label="阅读模式">
@@ -358,7 +354,6 @@ export function TopBar({
           {translating && <i className="spin-dot" />}
         </span>
 
-        {progress && <span className="pill">{progress}</span>}
 
         <details className="topbar-download" ref={downloadRef}>
           <summary
@@ -384,23 +379,7 @@ export function TopBar({
             </button>
           </div>
         </details>
-        <button
-          className="icon-btn print-btn"
-          title={canShowPdf ? '打印原版 PDF' : '打印 / 存为 PDF'}
-          disabled={busy !== null}
-          onClick={handlePrint}
-        >
-          {busy === 'print' ? <i className="spin-dot" /> : <IconPrint />}
-        </button>
 
-        <button
-          className="icon-btn settings-btn"
-          title={configured ? '模型设置（回答模型已配置）' : '模型设置（未配置回答模型）'}
-          onClick={onOpenSettings}
-        >
-          <IconSettings />
-          <i className="dot" data-on={configured} />
-        </button>
 
         {dualMode && (
           <div className="topbar-dual-actions" role="group" aria-label="双栏阅读控制">
@@ -419,18 +398,7 @@ export function TopBar({
                 {Math.round(dualZoom * 100)}%
               </button>
             )}
-            {onToggleDualSource && (
-              <button
-                type="button"
-                className="dual-source-toggle"
-                data-active={dualShowSource}
-                aria-pressed={dualShowSource}
-                title={dualShowSource ? '关闭左侧原文，译文占满' : '恢复左侧原文'}
-                onClick={onToggleDualSource}
-              >
-                {dualShowSource ? '关原文' : '开原文'}
-              </button>
-            )}
+
             {onToggleDualSync && (
               <button
                 type="button"

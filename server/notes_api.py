@@ -18,7 +18,6 @@ from pydantic import BaseModel, Field
 
 from paperead.notes_import import collect_notes, parse_note
 from server.notes_catalog import NotesCatalog
-from concurrent.futures import ThreadPoolExecutor
 
 from paperead.notes_import import _parse_front_matter
 from server.notes_http import (
@@ -26,6 +25,7 @@ from server.notes_http import (
     http_download,
     http_get_bytes,
     http_get_prefix_any,
+    http_get_prefix_many,
     http_get_text_any,
 )
 from server.notes_mirror import NotesMirror
@@ -111,6 +111,9 @@ ONLINE_SOURCES = (
     "https://raw.githubusercontent.com/M0rtzz/paper-notes/main/{path}",
 )
 
+# 摘要只取文件头（Range 请求）：jsDelivr 对批量 Range 返回空，raw 更快且稳定。
+DESCRIPTION_SOURCES = (ONLINE_SOURCES[1], ONLINE_SOURCES[0])
+
 
 def _fetch_markdown(path: str) -> str:
     """按源逐个尝试；jsDelivr 对国内更友好，raw 作后备。"""
@@ -148,18 +151,34 @@ def _parse_online(path: str, mirror: NotesMirror | None = None) -> Any:
         shutil.rmtree(root, ignore_errors=True)
 
 
-def _fetch_description(path: str, mirror: NotesMirror | None = None) -> tuple[str, str]:
+def _description_from_text(text: str) -> str:
+    if not text:
+        return ""
+    meta, _ = _parse_front_matter(text)
+    return str(meta.get("description") or "").strip()
+
+
+def _mirror_description(path: str, mirror: NotesMirror | None) -> str | None:
+    """镜像里有这篇就直接读本地；返回 None 表示需要联网。"""
+    if mirror is None:
+        return None
     rel = path[len("docs/") :]
-    if mirror is not None:
-        local = mirror.note_path(rel)
-        if local is not None:
-            try:
-                text = local.read_text(encoding="utf-8")[:8192]
-            except OSError:
-                text = ""
-            if text:
-                meta, _ = _parse_front_matter(text)
-                return path, str(meta.get("description") or "").strip()
+    local = mirror.note_path(rel)
+    if local is None:
+        return None
+    try:
+        text = local.read_text(encoding="utf-8")[:8192]
+    except OSError:
+        return None
+    if not text:
+        return None
+    return _description_from_text(text)
+
+
+def _fetch_description(path: str, mirror: NotesMirror | None = None) -> tuple[str, str]:
+    local = _mirror_description(path, mirror)
+    if local is not None:
+        return path, local
 
     encoded = quote(path, safe="/")
     urls = [template.format(path=encoded) for template in ONLINE_SOURCES]
@@ -167,17 +186,51 @@ def _fetch_description(path: str, mirror: NotesMirror | None = None) -> tuple[st
         text = http_get_prefix_any(urls, 8192, timeout=6)
     except Exception:
         return path, ""
-    meta, _ = _parse_front_matter(text)
-    return path, str(meta.get("description") or "").strip()
+    return path, _description_from_text(text)
 
 
 def _fetch_descriptions(
     paths: list[str], mirror: NotesMirror | None = None
 ) -> dict[str, str]:
+    """镜像优先；未命中的摘要整批用一次 curl 取，避免每篇各起一个进程。"""
     if not paths:
         return {}
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        return dict(pool.map(lambda path: _fetch_description(path, mirror), paths))
+
+    out: dict[str, str] = {}
+    pending: list[str] = []
+    for path in paths:
+        local = _mirror_description(path, mirror)
+        if local is not None:
+            out[path] = local
+        else:
+            pending.append(path)
+
+    for template in DESCRIPTION_SOURCES:
+        if not pending:
+            break
+        urls = [template.format(path=quote(path, safe="/")) for path in pending]
+        try:
+            texts = http_get_prefix_many(urls, 8192, timeout=12)
+        except Exception:
+            continue
+        retry: list[str] = []
+        for path, text in zip(pending, texts):
+            desc = _description_from_text(text)
+            if desc:
+                out[path] = desc
+            else:
+                retry.append(path)
+        pending = retry
+
+    # 只剩零星几条时再用单篇回退；整批失败不逐条重试，避免又拉起几十个进程。
+    if 0 < len(pending) <= 5:
+        for path, desc in (
+            _fetch_description(path, mirror=None) for path in pending
+        ):
+            out[path] = desc
+    for path in pending:
+        out.setdefault(path, "")
+    return out
 
 
 def build_router(
@@ -243,6 +296,7 @@ def build_router(
             title = titles.get(item["path"][len("docs/") :])
             if title:
                 item["title"] = title
+            item["description"] = catalog.description_of(item["path"])
         return {
             **status,
             **data,

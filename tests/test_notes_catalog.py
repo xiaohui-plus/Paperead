@@ -164,3 +164,85 @@ def test_list_items_carry_readable_label(tmp_path: Path, monkeypatch) -> None:
 
     assert items
     assert all(item["label"] for item in items)
+
+
+
+CN_TREE = {
+    "tree": [
+        {"type": "blob", "path": "docs/CVPR2026/image_generation/diffusion_model_for_images.md"},
+        {"type": "blob", "path": "docs/CVPR2026/segmentation/organ_segmentation_with_gan.md"},
+        {"type": "blob", "path": "docs/ICLR2026/llm_reasoning/chain_of_thought_reasoning.md"},
+        {"type": "blob", "path": "docs/ICLR2026/reinforcement_learning/reward_model_policy.md"},
+        {"type": "blob", "path": "docs/CVPR2026/image_generation/index.md"},
+    ]
+}
+
+
+def _cn_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> NotesCatalog:
+    monkeypatch.setattr(
+        "server.notes_catalog.http_get_text", lambda *a, **k: json.dumps(CN_TREE)
+    )
+    catalog = NotesCatalog(tmp_path)
+    catalog._items = catalog._fetch()
+    catalog._state = "ready"
+    return catalog
+
+
+def test_chinese_query_expands_to_english_candidates(tmp_path: Path, monkeypatch) -> None:
+    catalog = _cn_catalog(tmp_path, monkeypatch)
+
+    hit = catalog.list(query="扩散模型")
+
+    assert hit["matched"] == 1
+    assert "diffusion" in hit["items"][0]["title"].lower()
+    assert hit["query"]["concepts"] == ["扩散模型"]
+    assert {"term": "diffusion", "source": "扩散模型"} in hit["query"]["terms"]
+    assert "diffusion" in hit["items"][0]["hits"]
+
+
+def test_any_concept_hit_counts_and_sorts_by_coverage(tmp_path: Path, monkeypatch) -> None:
+    catalog = _cn_catalog(tmp_path, monkeypatch)
+
+    hit = catalog.list(query="扩散模型 语义分割")
+
+    # 任一概念命中即返回：扩散那篇命中 1/2，分割那篇命中 1/2。
+    assert hit["matched"] == 2
+    titles = {item["title"] for item in hit["items"]}
+    assert any("Diffusion" in title for title in titles)
+    assert any("Organ" in title for title in titles)
+
+
+def test_english_match_uses_whole_words_not_letters(tmp_path: Path, monkeypatch) -> None:
+    catalog = _cn_catalog(tmp_path, monkeypatch)
+
+    assert catalog.list(query="gan")["matched"] == 1
+    assert catalog.list(query="organ")["matched"] == 1
+    # “ga” 不是完整单词，不能靠字母子串命中 GAN。
+    assert catalog.list(query="ga")["matched"] == 0
+    # reasoning 不能被子串 reason 命中。
+    assert catalog.list(query="reason")["matched"] == 0
+    assert catalog.list(query="reasoning")["matched"] == 1
+
+
+def test_chinese_field_label_is_searchable(tmp_path: Path, monkeypatch) -> None:
+    catalog = _cn_catalog(tmp_path, monkeypatch)
+
+    hit = catalog.list(query="强化学习")
+
+    assert hit["matched"] >= 1
+    item = hit["items"][0]
+    assert item["field"] == "reinforcement_learning"
+    assert item["hits"]
+
+
+def test_catalog_endpoint_expands_chinese_query(tmp_path: Path, monkeypatch) -> None:
+    client, _store = _client(tmp_path, monkeypatch)
+
+    response = client.get("/api/notes/catalog", params={"q": "推理"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["matched"] == 2
+    assert body["query"]["concepts"] == ["推理"]
+    assert all(item["field"] == "llm_reasoning" for item in body["items"])
+    assert all("reasoning" in item["hits"] for item in body["items"])

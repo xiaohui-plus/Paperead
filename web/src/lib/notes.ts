@@ -125,6 +125,84 @@ export interface CatalogItem {
   label: string
   slug: string
   title: string
+  /** 按需补齐的中文解读；后端列表接口默认不返回。 */
+  description?: string
+  /** 本次查询在该条上命中的检索词，用于高亮。 */
+  hits?: string[]
+  /** 检索相关度（概念覆盖度 + 标题/领域命中）。 */
+  score?: number
+}
+
+export interface CatalogQueryTerm {
+  term: string
+  source: string
+}
+
+/** 中文查询的扩展结果：原查询、拆分出的概念，以及对应的英文候选。 */
+export interface CatalogQueryPlan {
+  raw: string
+  concepts: string[]
+  terms: CatalogQueryTerm[]
+}
+
+export interface NoteMetaItem {
+  label: string
+  value: string
+}
+
+const META_LINE = /^\*\*([^*\n]{1,16})\*\*\s*[:：]\s*(.+)$/
+const META_MARKER = /\*\*([^*\n]{1,16})\*\*\s*[:：]\s*/g
+
+function parseMetaLines(text: string): NoteMetaItem[] | null {
+  const lines = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+  if (lines.length < 2) return null
+  const items: NoteMetaItem[] = []
+  for (const line of lines) {
+    const match = META_LINE.exec(line)
+    if (!match) return null
+    items.push({ label: match[1].trim(), value: match[2].trim() })
+  }
+  return items
+}
+
+function parseMetaInline(text: string): NoteMetaItem[] | null {
+  const matches = [...text.matchAll(META_MARKER)]
+  if (matches.length < 2) return null
+  if (text.slice(0, matches[0].index ?? 0).trim()) return null
+  return matches.map((match, index) => {
+    const start = (match.index ?? 0) + match[0].length
+    const end =
+      index + 1 < matches.length ? matches[index + 1].index ?? text.length : text.length
+    return {
+      label: match[1].trim(),
+      value: text.slice(start, end).replace(/\s*\n\s*/g, ' ').trim(),
+    }
+  })
+}
+
+/**
+ * 把正文开头「**会议**: … **arXiv**: … **代码**: …」这类元信息段拆成独立字段。
+ *
+ * 解析器会把这几行并进同一个段落块，块内换行在渲染时又被折成一行，
+ * 于是所有字段挤在一条线上。这里只识别标题后的第一段，且要求整段都是
+ * 「粗体标签: 值」形式，避免误拆正文里的「**领域现状**：…」。
+ */
+export function splitNoteMeta(blocks: NoteBlock[]): {
+  meta: NoteMetaItem[]
+  rest: NoteBlock[]
+} {
+  const index = blocks.findIndex((block) => block.kind === 'para' && block.text.trim())
+  if (index < 0) return { meta: [], rest: blocks }
+  const before = blocks.slice(0, index)
+  if (before.some((block) => block.kind !== 'title' && block.kind !== 'heading')) {
+    return { meta: [], rest: blocks }
+  }
+  const meta = parseMetaLines(blocks[index].text) ?? parseMetaInline(blocks[index].text)
+  if (!meta || meta.length < 2) return { meta: [], rest: blocks }
+  return { meta, rest: blocks.filter((_, i) => i !== index) }
 }
 
 export interface CatalogFieldItem {
@@ -183,6 +261,8 @@ export interface CatalogResult {
   items: CatalogItem[]
   conferences: CatalogConference[]
   fields: CatalogField[]
+  /** 有查询时返回中文→英文扩展结果。 */
+  query?: CatalogQueryPlan
 }
 
 export interface FieldNote extends CatalogItem {

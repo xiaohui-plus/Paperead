@@ -21,6 +21,7 @@ import {
   IconImage,
   IconKey,
   IconList,
+  IconSidebar,
 } from './icons'
 
 export type TabKey =
@@ -67,6 +68,8 @@ export interface PanelProps {
   focusAnnotation?: { id: string; at: number } | null
   /** 双击自动阅读重点后要聚焦的条目 */
   focusHighlight?: { id: string; at: number } | null
+  /** 桌面端：把阅读助手收起（收起后折叠入口回到顶栏） */
+  onCollapse?: () => void
 }
 
 export const PANEL_TABS: { key: TabKey; label: string; icon: ReactNode }[] = [
@@ -196,6 +199,17 @@ export function LeftPanel(props: PanelProps & { tab?: TabKey; onTab?: (tab: TabK
           <IconBookOpenText />
         </span>
         <h2>阅读助手</h2>
+        {props.onCollapse && (
+          <button
+            type="button"
+            className="icon-btn panel-collapse-btn"
+            title="收起阅读助手"
+            aria-label="收起阅读助手"
+            onClick={props.onCollapse}
+          >
+            <IconSidebar />
+          </button>
+        )}
       </div>
 
       <nav className="tabs" data-tour="reader-tabs" role="tablist">

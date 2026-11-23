@@ -1749,6 +1749,17 @@ export function ReaderView({ paperId, onBack }: Props) {
     window.history.replaceState({}, '', url)
   }
 
+  /** PDF 视图 / 双栏的「原文 · 译文 · 对照」切换（顶栏组件）。 */
+  const setPdfReadingMode = (next: 'source' | 'zh' | 'dual') => {
+    if (next === 'source') {
+      // 已经在原文页就保持；在双栏则退出回原版 PDF
+      if (dualMode) void translateAll('toggle')
+      return
+    }
+    setDualShowSource(next === 'dual')
+    if (!dualMode) void translateAll('enter')
+  }
+
   const togglePdfExpand = () => {
     const next = !pdfExpanded
     setPdfExpanded(next)
@@ -1882,9 +1893,8 @@ export function ReaderView({ paperId, onBack }: Props) {
         autoTranslate={autoTranslate}
         onToggleAutoTranslate={toggleAutoTranslate}
         dualMode={dualMode}
-        onTranslateAll={() => void translateAll('toggle')}
+        onDualViewMode={setPdfReadingMode}
         dualShowSource={dualShowSource}
-        onToggleDualSource={() => setDualShowSource((v) => !v)}
         dualSync={dualSync}
         onToggleDualSync={() => setDualSync((v) => !v)}
         dualZoom={dualZoom}
@@ -2001,6 +2011,7 @@ focusAnnotation={focusAnnotation}
               onRemoveQuote={removeQuote}
               onClearQuotes={clearQuotes}
               quoteFocus={quoteFocus}
+              onCollapse={togglePanel}
             />
             <div
               className="panel-resizer"

@@ -40,7 +40,9 @@ def _client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(
         "server.notes_catalog.http_get_text", lambda *a, **k: json.dumps(TREE)
     )
-    monkeypatch.setattr(notes_api, "http_get_prefix_any", lambda *a, **k: FRONT)
+    monkeypatch.setattr(
+        notes_api, "http_get_prefix_many", lambda urls, *a, **k: [FRONT for _ in urls]
+    )
 
     store = NoteStore(tmp_path / "data")
     catalog = NotesCatalog(tmp_path)
@@ -104,8 +106,9 @@ def test_descriptions_are_cached(
     calls = {"count": 0}
     monkeypatch.setattr(
         notes_api,
-        "http_get_prefix_any",
-        lambda *a, **k: calls.__setitem__("count", calls["count"] + 1) or FRONT,
+        "http_get_prefix_many",
+        lambda urls, *a, **k: calls.__setitem__("count", calls["count"] + 1)
+        or [FRONT for _ in urls],
     )
     client.get("/api/notes/catalog/descriptions", params={"paths": paths})
 

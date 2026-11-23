@@ -24,12 +24,14 @@ import {
   PinOff,
   Settings2,
   Star,
+  Tag,
   Wrench,
   Aperture,
   Bot,
   BrainCircuit,
   CalendarDays,
   Camera,
+  CodeXml,
   Cuboid,
   Hash,
   Images,
@@ -552,3 +554,7 @@ export const IconLayers = themed(Layers)
 export const IconHash = themed(Hash)
 export const IconInbox = themed(Inbox)
 export const IconLoader = themed(Loader2)
+/** 笔记元信息：代码仓库 */
+export const IconCode = themed(CodeXml)
+/** 笔记元信息：关键词 */
+export const IconTag = themed(Tag)

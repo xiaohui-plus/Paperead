@@ -24,6 +24,7 @@ from pathlib import Path
 import pymupdf
 
 _TIMEOUT = 6.0
+_PROBE_TEX = "x"
 _LOCK = threading.Lock()
 _CACHE: dict[str, bytes | None] = {}
 _PROC: subprocess.Popen | None = None
@@ -76,13 +77,31 @@ def _node_exe() -> str | None:
     return _NODE_EXE
 
 
+def _renderable() -> bool:
+    """真实渲染一次，确认 node 与 MathJax 资源在本机可用。
+
+    只判断文件存在不足以证明可用：node 版本不匹配时 tex2svg_server.js 能
+    起来但渲染返回空，依赖方会直接硬失败而不是回退。探测失败即视为不可用。
+    """
+    try:
+        svg = _request(_PROBE_TEX, display=False)
+        return bool(svg and svg_to_pdf(svg))
+    except Exception:
+        return False
+    finally:
+        _kill()
+
+
 def available() -> bool:
     global _AVAILABLE
     if _AVAILABLE is None:
-        _AVAILABLE = (
-            _vendor_dir().joinpath("tex2svg_server.js").is_file()
-            and _node_exe() is not None
-        )
+        with _LOCK:
+            if _AVAILABLE is None:
+                _AVAILABLE = (
+                    _vendor_dir().joinpath("tex2svg_server.js").is_file()
+                    and _node_exe() is not None
+                    and _renderable()
+                )
     return _AVAILABLE
 
 

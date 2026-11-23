@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ComponentType } from 'react'
+import { useEffect, useMemo, useState, type ComponentType, type ReactNode } from 'react'
 import { Markdown } from './Markdown'
 import { SettingsDialog } from './SettingsDialog'
 import { Sidebar, type NavKey } from './Sidebar'
@@ -12,7 +12,9 @@ import {
   IconCamera,
   IconChevronDown,
   IconClose,
+  IconCode,
   IconCuboid,
+  IconExternalLink,
   IconFileText,
   IconGlobe,
   IconHash,
@@ -29,6 +31,7 @@ import {
   IconSearch,
   IconShieldCheck,
   IconSigma,
+  IconTag,
   IconTarget,
 } from './icons'
 import {
@@ -41,13 +44,16 @@ import {
   getNote,
   importNotePaper,
   refreshCatalog,
+  splitNoteMeta,
   type CatalogCard,
   type CatalogFieldItem,
   type CatalogItem,
   type CatalogOverview,
+  type CatalogQueryPlan,
   type FieldNote,
   type FieldTheme,
   type NoteDetail,
+  type NoteMetaItem,
 } from '../lib/notes'
 
 const PAGE_SIZE = 60
@@ -84,8 +90,167 @@ function groupIcon(name: string): IconComponent {
   return GROUP_ICONS[name] || IconLayers
 }
 
+const META_ICONS: Record<string, IconComponent> = {
+  '会议': IconCalendarDays,
+  conference: IconCalendarDays,
+  arxiv: IconHash,
+  '代码': IconCode,
+  code: IconCode,
+  github: IconCode,
+  '领域': IconLayers,
+  field: IconLayers,
+  '关键词': IconTag,
+  '关键字': IconTag,
+  keyword: IconTag,
+  keywords: IconTag,
+  '论文链接': IconExternalLink,
+  '原文链接': IconExternalLink,
+  '链接': IconExternalLink,
+  link: IconExternalLink,
+  url: IconExternalLink,
+}
+
+function metaIcon(label: string): IconComponent {
+  return META_ICONS[label.trim().toLowerCase()] ?? IconHash
+}
+
+const KEYWORD_LABELS = new Set(['关键词', '关键字', 'keyword', 'keywords'])
+const CODE_LABELS = new Set(['代码', 'code', 'github'])
+
+function metaKind(label: string): 'code' | 'keyword' | 'text' {
+  const key = label.trim().toLowerCase()
+  if (CODE_LABELS.has(key)) return 'code'
+  if (KEYWORD_LABELS.has(key)) return 'keyword'
+  return 'text'
+}
+
+const META_LINK = /\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)|(https?:\/\/[^\s<>()]+)/g
+
+/** 仓库地址去掉协议与前缀斜杠，保留可读的主机 + 路径。 */
+function shortLink(href: string): string {
+  try {
+    const url = new URL(href)
+    return `${url.host}${url.pathname.replace(/\/+$/, '')}`
+  } catch {
+    return href
+  }
+}
+
+/** 元信息值里可能有 markdown 链接或裸地址，渲染成可点链接。 */
+function renderMetaValue(value: string, kind: 'code' | 'keyword' | 'text'): ReactNode {
+  const source =
+    kind === 'keyword' ? value.replace(/\s*[,，、;；]\s*/g, '，').trim() : value
+  const nodes: ReactNode[] = []
+  let last = 0
+  for (const match of source.matchAll(META_LINK)) {
+    const index = match.index ?? 0
+    if (index > last) nodes.push(source.slice(last, index))
+    const href = match[2] ?? match[3]
+    nodes.push(
+      <a key={`${index}-${href}`} href={href} title={href} target="_blank" rel="noreferrer">
+        {match[2] ? match[1] || shortLink(href) : shortLink(href)}
+      </a>,
+    )
+    last = index + match[0].length
+  }
+  if (last < source.length) nodes.push(source.slice(last))
+  return nodes.length > 0 ? nodes : source
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : '操作失败，请重试'
+}
+
+const CJK_RE = /[\u3400-\u9fff]/
+
+function escapePattern(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** 把命中的词在文本里的位置找出来：英文按整词（含空格/连字符变体），中文按子串。 */
+function hitRanges(text: string, terms: string[]): [number, number][] {
+  if (!text || !terms.length) return []
+  const ranges: [number, number][] = []
+  for (const term of terms) {
+    const value = term.trim()
+    if (!value) continue
+    if (CJK_RE.test(value)) {
+      let from = 0
+      while (from <= text.length) {
+        const at = text.indexOf(value, from)
+        if (at < 0) break
+        ranges.push([at, at + value.length])
+        from = at + value.length
+      }
+      continue
+    }
+    // 单个字母/数字不参与高亮，和“字母不算命中”保持一致。
+    if (value.length < 2) continue
+    const pattern = escapePattern(value).replace(/\s+/g, '[-_\\s]+')
+    const regex = new RegExp(`(^|[^a-z0-9])(${pattern})(?![a-z0-9])`, 'gi')
+    let match: RegExpExecArray | null
+    while ((match = regex.exec(text))) {
+      const start = (match.index ?? 0) + (match[1]?.length ?? 0)
+      const length = match[2]?.length ?? 0
+      if (!length) {
+        regex.lastIndex += 1
+        continue
+      }
+      ranges.push([start, start + length])
+    }
+  }
+  ranges.sort((left, right) => left[0] - right[0] || right[1] - left[1])
+  const merged: [number, number][] = []
+  for (const [start, end] of ranges) {
+    const last = merged[merged.length - 1]
+    if (last && start <= last[1]) last[1] = Math.max(last[1], end)
+    else merged.push([start, end])
+  }
+  return merged
+}
+
+function HighlightText({ text, terms }: { text: string; terms: string[] }) {
+  // 先把词表拼成稳定 key：父组件每次渲染都会新建数组，直接用它当依赖会反复重算。
+  const termsKey = terms.join('###')
+  const ranges = useMemo(
+    () => hitRanges(text, termsKey ? termsKey.split('###') : []),
+    [text, termsKey],
+  )
+  if (!ranges.length) return <>{text}</>
+  const nodes: ReactNode[] = []
+  let cursor = 0
+  ranges.forEach(([start, end], index) => {
+    if (start > cursor) nodes.push(text.slice(cursor, start))
+    nodes.push(
+      <mark className="notes-hit" key={`hit-${start}-${index}`}>
+        {text.slice(start, end)}
+      </mark>,
+    )
+    cursor = end
+  })
+  if (cursor < text.length) nodes.push(text.slice(cursor))
+  return <>{nodes}</>
+}
+
+/** 头部展示“中文 → 英文候选”，让用户知道为什么这些英文笔记会被召回。 */
+function QueryPlan({ plan }: { plan: CatalogQueryPlan }) {
+  const terms = useMemo(
+    () =>
+      plan.terms
+        .map((item) => item.term)
+        .filter((term) => term.toLowerCase() !== plan.raw.toLowerCase()),
+    [plan],
+  )
+  if (!terms.length) return null
+  return (
+    <div className="notes-query-plan" title={terms.join(' · ')}>
+      <IconLanguages size={12} />
+      <span>
+        <b>{plan.raw}</b> 已扩展为 {terms.slice(0, 8).join(' · ')}
+        {terms.length > 8 ? ` 等 ${terms.length} 个词` : ''}
+      </span>
+    </div>
+  )
 }
 
 interface Props {
@@ -109,6 +274,7 @@ export function NotesPage({ onNav, onOpenPaper }: Props) {
   const [themes, setThemes] = useState<FieldTheme[]>([])
   const [fieldLoading, setFieldLoading] = useState(false)
   const [matched, setMatched] = useState(0)
+  const [plan, setPlan] = useState<CatalogQueryPlan | null>(null)
   const [loading, setLoading] = useState(false)
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [detail, setDetail] = useState<NoteDetail | null>(null)
@@ -164,7 +330,15 @@ export function NotesPage({ onNav, onOpenPaper }: Props) {
         offset,
       })
       setMatched(result.matched)
+      setPlan(result.query ?? null)
       setItems((prev) => (offset > 0 ? [...prev, ...result.items] : result.items))
+      void fillDescriptions(result.items, (map) =>
+        setItems((prev) =>
+          prev.map((item) =>
+            map[item.path] ? { ...item, description: map[item.path] } : item,
+          ),
+        ),
+      )
     } catch (error) {
       notify(errorText(error), 'err')
     } finally {
@@ -172,27 +346,25 @@ export function NotesPage({ onNav, onOpenPaper }: Props) {
     }
   }
 
-  const fillDescriptions = async (rows: FieldNote[]) => {
+  const fillDescriptions = async (
+    rows: { path: string; description?: string }[],
+    apply: (map: Record<string, string>) => void,
+  ) => {
     const missing = rows.filter((row) => !row.description).map((row) => row.path)
+    if (!missing.length) return
+    // 后端一次最多取 30 条；整页 60 篇拆两批并发，每批仍只起一条 curl。
     const chunks: string[][] = []
-    for (let index = 0; index < missing.length; index += 10) {
-      chunks.push(missing.slice(index, index + 10))
+    for (let index = 0; index < missing.length; index += 30) {
+      chunks.push(missing.slice(index, index + 30))
     }
-    // 各批并发，避免 30 篇串行等待把摘要拖到十几秒。
-    await Promise.all(
-      chunks.map(async (chunk) => {
-        try {
-          const map = await fetchDescriptions(chunk)
-          setFieldItems((prev) =>
-            prev.map((item) =>
-              map[item.path] ? { ...item, description: map[item.path] } : item,
-            ),
-          )
-        } catch {
-          // 摘要失败不影响列表展示，保留骨架
-        }
-      }),
-    )
+    try {
+      const maps = await Promise.all(
+        chunks.map((chunk) => fetchDescriptions(chunk).catch(() => ({}))),
+      )
+      apply(Object.assign({}, ...maps) as Record<string, string>)
+    } catch {
+      // 摘要失败不影响列表展示，保留骨架
+    }
   }
 
   const loadField = async (offset = 0) => {
@@ -202,9 +374,16 @@ export function NotesPage({ onNav, onOpenPaper }: Props) {
       const result = await fetchFieldNotes(conference, field, 30, offset)
       setFieldItems((prev) => (offset > 0 ? [...prev, ...result.items] : result.items))
       setMatched(result.matched)
+      setPlan(null)
       setAcross(result.across)
       setThemes(result.themes)
-      void fillDescriptions(result.items)
+      void fillDescriptions(result.items, (map) =>
+        setFieldItems((prev) =>
+          prev.map((item) =>
+            map[item.path] ? { ...item, description: map[item.path] } : item,
+          ),
+        ),
+      )
     } catch (error) {
       notify(errorText(error), 'err')
     } finally {
@@ -246,6 +425,7 @@ export function NotesPage({ onNav, onOpenPaper }: Props) {
     setExpanded({})
     setItems([])
     setFieldItems([])
+    setPlan(null)
     setMode('list')
     if (card && first) {
       setMatched(first.count)
@@ -269,6 +449,7 @@ export function NotesPage({ onNav, onOpenPaper }: Props) {
     setQuery('')
     setItems([])
     setFieldItems([])
+    setPlan(null)
     setMode('list')
     setFilterUrl(card.name, item.name)
   }
@@ -277,6 +458,7 @@ export function NotesPage({ onNav, onOpenPaper }: Props) {
     setConference(name)
     setQuery('')
     setFieldItems([])
+    setPlan(null)
     setFilterUrl(name, field)
   }
 
@@ -289,6 +471,7 @@ export function NotesPage({ onNav, onOpenPaper }: Props) {
     setQuery('')
     setItems([])
     setMatched(0)
+    setPlan(null)
   }
 
   // 深链只带会议时，自动落到该会议的第一个领域，与点会议名保持一致。
@@ -370,6 +553,19 @@ export function NotesPage({ onNav, onOpenPaper }: Props) {
     [overview, conference],
   )
 
+  const noteMeta = useMemo(() => splitNoteMeta(detail?.blocks ?? []), [detail])
+
+  // 标题里高亮本次实际命中的英文候选；摘要里补上查询的中文原词。
+  const queryTerms = useMemo(() => plan?.concepts ?? [], [plan])
+  const termsFor = (item: CatalogItem) =>
+    Array.from(new Set([...(item.hits ?? []), ...queryTerms]))
+
+  // 页头已经显示标题，正文里解析出的 title 块不再重复渲染。
+  const noteBody = useMemo(
+    () => blocksToMarkdown(noteMeta.rest.filter((block) => block.kind !== 'title')),
+    [noteMeta],
+  )
+
   const heading = useMemo(() => {
     if (query.trim()) return `“${query.trim()}” 的搜索结果`
     if (field) return `${conference} · ${fieldLabel || field}`
@@ -425,11 +621,31 @@ export function NotesPage({ onNav, onOpenPaper }: Props) {
             <p className="notes-license">
               内容来源 {detail.origin || 'paper-notes'}，许可 {detail.license || 'CC BY-NC-SA 4.0'}
             </p>
+            {noteMeta.meta.length > 0 && (
+              <dl className="notes-meta">
+                {noteMeta.meta.map((item: NoteMetaItem) => {
+                  const MetaIcon = metaIcon(item.label)
+                  const kind = metaKind(item.label)
+                  return (
+                    <div
+                      className="notes-meta-row"
+                      data-kind={kind}
+                      key={`${item.label}:${item.value}`}
+                    >
+                      <dt title={item.label} aria-label={item.label}>
+                        <MetaIcon size={13} />
+                      </dt>
+                      <dd>{renderMetaValue(item.value, kind)}</dd>
+                    </div>
+                  )
+                })}
+              </dl>
+            )}
             <div className="notes-detail">
               {detail.blocks.length === 0 && detailLoading ? (
                 <div className="notes-state"><IconLoader size={13} className="notes-spin" />正在加载笔记正文…</div>
               ) : (
-                <Markdown text={blocksToMarkdown(detail.blocks)} breaks={false} />
+                <Markdown text={noteBody} breaks={false} />
               )}
             </div>
           </div>
@@ -476,7 +692,7 @@ export function NotesPage({ onNav, onOpenPaper }: Props) {
               <IconSearch />
               <input
                 value={query}
-                placeholder="搜索标题、领域或关键词"
+                placeholder="搜索标题、领域或关键词（支持中文）"
                 onChange={(event) => {
                   setQuery(event.target.value)
                   if (event.target.value.trim()) setMode('list')
@@ -708,7 +924,7 @@ export function NotesPage({ onNav, onOpenPaper }: Props) {
               <IconSearch />
               <input
                 value={query}
-                placeholder="在当前结果中搜索"
+                placeholder="在当前结果中搜索（支持中文）"
                 onChange={(event) => setQuery(event.target.value)}
               />
               {query && (
@@ -718,25 +934,41 @@ export function NotesPage({ onNav, onOpenPaper }: Props) {
               )}
             </div>
 
+            {plan && <QueryPlan plan={plan} />}
+
             {notice && <div className={'library-notice ' + notice.kind}>{notice.text}</div>}
             {detailLoading && <div className="notes-state">正在加载笔记…</div>}
 
             {items.length === 0 && !loading ? (
               <div className="library-empty notes-empty"><IconInbox size={18} />没有匹配的笔记。</div>
             ) : (
-              <div className="notes-grid">
+              <div className="notes-paper-list">
                 {items.map((item) => (
-                  <button
-                    key={item.path}
-                    className="notes-card"
-                    onClick={() => void openNote(item)}
-                  >
-                    <div className="notes-card-meta">
-                      <span className="notes-chip">{item.conference}</span>
-                      <span className="notes-field">{item.label || item.field}</span>
-                    </div>
-                    <strong>{item.title}</strong>
-                  </button>
+                  <article key={item.path} className="notes-paper">
+                    <button
+                      className="notes-paper-title"
+                      onClick={() => void openNote(item)}
+                      title={item.title}
+                    >
+                      <IconFileText size={13} />
+                      <span>
+                        <HighlightText text={item.title} terms={termsFor(item)} />
+                      </span>
+                      <em className="notes-paper-tag">
+                        <HighlightText
+                          text={`${item.conference} · ${item.label || item.field}`}
+                          terms={termsFor(item)}
+                        />
+                      </em>
+                    </button>
+                    {item.description ? (
+                      <p>
+                        <HighlightText text={item.description} terms={termsFor(item)} />
+                      </p>
+                    ) : (
+                      <div className="notes-paper-skeleton" />
+                    )}
+                  </article>
                 ))}
               </div>
             )}
