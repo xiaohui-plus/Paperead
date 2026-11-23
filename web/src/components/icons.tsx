@@ -25,6 +25,21 @@ import {
   Settings2,
   Star,
   Wrench,
+  Aperture,
+  Bot,
+  BrainCircuit,
+  CalendarDays,
+  Camera,
+  Cuboid,
+  Hash,
+  Images,
+  Inbox,
+  Layers,
+  Loader2,
+  Microscope,
+  ShieldCheck,
+  Sigma,
+  Target,
 } from 'lucide-react'
 import type { LucideProps } from 'lucide-react'
 import brandIcon from '../assets/brand-icon.svg'
@@ -508,3 +523,32 @@ export function IconPlug() {
     </svg>
   )
 }
+
+
+type ThemedIconProps = LucideProps
+
+function themed(
+  Icon: ComponentType<LucideProps>,
+  defaults: LucideProps = {},
+) {
+  return function ThemedIcon({ size = 14, ...props }: ThemedIconProps) {
+    return <Icon size={size} strokeWidth={1.8} {...defaults} {...props} />
+  }
+}
+
+export const IconCamera = themed(Camera)
+export const IconAperture = themed(Aperture)
+export const IconBrainCircuit = themed(BrainCircuit)
+export const IconLanguages = themed(Languages)
+export const IconBot = themed(Bot)
+export const IconImages = themed(Images)
+export const IconCuboid = themed(Cuboid)
+export const IconShieldCheck = themed(ShieldCheck)
+export const IconTarget = themed(Target)
+export const IconSigma = themed(Sigma)
+export const IconMicroscope = themed(Microscope)
+export const IconCalendarDays = themed(CalendarDays)
+export const IconLayers = themed(Layers)
+export const IconHash = themed(Hash)
+export const IconInbox = themed(Inbox)
+export const IconLoader = themed(Loader2)

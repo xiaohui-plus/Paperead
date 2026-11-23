@@ -311,6 +311,8 @@ class Block:
     # 跨栏/跨页块的逐页矩形 (page, x0, y0, x1, y1)。单矩形 bbox 取并集会覆盖
     # 整页甚至两页，高亮与「跳到原文」都会落错位置，这里保留每页真实范围。
     bboxes: list[tuple] = field(default_factory=list)
+    # 列角色：body（正文，可译）/ sidebar（页缘信息栏，白名单保留）/ ""（未判定）。
+    column_role: str = ""
 
     def to_dict(self) -> dict:
         data = {
@@ -328,6 +330,7 @@ class Block:
             "eq_number": self.eq_number,
             "translatable": self.translatable,
             "translated": self.translated,
+            "column_role": self.column_role,
             "bbox": [round(v, 1) for v in self.bbox],
         }
         if self.inline_math:
@@ -2712,6 +2715,586 @@ def _card_block(card: list[Block]) -> Block:
     )
 
 
+# L2 列模型：页缘信息栏（作者单位 / 期刊信息 / 资助声明）判据。
+# 与 pdf_export 的区域判据保持一致，但这里用解析行数据判定，供拆块使用。
+SIDE_RATIO_MIN = 0.06
+SIDE_RATIO_MAX = 0.22
+SIDE_EDGE_RATIO = 0.32
+SIDE_MIN_LINES = 3
+SIDE_X1_SPREAD = 12.0
+SIDE_Y_GAP = 40.0
+SIDE_COLUMN_GAP = 6.0
+SIDE_BODY_MIN_RATIO = 0.34
+SIDE_PROSE_CHARS = 120
+
+
+def _looks_like_prose_text(text: str) -> bool:
+    """成段正文不能当信息栏（>=120 字符且带句末标点）。"""
+    cleaned = " ".join((text or "").split())
+    if len(cleaned) < SIDE_PROSE_CHARS:
+        return False
+    stripped = cleaned.rstrip()
+    return stripped[-1:] in "。！？.!?" or stripped.count(". ") >= 2
+
+
+def _line_clusters_by_x1(lines: list[Line]) -> list[list[Line]]:
+    """按右缘聚类：信息栏多为居中短行，左缘随文本长度变化，右缘才稳定。"""
+    ordered = sorted(lines, key=lambda ln: ln.x1)
+    clusters: list[list[Line]] = []
+    for ln in ordered:
+        if clusters and abs(ln.x1 - clusters[-1][-1].x1) <= SIDE_X1_SPREAD:
+            clusters[-1].append(ln)
+        else:
+            clusters.append([ln])
+    return clusters
+
+
+def _longest_vertical_chain(lines: list[Line]) -> list[Line]:
+    chain: list[Line] = []
+    best: list[Line] = []
+    for ln in sorted(lines, key=lambda item: item.y0):
+        if chain and ln.y0 - chain[-1].y0 > SIDE_Y_GAP:
+            if len(chain) > len(best):
+                best = chain
+            chain = []
+        chain.append(ln)
+    return chain if len(chain) > len(best) else best
+
+
+def _detect_side_bands(
+    ordered: list[Line], page_width: float
+) -> dict[int, list[tuple[float, float]]]:
+    """每页的页缘信息栏 x 区间（左/右各至多一条）。
+
+    判据：列宽 0.06-0.22 页宽、右缘对齐、>=3 行纵向连续、与正文列有
+    >=6pt 空白沟、页面存在更宽的正文行；成段正文一票否决。
+    """
+    if page_width <= 0:
+        return {}
+    by_page: dict[int, list[Line]] = {}
+    for ln in ordered:
+        if ln.is_margin:
+            continue
+        by_page.setdefault(ln.page, []).append(ln)
+    result: dict[int, list[tuple[float, float]]] = {}
+    for page, lines in by_page.items():
+        bands: list[tuple[float, float]] = []
+        for side in ("left", "right"):
+            edge = [
+                ln
+                for ln in lines
+                if (
+                    (ln.x0 + ln.x1) / 2 < page_width * SIDE_EDGE_RATIO
+                    if side == "left"
+                    else (ln.x0 + ln.x1) / 2 > page_width * (1 - SIDE_EDGE_RATIO)
+                )
+            ]
+            if len(edge) < SIDE_MIN_LINES:
+                continue
+            cluster = max(_line_clusters_by_x1(edge), key=len)
+            chain = _longest_vertical_chain(cluster)
+            if len(chain) < SIDE_MIN_LINES:
+                continue
+            x0 = min(ln.x0 for ln in chain)
+            x1 = max(ln.x1 for ln in chain)
+            width = x1 - x0
+            if width < page_width * SIDE_RATIO_MIN:
+                continue
+            if width > page_width * SIDE_RATIO_MAX:
+                continue
+            if max(ln.x1 for ln in chain) - min(ln.x1 for ln in chain) > SIDE_X1_SPREAD:
+                continue
+            if any(_looks_like_prose_text(ln.text) for ln in chain):
+                continue
+            chain_ids = {id(ln) for ln in chain}
+            rest = [ln for ln in lines if id(ln) not in chain_ids]
+            if not rest:
+                continue
+            if not any(ln.width >= page_width * SIDE_BODY_MIN_RATIO for ln in rest):
+                continue
+            if side == "left":
+                right_edges = [ln.x0 for ln in rest if ln.x0 >= x1 - 2]
+                if not right_edges or min(right_edges) - x1 < SIDE_COLUMN_GAP:
+                    continue
+                bands.append((0.0, x1 + 0.5))
+            else:
+                left_edges = [ln.x1 for ln in rest if ln.x1 <= x0 + 2]
+                if not left_edges or x0 - max(left_edges) < SIDE_COLUMN_GAP:
+                    continue
+                bands.append((x0 - 0.5, page_width))
+        if bands:
+            result[page] = bands
+    return result
+
+
+def _column_bounds(
+    page_lines: list[Line],
+    gutter: float | None,
+    side_bands: list[tuple[float, float]],
+    page_width: float,
+) -> list[tuple[float, float]]:
+    """把「双栏缝 + 侧栏边界」合成页面列区间（按内容区裁剪、去掉过窄段）。"""
+    if not page_lines:
+        return []
+    content_x0 = min(ln.x0 for ln in page_lines)
+    content_x1 = max(ln.x1 for ln in page_lines)
+    cuts: list[float] = []
+    if gutter is not None:
+        cuts.append(gutter)
+    for band_x0, band_x1 in side_bands:
+        cuts.extend((band_x0, band_x1))
+    cuts = sorted(
+        {
+            round(value, 2)
+            for value in cuts
+            if content_x0 + 8 < value < content_x1 - 8
+        }
+    )
+    columns: list[tuple[float, float]] = []
+    left = content_x0
+    for cut in cuts:
+        if cut - left >= 8:
+            columns.append((left, cut))
+            left = cut
+    if content_x1 - left >= 8:
+        columns.append((left, content_x1))
+    if page_width > 0 and not columns:
+        columns.append((content_x0, content_x1))
+    return columns
+
+
+def _line_spans_columns(ln: Line, columns: list[tuple[float, float]]) -> bool:
+    """一行是否自身横跨 >=2 个列区间（citation 与正文被并进同一行）。"""
+    covered = 0
+    for c0, c1 in columns:
+        if min(ln.x1, c1) - max(ln.x0, c0) > (c1 - c0) * 0.3:
+            covered += 1
+    return covered >= 2
+
+
+def _parts_from_words(
+    rect: pymupdf.Rect,
+    columns: list[tuple[float, float]],
+    words: list[tuple],
+) -> list[tuple[int, str, tuple[float, float, float, float]]] | None:
+    """按 word 的 x 中心归列（行本身交错时的唯一可靠拆分口径）。"""
+    if not words:
+        return None
+    buckets: dict[int, list[tuple]] = {index: [] for index in range(len(columns))}
+    for word in words:
+        x0, y0, x1, y1 = (float(value) for value in word[:4])
+        center_x = (x0 + x1) / 2
+        center_y = (y0 + y1) / 2
+        if not (
+            rect.x0 - 2 <= center_x <= rect.x1 + 2
+            and rect.y0 - 2 <= center_y <= rect.y1 + 2
+        ):
+            continue
+        target = next(
+            (
+                index
+                for index, (c0, c1) in enumerate(columns)
+                if c0 - 1 <= center_x <= c1 + 1
+            ),
+            None,
+        )
+        if target is None:
+            return None
+        buckets[target].append((x0, y0, x1, y1, str(word[4])))
+    buckets = {index: group for index, group in buckets.items() if group}
+    if len(buckets) < 2:
+        return None
+    parts: list[tuple[int, str, tuple[float, float, float, float]]] = []
+    for index in sorted(buckets):
+        group = sorted(buckets[index], key=lambda item: (round(item[1], 1), item[0]))
+        text = " ".join(item[4] for item in group)
+        bbox = (
+            min(item[0] for item in group),
+            min(item[1] for item in group),
+            max(item[2] for item in group),
+            max(item[3] for item in group),
+        )
+        parts.append((index, text, bbox))
+    return parts
+
+
+_SIDEBAR_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+_SIDEBAR_URL_RE = re.compile(
+    r"https?://|www\.|doi\.org/|orcid\.org/", re.IGNORECASE
+)
+_SIDEBAR_DOI_RE = re.compile(r"\b10\.\d{4,9}/", re.IGNORECASE)
+
+
+def _is_sidebar_whitelist(text: str) -> bool:
+    """侧栏里不需要翻译的行：邮箱、URL、DOI/ORCID、纯数字符号。
+
+    机构、期刊栏目、收稿/接收/出版日期、citation 文本都要译；只有这些
+    没有语义可翻的联系方式/标识保留原文。
+    """
+    cleaned = " ".join((text or "").split())
+    if not cleaned:
+        return True
+    if _SIDEBAR_EMAIL_RE.search(cleaned):
+        return True
+    if _SIDEBAR_URL_RE.search(cleaned):
+        return True
+    if _SIDEBAR_DOI_RE.search(cleaned):
+        return True
+    if re.fullmatch(r"[\d\s.,;:%±×–—/()\[\]-]+", cleaned):
+        return True
+    return False
+
+
+# 跨列拆分候选：这四类都可能被解析按「同一视觉行」拼成整页宽块——首页
+# 摘要旁边是审稿人卡片、作者单位旁边是正文、页脚日期旁边是正文结尾。
+# title / heading / caption 不拆：拆开会破坏标题层级与图注锚点。
+_SPLITTABLE_KINDS = ("para", "abstract", "affiliation", "footnote")
+# 块在某一列上的覆盖不足这个比例就不算「跨列块」：纯正文列的单位块宽度
+# 常超过半页宽，但它只落在一列里，不该进入拆分。
+_CROSS_COLUMN_MIN_SHARE = 0.15
+# 首页信息栏的「标签词」：这些词只出现在页缘信息栏，拆分时可能因为词框
+# 跨过列界被归进正文片段。它们是封闭的版式词汇，不是某一篇论文的特例。
+_FRONT_LABEL_RE = re.compile(
+    r"^(?:Citation|Edited\s+by|Reviewed\s+by|Specialty\s+section|Received|"
+    r"Accepted|Published|Keywords|Correspondence)\s*[:：]\s*",
+    re.IGNORECASE,
+)
+
+
+def _split_cross_column_blocks(
+    blocks: list[Block],
+    ordered: list[Line],
+    gutters: dict[int, float | None],
+    page_width: float,
+    side_bands: dict[int, list[tuple[float, float]]] | None = None,
+    doc=None,
+) -> list[Block]:
+    """L2：把横跨列边界的块拆回各自列（跨列块拆分）。
+
+    列边界 = 双栏 gutter ∪ 页缘信息栏边界；首页「单栏正文 + 左侧信息栏」
+    的混合块也能拆开，不再整块 preserved。
+
+    两档拆分：
+      * 行级：块内每一行都只落在一个列区间时，按行分组拼接；
+      * word 级：行本身横跨两列（citation 与正文并进同一行）时，按每个 word
+        的 x 中心归列——这是 b0024 型首页混合块的唯一可靠口径。
+
+    约束：只拆 para；跨页块、含跨栏行或行内公式的块不拆；每个子块去空白后
+    >=20 字符；守恒校验用字符多重集合（不是词数）；落到信息栏区间的子块
+    标记 column_role=sidebar 且不可译（保留原文）。
+    """
+    if not blocks or page_width <= 0:
+        return blocks
+    side_bands = side_bands or {}
+    by_page: dict[int, list[Line]] = {}
+    for ln in ordered:
+        # 页眉页脚横贯整页，会把内容区拉宽、凭空造出「列」，必须排除。
+        if ln.is_margin:
+            continue
+        by_page.setdefault(ln.page, []).append(ln)
+
+    def norm(text: str) -> str:
+        return "".join(text.split())
+
+    # 按块所在页取词：跨列拆分可能在整篇 blocks 上统一执行，不能复用
+    # 循环变量 page（它指向最后一页），否则会用错页的词拆块。
+    word_cache: dict[int, list[tuple]] = {}
+
+    def page_words(page_no: int) -> list[tuple]:
+        if doc is None or not (1 <= page_no <= len(doc)):
+            return []
+        if page_no not in word_cache:
+            word_cache[page_no] = doc[page_no - 1].get_text("words")
+        return word_cache[page_no]
+
+    out: list[Block] = []
+    for block in blocks:
+        if (
+            block.kind not in _SPLITTABLE_KINDS
+            or len(block.bboxes) > 1
+            or block.inline_math
+            or block.bbox[2] - block.bbox[0] <= page_width * 0.5
+        ):
+            out.append(block)
+            continue
+        page_lines = by_page.get(block.page, [])
+        rect = pymupdf.Rect(block.bbox)
+        inner = [
+            ln
+            for ln in page_lines
+            if rect.x0 - 2 <= (ln.x0 + ln.x1) / 2 <= rect.x1 + 2
+            and rect.y0 - 2 <= (ln.y0 + ln.y1) / 2 <= rect.y1 + 2
+        ]
+        inner.sort(key=lambda ln: (ln.baseline or ln.y0, ln.x0))
+        if len(inner) < 1 or any(ln.col < 0 for ln in inner):
+            out.append(block)
+            continue
+        columns = _column_bounds(
+            page_lines,
+            gutters.get(block.page),
+            side_bands.get(block.page, []),
+            page_width,
+        )
+        if len(columns) < 2:
+            out.append(block)
+            continue
+        # 只落在单一列里的「宽块」（正文列的单位行、通栏标题）不是跨列块，
+        # 别让它白跑一遍行级/词级拆分。
+        rect_cover = pymupdf.Rect(block.bbox)
+        covered_columns = [
+            index
+            for index, (c0, c1) in enumerate(columns)
+            if min(rect_cover.x1, c1) - max(rect_cover.x0, c0)
+            > (c1 - c0) * _CROSS_COLUMN_MIN_SHARE
+        ]
+        if len(covered_columns) < 2:
+            out.append(block)
+            continue
+
+        parts: list[tuple[int, str, tuple[float, float, float, float]]] | None = None
+        line_groups: dict[int, list[Line]] | None = {
+            index: [] for index in range(len(columns))
+        }
+        for ln in inner:
+            center = (ln.x0 + ln.x1) / 2
+            target = next(
+                (
+                    index
+                    for index, (c0, c1) in enumerate(columns)
+                    if c0 - 1 <= center <= c1 + 1
+                ),
+                None,
+            )
+            if target is None:
+                line_groups = None
+                break
+            line_groups[target].append(ln)
+        if line_groups is not None:
+            line_groups = {index: group for index, group in line_groups.items() if group}
+            # 任一行横跨两列 → 行级分组不可靠，交给 word 级。
+            if len(line_groups) >= 2 and not any(
+                _line_spans_columns(ln, columns) for ln in inner
+            ):
+                parts = []
+                for index, group in line_groups.items():
+                    text = group[0].text
+                    for ln in group[1:]:
+                        text = _join_text(text, ln.text)
+                    bbox = (
+                        min(ln.x0 for ln in group),
+                        min(ln.y0 for ln in group),
+                        max(ln.x1 for ln in group),
+                        max(ln.y1 for ln in group),
+                    )
+                    parts.append((index, text, bbox))
+        if parts is None:
+            parts = _parts_from_words(rect, columns, page_words(block.page))
+        if not parts:
+            out.append(block)
+            continue
+        bands = side_bands.get(block.page, [])
+
+        def _on_side_part(index: int) -> bool:
+            c0, c1 = columns[index]
+            return any(
+                min(c1, band_x1) - max(c0, band_x0) > (c1 - c0) * 0.5
+                for band_x0, band_x1 in bands
+            )
+
+        # 信息栏里的孤立短标签（Citation: / Edited by:）不值得单独成块，但
+        # 它们在原文里占字符：直接丢掉会让整块被判「不守恒」而放弃拆分，
+        # 首页混合块就永远拆不开。丢掉的部分记进守恒计数。
+        dropped = Counter()
+        kept_parts: list[tuple[int, str, tuple[float, float, float, float]]] = []
+        for part in parts:
+            if len(norm(part[1])) < 20 and _on_side_part(part[0]):
+                dropped += Counter(norm(part[1]))
+                continue
+            kept_parts.append(part)
+        parts = kept_parts
+        if not parts or min(len(norm(text)) for _index, text, _bbox in parts) < 20:
+            out.append(block)
+            continue
+        origin = Counter(norm(block.text))
+        split = Counter(dropped)
+        for _index, text, _bbox in parts:
+            split += Counter(norm(text))
+        # 解析行拼接与原始 words 之间常有连字符/断词差异，严格相等会让
+        # 真正可拆的混合块全部退回 preserved。改为字符级覆盖率门禁：
+        # 拆出的内容必须覆盖原块 >=98%，否则视为不守恒、不拆。
+        total = sum(origin.values())
+        covered = sum((origin & split).values())
+        if total and covered / total < 0.98:
+            out.append(block)
+            continue
+        for index, text, bbox in parts:
+            c0, c1 = columns[index]
+            on_side = any(
+                min(c1, band_x1) - max(c0, band_x0) > (c1 - c0) * 0.5
+                for band_x0, band_x1 in bands
+            )
+            if not on_side:
+                # 词框跨过列界时，信息栏标签会被带进正文片段；剥掉再翻译，
+                # 否则中文里会出现「引用：在所有情景中……」这类夹生开头。
+                text = _FRONT_LABEL_RE.sub("", text, count=1).lstrip()
+                if not text:
+                    continue
+            # 拆出来的正文片段不能继承「单位/页脚」身份，否则会被当成不可译
+            # 又留一遍英文——它本来就是被解析误并进来的正文。
+            kind = block.kind
+            if not on_side and kind in ("affiliation", "footnote"):
+                kind = "para"
+            if on_side:
+                translatable = bool(block.translatable) and not _is_sidebar_whitelist(text)
+            else:
+                translatable = kind in ("para", "abstract") and not _is_sidebar_whitelist(text)
+            out.append(
+                Block(
+                    id="",
+                    order=0,
+                    page=block.page,
+                    kind=kind,
+                    text=text,
+                    bbox=bbox,
+                    size=block.size,
+                    section=block.section,
+                    translatable=translatable,
+                    column_role="sidebar" if on_side else "body",
+                )
+            )
+    # 整块就落在信息栏列内的块（作者单位 / 期刊信息 / citation 行）同样是
+    # 不可译白名单：拼版层不需要再猜，直接按 column_role 保留原文。
+    for block in out:
+        if block.column_role:
+            continue
+        bands = side_bands.get(block.page, [])
+        if bands and any(
+            block.bbox[0] >= band_x0 - 2 and block.bbox[2] <= band_x1 + 2
+            for band_x0, band_x1 in bands
+        ):
+            block.column_role = "sidebar"
+            # 侧栏原地翻译：只有联系方式/标识走白名单，机构与 citation 要译。
+            if _is_sidebar_whitelist(block.text):
+                block.translatable = False
+    for index, block in enumerate(out):
+        block.order = index
+        block.id = f"b{index:04d}"
+    return out
+
+
+def _merge_body_paragraph_fragments(
+    blocks: list[Block], body_size: float
+) -> list[Block]:
+    """把被侧栏混合块切断的同栏正文碎片并回一段。
+
+    首页「左侧信息栏 + 右侧正文」的混合块夹在正文行中间时，解析会把一个
+    段落切成若干 10pt 高的小块（bbox 只盖一行）。逐块翻译会让同一句话断成
+    几截，译文读起来「东一句西一句」。这里只并「前块句子还没写完」的相邻
+    同栏块：正常段落之间一定以句末标点结束，不会被误并；被切断的句子前块
+    结尾通常停在单词中间（如 ``Predic``），必须续上。
+    """
+    if not blocks:
+        return blocks
+    gap_limit = max(body_size * 1.6, 8.0)
+    out: list[Block] = []
+    last_body = -1  # out 里最近一个「正文」块的下标，用来跨过侧栏小块续句
+    for block in blocks:
+        target: Block | None = None
+        if block.kind in ("para", "abstract") and block.column_role != "sidebar":
+            if last_body >= 0:
+                cand = out[last_body]
+                if (
+                    cand.page == block.page
+                    and cand.column_role != "sidebar"
+                    # 跨页块不参与合并：它的 bbox 只盖每页首行，把另一页的
+                    # 段落并进来会连页码归属一起带错。
+                    and len(cand.bboxes) <= 1
+                    and len(block.bboxes) <= 1
+                    and not _ends_sentence(cand.text)
+                    # 同栏锚用「右缘对齐」而不是左缘：拆出的正文片段常把左侧
+                    # 一个标签词（Citation: 之类）带进来，左缘会偏进信息栏，
+                    # 右缘仍是正文列右界。双栏左右两段的右缘相差整栏宽。
+                    and abs(block.bbox[2] - cand.bbox[2]) <= 12
+                    and _x_overlap(cand.bbox, block.bbox) >= 0.6
+                    and -gap_limit <= block.bbox[1] - cand.bbox[3] <= gap_limit
+                ):
+                    target = cand
+        if target is not None:
+            # 合并文本会让行内公式偏移整体后移，必须同步平移，否则公式落点
+            # 会跑进前面几个词里（与归一化改变长度是同一类偏移地雷）。
+            shift = len(target.text) + 1
+            target.text = _join_text(target.text, block.text)
+            target.bboxes = _merge_bbox_lists(target.bboxes, block.bboxes)
+            target.bbox = (
+                # 左界取更靠两者右者：正文列左界固定，向左扩张只可能来自
+                # 混进来的信息栏标签，不能让它把正文块拉进侧栏。
+                max(target.bbox[0], block.bbox[0]), min(target.bbox[1], block.bbox[1]),
+                max(target.bbox[2], block.bbox[2]), max(target.bbox[3], block.bbox[3]),
+            )
+            if block.translated:
+                target.translated = _join_text(target.translated, block.translated)
+            for math in block.inline_math or []:
+                target.inline_math.append(
+                    {
+                        **math,
+                        "start": int(math.get("start", 0)) + shift,
+                        "end": int(math.get("end", 0)) + shift,
+                    }
+                )
+            target.translatable = target.translatable or block.translatable
+            if block.kind == "abstract":
+                target.kind = "abstract"
+            continue
+        out.append(block)
+        if block.kind in ("para", "abstract") and block.column_role != "sidebar":
+            last_body = len(out) - 1
+    for i, b in enumerate(out):
+        b.order = i
+        b.id = f"b{i:04d}"
+    return out
+
+
+_JOURNAL_VOL_RE = re.compile(
+    r"\bFront\.(?:\s+[A-Z][A-Za-z.]*){1,4}\s+\d+\s*[:：]\s*\d+\s*\.?",
+    re.IGNORECASE,
+)
+_DOI_RE = re.compile(r"\bdoi:\s*10\.\S+", re.IGNORECASE)
+
+
+def _strip_front_citation_noise(
+    blocks: list[Block],
+    side_bands: dict[int, list[tuple[float, float]]] | None = None,
+) -> list[Block]:
+    """剥掉首页正文块里混进来的期刊卷期与 DOI，并把被信息栏拉宽的左界收回。
+
+    首页底部的 citation 行常与正文同一视觉行，跨列拆分对「bbox 只盖首行」
+    的跨页块无能为力，citation 片段会留在正文里，译文就变成「…科学前沿
+    12:717552。而环境组学组装…」。这里按文本模式剥掉，只动首页正文块；
+    带行内公式的块跳过清洗（改长度会让公式偏移错位），但几何修正照做。
+    """
+    side_bands = side_bands or {}
+    for b in blocks:
+        if b.page != 1 or b.column_role == "sidebar" or b.kind not in ("para", "abstract"):
+            continue
+        if not b.inline_math:
+            cleaned = _DOI_RE.sub(" ", _JOURNAL_VOL_RE.sub(" ", b.text))
+            cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+            if cleaned and cleaned != b.text:
+                b.text = cleaned
+        # 正文块若从信息栏内起笔，说明左界被并进来的侧栏文字拉宽了；把
+        # 首页段的左界收到信息栏右缘，排版层才不会把它当跨列块去压侧栏。
+        bands = side_bands.get(b.page, [])
+        for band_x0, band_x1 in bands:
+            if b.bbox[0] < band_x1 - 2 < b.bbox[2]:
+                b.bbox = (band_x1 + 2, b.bbox[1], b.bbox[2], b.bbox[3])
+                for i, item in enumerate(b.bboxes):
+                    page_no, x0, y0, x1, y1 = item
+                    if int(page_no) == 1 and x0 < band_x1 - 2 < x1:
+                        b.bboxes[i] = (page_no, band_x1 + 2, y0, x1, y1)
+                break
+    return blocks
+
+
 def _merge_front_matter_cards(
     blocks: list[Block], front: FrontMatter | None, page_width: float
 ) -> list[Block]:
@@ -3071,6 +3654,63 @@ def _classify(
             b.kind = "para"
 
 
+_VIRTUAL_WORDS = {
+    "of", "and", "the", "for", "in", "on", "to", "with", "a", "an",
+    "from", "by", "as", "at", "or", "via", "vs",
+}
+
+
+def _title_case_short(text: str) -> bool:
+    """短标题形态：实词首字母大写（或全大写），至少两个实词。
+
+    正文句子即使很短也不会每个实词都大写，故该判据能把
+    ``Baseline Additive-Dominant GBLUP`` 这类伪粗体小标题和正文分开。
+    """
+    words = re.findall(r"[A-Za-z][A-Za-z'’\-]*", text)
+    if len(words) < 2:
+        return False
+    strong = 0
+    for word in words:
+        if word.lower() in _VIRTUAL_WORDS:
+            continue
+        if not (word[:1].isupper() or word.isupper()):
+            return False
+        strong += 1
+    return strong >= 2
+
+
+def _promote_short_headings(blocks: list[Block], body_size: float) -> list[Block]:
+    """把字号略高于正文的 Title Case 短行补判为小标题。
+
+    Frontiers 等期刊的小节标题常用 10.0pt（正文 9.5pt）排伪粗体，PDF 字体
+    信息里没有 bold 标记，字号差也够不到 ``+1.2pt`` 的门槛，于是整段落进
+    ``para``：回填时按正文字号写、没有层级，读者看不出是新小节（第 7 页
+    ``Baseline Additive-Dominant GBLUP`` 即此形态）。这里只补判「短、无句末
+    标点、Title Case、后接正文」的块，不改字号判据以外的既有规则。
+    """
+    for i, block in enumerate(blocks):
+        if block.kind != "para":
+            continue
+        text = block.text.strip()
+        if not (2 <= len(text.split()) <= 12 and len(text) <= 70):
+            continue
+        if text.endswith((".", "?", ";", ",", ":")) or ": " in text or ". " in text:
+            continue
+        if not text[:1].isupper() or not _title_case_short(text):
+            continue
+        if block.size and body_size and block.size < body_size - 0.1:
+            continue
+        nxt = blocks[i + 1] if i + 1 < len(blocks) else None
+        if nxt is None or nxt.page != block.page or nxt.kind not in (
+            "para", "abstract", "heading"
+        ):
+            continue
+        block.kind = "heading"
+        block.level = 3
+        block.section = text
+    return blocks
+
+
 def _attach_equation_numbers(blocks: list[Block], doc: pymupdf.Document) -> list[Block]:
     """把右边缘独立的 `(3)` 行挂到同一水平线上的公式块上。
 
@@ -3365,10 +4005,14 @@ def _merge_heading_continuations(blocks: list["Block"]) -> list["Block"]:
                 if b.text.isupper() and not n.text.isupper():
                     break
                 n_words = re.findall(r"[A-Za-z][A-Za-z'’\-]*", n.text)
+                # 前块以单个大写字母收尾（`... From the W` + `Matrix (W-GP)`）
+                # 说明标题还没写完，下一行必须并回来；否则会拆成两个标题。
+                last_word = (b.text.split() or [""])[-1]
+                dangling = bool(re.fullmatch(r"[A-Z]", last_word)) or b.text.rstrip().endswith("-")
                 if (
                     len(n_words) >= 2
                     and not n.text[:1].islower()
-                    and not b.text.rstrip().endswith("-")
+                    and not dangling
                 ):
                     break
             if b.size and n.size and abs(b.size - n.size) > 1.2:
@@ -6094,7 +6738,16 @@ def parse_pdf(
             ordered, body_size, table_rects, page_regions, front
         )
         _classify(blocks, body_size, page_height, front)
+        blocks = _promote_short_headings(blocks, body_size)
+        side_bands = _detect_side_bands(ordered, page_width)
+        blocks = _split_cross_column_blocks(
+            blocks, ordered, gutters, page_width, side_bands, doc,
+        )
         blocks = _insert_rotated_captions(blocks, _collect_rotated_caption_blocks(doc))
+        # 跨列拆分后，原先被混合块隔开的同栏正文碎片会重新相邻；先并回
+        # 完整段落再翻译，否则一句话会被切成几截分别送模型。
+        blocks = _merge_body_paragraph_fragments(blocks, body_size)
+        blocks = _strip_front_citation_noise(blocks, side_bands)
         if _DIAG_PATH:
             diag_local = _local_edges(ordered)
             _diag_dump({

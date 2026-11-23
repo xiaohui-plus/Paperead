@@ -55,6 +55,7 @@ from paperead.env import env
 from paperead.formula import (
     read_cached_latex,
     recognize_equations,
+    recognize_inline_math,
     recognize_latex,
     write_cached_latex,
 )
@@ -114,6 +115,11 @@ from paperead.translation_manifest import (
     write_report,
 )
 from server.ext_api import build_router as build_ext_router
+from server.notes_api import build_router as build_notes_router
+from server.notes_catalog import NotesCatalog
+from server.notes_mirror import NotesMirror
+from server.notes_search import NoteSearch
+from server.notes_store import NoteStore
 from server.plugin_auth import PluginRegistry, is_extension_origin
 from server.feedback_api import API_BASE as FEEDBACK_API_BASE
 from server.feedback_api import build_feedback_router
@@ -299,6 +305,22 @@ app.include_router(
         registry=plugin_registry,
         parse_task=lambda paper_id: _parse_task(paper_id),
         public=lambda row: _public(row),
+    )
+)
+
+# 外部论文笔记：独立存储与独立检索库，不混进文献库和论文检索结果。
+note_store = NoteStore(DATA_DIR)
+notes_catalog = NotesCatalog(DATA_DIR)
+notes_mirror = NotesMirror(DATA_DIR)
+app.include_router(
+    build_notes_router(
+        note_store,
+        NoteSearch(note_store, DATA_DIR / "notes" / "search.db"),
+        paper_store=store,
+        parse_task=lambda paper_id: _parse_task(paper_id),
+        public=lambda row: _public(row),
+        catalog=notes_catalog,
+        mirror=notes_mirror,
     )
 )
 
@@ -1293,6 +1315,14 @@ def _translated_pdf_gate(paper_id: str, lang: str) -> tuple[bool, str, str, Path
     否则用户只会看到「需要重建」而不知道根本原因是没翻译。
     """
     path = _translated_pdf_path(paper_id, lang)
+    # 构建时若 translated.pdf 正被 pdf.js / 下载请求读取，新产物会写到
+    # translated.next.pdf 或唯一名；取修改时间最新的一份，保证拿到最新排版。
+    try:
+        candidates = [p for p in path.parent.glob("translated*.pdf") if p.is_file()]
+        if candidates:
+            path = max(candidates, key=lambda p: p.stat().st_mtime)
+    except OSError:
+        pass
     if not path.is_file():
         return False, "missing", "译文 PDF 尚未生成", path
     blocks = store.read_blocks(paper_id)
@@ -1598,7 +1628,11 @@ async def build_translated_pdf_route(
     )
     result["coverage"] = manifest["coverage"]
     result["status"] = (
-        "partial" if manifest["coverage"] < 1.0 or manifest["failed"] else "succeeded"
+        "partial"
+        if manifest["coverage"] < 1.0
+        or manifest["failed"]
+        or result.get("failed_pages")
+        else "succeeded"
     )
     result["translation"] = {
         "eligible": manifest["eligible_total"],
@@ -4881,6 +4915,18 @@ async def _parse_task(paper_id: str, vision_config: LLMConfig | None = None) -> 
                     timeout=FORMULA_TIMEOUT,
                 )
                 log.info("公式识别 %s：%s", paper_id, stats)
+                # 行内公式没有独立裁图资产，按 bbox 现场裁图识别；
+                # 结果可编译才写入 latex，否则渲染层回退裁图。
+                inline_stats = await asyncio.wait_for(
+                    recognize_inline_math(
+                        pdf,
+                        parsed.blocks,
+                        concurrency=6,
+                        backend=OpenAICompatBackend(cfg),
+                    ),
+                    timeout=FORMULA_TIMEOUT * 2,
+                )
+                log.info("行内公式识别 %s：%s", paper_id, inline_stats)
             except asyncio.TimeoutError:
                 log.warning("公式识别超时（%ss），剩余公式保留裁图", FORMULA_TIMEOUT)
             except Exception:
@@ -6126,6 +6172,8 @@ def main() -> None:
         PORT,
         DATA_DIR,
     )
+    if env("PAPEREAD_NOTES_AUTOSYNC", "1") != "0":
+        notes_mirror.auto_sync()
     uvicorn.run(app, host=host, port=PORT, log_config=None, access_log=False)
 
 

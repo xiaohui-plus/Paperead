@@ -48,6 +48,10 @@ interface Props {
   onToggleDualSource?: () => void
   dualSync?: boolean
   onToggleDualSync?: () => void
+  /** 双栏页面放大倍率（1 = 适配宽度），仅对比阅读使用 */
+  dualZoom?: number
+  onDualZoom?: (delta: number) => void
+  onDualZoomReset?: () => void
   /** 双栏译文 PDF 下载（只在对比阅读中提供） */
   translatedPdfReady?: boolean
   translatedPdfUrl?: string
@@ -97,6 +101,9 @@ export function TopBar({
   onToggleDualSource,
   dualSync = true,
   onToggleDualSync,
+  dualZoom = 1,
+  onDualZoom,
+  onDualZoomReset,
   translatedPdfReady = false,
   translatedPdfUrl = '',
   translationLang = 'zh-Hans',
@@ -273,15 +280,15 @@ export function TopBar({
 
         <button
           className="icon-btn"
-          title={pdfMode ? '缩小页面' : '缩小字号'}
-          onClick={() => onScale(scale - 0.08)}
+          title={dualMode ? '缩小页面（左右同步）' : pdfMode ? '缩小页面' : '缩小字号'}
+          onClick={() => (dualMode ? onDualZoom?.(-0.25) : onScale(scale - 0.08))}
         >
           <IconMinus />
         </button>
         <button
           className="icon-btn"
-          title={pdfMode ? '放大页面' : '放大字号'}
-          onClick={() => onScale(scale + 0.08)}
+          title={dualMode ? '放大页面（左右同步）' : pdfMode ? '放大页面' : '放大字号'}
+          onClick={() => (dualMode ? onDualZoom?.(0.25) : onScale(scale + 0.08))}
         >
           <IconPlus />
         </button>
@@ -397,6 +404,21 @@ export function TopBar({
 
         {dualMode && (
           <div className="topbar-dual-actions" role="group" aria-label="双栏阅读控制">
+            {onDualZoomReset && (
+              <button
+                type="button"
+                className="dual-source-toggle dual-zoom"
+                data-active={dualZoom > 1}
+                title={
+                  dualZoom > 1
+                    ? `当前放大 ${Math.round(dualZoom * 100)}%，点击恢复适配宽度`
+                    : '适配宽度（100%）'
+                }
+                onClick={onDualZoomReset}
+              >
+                {Math.round(dualZoom * 100)}%
+              </button>
+            )}
             {onToggleDualSource && (
               <button
                 type="button"

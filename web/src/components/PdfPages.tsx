@@ -32,6 +32,11 @@ interface Props {
   initialPage: number
   /** 页面显示宽度（px）；图片按固定分辨率取，缩放只改 CSS 宽度 */
   width: number
+  /**
+   * 页面放大倍率（1 = 适配当前宽度）。大于 1 时页宽超出容器、可横向滚动，
+   * 双栏对比用它做「放大到只显示页面一部分」的局部放大。
+   */
+  zoom?: number
   /** 面板里点目录/重点/图表时滚到对应页；token 变化即触发。双栏不传，交给滚动联动 */
   jump?: { page: number; token: number } | null
   onPageChange: (page: number) => void
@@ -371,6 +376,7 @@ export function PdfPages({
   pageSizes,
   initialPage,
   width,
+  zoom = 1,
   jump = null,
   onPageChange,
   pageUrls,
@@ -406,7 +412,10 @@ export function PdfPages({
   const [stackedNotes, setStackedNotes] = useState(false)
   const useTextLayer = Boolean(pdfUrl) && !pdfFailed
 
-  const pageWidth = Math.max(320, Math.min(width, available || width))
+  // 适配宽度 = min(基准宽度, 本栏可用宽度)；放大时在此基础上乘倍率，允许超出容器横向滚动
+  const fitWidth = Math.max(320, Math.min(width, available || width))
+  const pageWidth = zoom > 1 ? Math.max(320, Math.round(fitWidth * zoom)) : fitWidth
+  const pagesClass = `pdf-pages${zoom > 1 ? ' is-zoomed' : ''}`
 
   const scrollToPage = useCallback((page: number) => {
     scrollRef.current
@@ -664,7 +673,7 @@ export function PdfPages({
           onLoadSuccess={() => setPdfReady(true)}
           onLoadError={() => setPdfFailed(true)}
         >
-          <div className="pdf-pages">
+          <div className={pagesClass}>
             {pages.map((page) => {
               const size = pageSizes?.[page - 1]
               // 拿不到页尺寸时退回 A4 比例，至少保证跳页时占位高度稳定
@@ -719,7 +728,7 @@ export function PdfPages({
           </div>
         </Document>
       ) : (
-        <div className="pdf-pages">
+        <div className={pagesClass}>
           {pages.map((page) => {
             const size = pageSizes?.[page - 1]
             const ratio = size && size[0] > 0 ? `${size[0]} / ${size[1]}` : '0.707'

@@ -22,6 +22,15 @@ pymupdf_hidden = collect_submodules(
     filter=lambda name: not name.startswith(("pymupdf.layout", "pymupdf4llm")),
 )
 
+# 公式渲染：MathJax（完整 TeX 引擎）+ node 运行时。缺任一项时运行时会静默
+# 回退 mathtext / 公式裁图，所以必须显式收集。
+_vendor = ROOT / "paperead" / "vendor"
+vendor_datas = []
+for _name in ("mathjax", "node"):
+    _path = _vendor / _name
+    if _path.is_dir():
+        vendor_datas.append((str(_path), f"paperead/vendor/{_name}"))
+
 # python-pptx 自带 default.pptx 模板，必须作为 data 打进去，否则运行时会报
 # “Package not found at .../default.pptx”。
 pptx_datas = collect_data_files("pptx")
@@ -48,7 +57,8 @@ a = Analysis(
 
     + pymupdf_datas
     + pptx_datas
-    + docx_datas,
+    + docx_datas
+    + vendor_datas,
     hiddenimports=pymupdf_hidden
     + pptx_hidden
     + docx_hidden

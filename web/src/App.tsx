@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { LibraryPage } from './components/LibraryPage'
+import { NotesPage } from './components/NotesPage'
 import { ReaderView } from './components/ReaderView'
 import { ScholarPage } from './components/ScholarPage'
 import type { NavKey } from './components/Sidebar'
@@ -20,11 +21,12 @@ import { hasMobileServer, isMobileShell, loadOfflineMode } from './lib/mobile'
  *   /?p=demo                → 阅读页
  *   /?view=research         → 研究首页
  *   /?view=review           → 写综述报告首页
+ *   /?view=notes            → 外部论文笔记（本地导入）
  *   /?view=project&id=...   → 项目页（可带 sid / rename）
  *   /?research=spike        → A0 冒烟页（临时）
  * 阅读页优先于所有视图。
  */
-type View = 'library' | 'search' | 'research' | 'review' | 'project'
+type View = 'library' | 'notes' | 'search' | 'research' | 'review' | 'project'
 
 interface Route {
   view: View
@@ -45,6 +47,9 @@ function readRoute(): Route {
   }
   if ((raw === 'research' || raw === 'review') && !mobile) {
     return { view: raw, projectId: null, sessionId: null, rename: false }
+  }
+  if (raw === 'notes') {
+    return { view: 'notes', projectId: null, sessionId: null, rename: false }
   }
   if (params.get('v') === 'search') {
     return { view: 'search', projectId: null, sessionId: null, rename: false }
@@ -173,6 +178,7 @@ export default function App() {
 
   const onNav = (key: NavKey) => {
     if (key === 'library') goView('library')
+    else if (key === 'notes') goView('notes')
     else if (key === 'search') goView('search')
     else goView(key)
   }
@@ -224,6 +230,10 @@ export default function App() {
         )}
       </ResearchShell>
     )
+  }
+
+  if (route.view === 'notes') {
+    return <NotesPage onNav={onNav} onOpenPaper={(id) => navigatePaper(id)} />
   }
 
   if (route.view === 'search') {

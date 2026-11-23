@@ -1,8 +1,10 @@
-import type { ReactElement, ReactNode } from 'react'
+import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
 import {
   BrandMark,
   IconBook,
+  IconChevron,
   IconCompass,
+  IconEdit,
   IconFolderPlus,
   IconList,
   IconSearch,
@@ -10,7 +12,7 @@ import {
 } from './icons'
 import { isMobileShell } from '../lib/mobile'
 
-export type NavKey = 'library' | 'search' | 'research' | 'review'
+export type NavKey = 'library' | 'notes' | 'search' | 'research' | 'review'
 
 interface Props {
   active: NavKey
@@ -26,10 +28,21 @@ interface Props {
 
 const NAV: { key: NavKey; label: string; icon: () => ReactElement }[] = [
   { key: 'library', label: '文献库', icon: IconBook },
+  { key: 'notes', label: '笔记广场', icon: IconEdit },
   { key: 'search', label: '文献检索', icon: IconSearch },
   { key: 'research', label: '研究', icon: IconCompass },
   { key: 'review', label: '写综述报告', icon: IconList },
 ]
+
+const COLLAPSE_KEY = 'paperead.sidebarCollapsed'
+
+function readCollapsed(): boolean {
+  try {
+    return localStorage.getItem(COLLAPSE_KEY) === '1'
+  } catch {
+    return false
+  }
+}
 
 export function Sidebar({
   active,
@@ -39,17 +52,51 @@ export function Sidebar({
   projectSection,
   folderSection,
 }: Props) {
+  const mobile = isMobileShell()
+  const [collapsed, setCollapsed] = useState(() => !mobile && readCollapsed())
+
+  useEffect(() => {
+    if (mobile) {
+      document.documentElement.removeAttribute('data-sidebar')
+      return
+    }
+    document.documentElement.dataset.sidebar = collapsed ? 'collapsed' : 'expanded'
+  }, [collapsed, mobile])
+
+  const toggle = () => {
+    const next = !collapsed
+    setCollapsed(next)
+    try {
+      localStorage.setItem(COLLAPSE_KEY, next ? '1' : '0')
+    } catch {
+      // 隐私模式下写不了本地存储，折叠仍对当前会话生效
+    }
+  }
+
   return (
-    <aside className="library-side">
+    <aside className="library-side" data-collapsed={collapsed}>
       <div className="library-brand">
         <BrandMark />
         <span className="brand-name">Paperead</span>
+        {!mobile && (
+          <button
+            className="library-collapse"
+            data-collapsed={collapsed}
+            title={collapsed ? '展开侧栏' : '折叠侧栏'}
+            aria-label={collapsed ? '展开侧栏' : '折叠侧栏'}
+            aria-expanded={!collapsed}
+            onClick={toggle}
+          >
+            <IconChevron />
+          </button>
+        )}
       </div>
 
-      <nav className="library-nav">
+      <div className="library-side-body">
+        <nav className="library-nav">
         {NAV.filter(
           // 安卓端不提供研究与综述
-          (item) => !isMobileShell() || (item.key !== 'research' && item.key !== 'review'),
+          (item) => !mobile || (item.key !== 'research' && item.key !== 'review'),
         ).map((item) => {
           const Icon = item.icon
           return (
@@ -70,21 +117,22 @@ export function Sidebar({
         })}
       </nav>
 
-      {projectSection ?? folderSection ?? (
-        <div className="library-folders">
-          <div className="folders-head">
-            <span>文件夹</span>
-            <button className="icon-btn" title="新建文件夹（即将上线）" disabled>
-              <IconFolderPlus />
-            </button>
+        {projectSection ?? folderSection ?? (
+          <div className="library-folders">
+            <div className="folders-head">
+              <span>文件夹</span>
+              <button className="icon-btn" title="新建文件夹（即将上线）" disabled>
+                <IconFolderPlus />
+              </button>
+            </div>
+            <p className="folders-empty">还没有文件夹</p>
           </div>
-          <p className="folders-empty">还没有文件夹</p>
-        </div>
-      )}
+        )}
+      </div>
 
       <button className="library-settings" data-tour="settings-entry" onClick={onSettings}>
         <IconSettings />
-        模型与密钥
+        <span>模型与密钥</span>
       </button>
     </aside>
   )

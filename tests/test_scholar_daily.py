@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -175,7 +175,11 @@ def test_same_day_reuses_cache_without_refetch(daily_cache, monkeypatch):
 
 
 def test_new_day_fetches_again(daily_cache, monkeypatch):
-    keys = iter(["2026-11-14", "2026-11-15"])
+    # 缓存按「今天 - 保留天数」清理，硬编码日期会随时间漂移而失败。
+    today = date.today()
+    yesterday_key = (today - timedelta(days=1)).isoformat()
+    today_key = today.isoformat()
+    keys = iter([yesterday_key, today_key])
     monkeypatch.setattr(daily, "_today_key", lambda: next(keys))
     calls = {"count": 0}
 
@@ -188,8 +192,8 @@ def test_new_day_fetches_again(daily_cache, monkeypatch):
     daily.reset_cache()
     second = asyncio.run(daily.prefetch_daily())
 
-    assert first["date"] == "2026-11-14"
-    assert second["date"] == "2026-11-15"
+    assert first["date"] == yesterday_key
+    assert second["date"] == today_key
     assert first["cached"] is False and second["cached"] is False
     assert calls["count"] == 2
     assert len(list(daily_cache.glob("*.json"))) == 2

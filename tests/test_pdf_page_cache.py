@@ -74,8 +74,8 @@ def test_page_cache_reuses_unchanged_pages(tmp_path: Path) -> None:
     assert third["pages_rendered"] == 0
     assert third["pages_reused"] == 2
 
-def test_body_block_fills_spare_height_with_leading(tmp_path: Path) -> None:
-    """字号统一后，块内剩余高度应靠行距填充，而不是留一大片空白。"""
+def test_body_block_keeps_uniform_leading(tmp_path: Path) -> None:
+    """页内行距统一：块内富余高度不再靠拉伸行距填白。"""
     pdf = tmp_path / "gap.pdf"
     doc = pymupdf.open()
     page = doc.new_page()
@@ -104,6 +104,5 @@ def test_body_block_fills_spare_height_with_leading(tmp_path: Path) -> None:
         line_height=1.15,
     )
     layout = res.layouts[0]
-    assert layout.line_height > 1.15
-    assert layout.line_height <= 1.4
+    assert abs(layout.line_height - 1.15) < 0.001
     assert layout.needed <= layout.available

@@ -240,6 +240,8 @@ export function ReaderView({ paperId, onBack }: Props) {
   // 双栏：左原文栏默认显示、滚动默认联动；关掉原文后译文占满
   const [dualShowSource, setDualShowSource] = useState(true)
   const [dualSync, setDualSync] = useState(true)
+  // 双栏页面放大倍率：1 = 适配列宽；放大后可横向滚动查看页面局部，两栏视野保持同步
+  const [dualZoom, setDualZoom] = useState(1)
   // 译文 PDF：P2 生成的页级回填产物，右栏直接用 pdf.js 渲染它
   const translatedPdfUrl =
     paperId !== 'demo'
@@ -550,25 +552,41 @@ export function ReaderView({ paperId, onBack }: Props) {
     ],
   )
 
-  /** 翻译全文 → 进入双栏：启动/续跑服务端任务，轮询逐块回填。 */
-  const translateAll = useCallback(async () => {
+  /**
+   * 全文翻译：`toggle` 是顶栏按钮语义（进入/退出双栏），`enter` 用于自动进入
+   * 与「继续翻译/重试」这类不该切换视图的调用。
+   */
+  const translateAll = useCallback(async (action: 'toggle' | 'enter' = 'toggle') => {
     const current = paperRef.current
     if (!current || paperId === 'demo') return
+    // 已在双栏：这次点击是「退出」，回到原版 PDF 阅读页（不是重排流式页）。
+    // 翻译任务归服务端，退出后继续跑，重新点进来接着看进度。
+    if (dualMode && action === 'toggle') {
+      setTranslateStarting(false)
+      setDualMode(false)
+      setDualCollapsed(false)
+      if (canShowPdf) {
+        setPdfMode(true)
+        const url = new URL(window.location.href)
+        url.searchParams.set('view', 'pdf')
+        window.history.replaceState({}, '', url)
+      }
+      return
+    }
     const targetLangNow = loadTargetLang()
     const cfg = readyModel(loadModelSettings(), 'answer')
     // 点击即进入双栏：右侧先出纸张骨架，清单与任务在后台继续准备。
-    // 已在双栏时这次点击可能是「退出」，不重复进入，避免界面闪一下。
-    if (!dualMode) {
-      if (!cfg) {
-        setSettingsKind('answer')
-        setSettingsOpen(true)
-        return
-      }
-      setDualMode(true)
-      setDualCollapsed(true)
-      setPdfMode(false)
-      setTranslateStarting(true)
+    if (!cfg) {
+      setSettingsKind('answer')
+      setSettingsOpen(true)
+      return
     }
+    // 点击本身负责启动翻译，标记一次让自动启动 effect 不再重复触发
+    manualEnterRef.current = true
+    setDualMode(true)
+    setDualCollapsed(true)
+    setPdfMode(false)
+    setTranslateStarting(true)
     const online = await serverReachable()
 
     // 服务端清单是唯一口径：参考文献/图内文字/公式碎片不再算「还差几块」。
@@ -591,19 +609,7 @@ export function ReaderView({ paperId, onBack }: Props) {
       ? manifest.pending > 0 || manifest.failed > 0
       : legacyPending
 
-    // 双栏里已经没有待译块：再点一次就是退出
-    if (dualMode && !pending) {
-      setTranslateStarting(false)
-      setDualMode(false)
-      setDualCollapsed(false)
-      return
-    }
-    if (!cfg) {
-      setSettingsKind('answer')
-      setSettingsOpen(true)
-      return
-    }
-
+    // 双栏退出已在函数开头处理；这里只管进入：无待译块时直接展示已有译文。
     if (manifest && manifest.eligible_total === 0) {
       setTranslateStarting(false)
       const refs = manifest.excluded?.reference ?? 0
@@ -731,6 +737,7 @@ export function ReaderView({ paperId, onBack }: Props) {
     }
   }, [
     dualMode,
+    canShowPdf,
     paperId,
     autoHighlights,
     pollTranslationJob,
@@ -769,11 +776,17 @@ export function ReaderView({ paperId, onBack }: Props) {
 
   // URL 直接打开 ?view=dual 时，自动开始整篇翻译（只触发一次）
   const dualAutoStarted = useRef(false)
+  // 用户点顶栏进入时，点击本身已经在启动翻译，避免 effect 再启动一次
+  const manualEnterRef = useRef(false)
   useEffect(() => {
     if (!dualMode || dualAutoStarted.current) return
     dualAutoStarted.current = true
+    if (manualEnterRef.current) {
+      manualEnterRef.current = false
+      return
+    }
     // 没配模型时不要自动弹设置，避免挡住双栏；用户点「翻译全文」时再引导配置
-    if (readyModel(loadModelSettings(), 'answer')) void translateAll()
+    if (readyModel(loadModelSettings(), 'answer')) void translateAll('enter')
   }, [dualMode, translateAll])
 
   // 进入双栏时强制刷新译文 PDF 的 URL，避免浏览器复用旧缓存
@@ -1869,11 +1882,16 @@ export function ReaderView({ paperId, onBack }: Props) {
         autoTranslate={autoTranslate}
         onToggleAutoTranslate={toggleAutoTranslate}
         dualMode={dualMode}
-        onTranslateAll={translateAll}
+        onTranslateAll={() => void translateAll('toggle')}
         dualShowSource={dualShowSource}
         onToggleDualSource={() => setDualShowSource((v) => !v)}
         dualSync={dualSync}
         onToggleDualSync={() => setDualSync((v) => !v)}
+        dualZoom={dualZoom}
+        onDualZoom={(delta) =>
+          setDualZoom((z) => Math.min(3, Math.max(1, Math.round((z + delta) * 100) / 100)))
+        }
+        onDualZoomReset={() => setDualZoom(1)}
         translatedPdfReady={translatedPdfReady}
         translatedPdfUrl={translatedPdfUrl}
         translationLang={targetLang}
@@ -1890,7 +1908,7 @@ export function ReaderView({ paperId, onBack }: Props) {
               type="button"
               onClick={() => {
                 setTranslationNotice(null)
-                void translateAll()
+                void translateAll('enter')
               }}
             >
               重试失败块
@@ -1901,7 +1919,7 @@ export function ReaderView({ paperId, onBack }: Props) {
               type="button"
               onClick={() => {
                 setTranslationNotice(null)
-                void translateAll()
+                void translateAll('enter')
               }}
             >
               继续翻译
@@ -2002,6 +2020,7 @@ focusAnnotation={focusAnnotation}
             showSource={dualShowSource}
             syncEnabled={dualSync}
             translationReady={translatedPdfReady}
+            zoom={dualZoom}
             progress={
               translatedPdfReady || skeletonPhase === 'idle'
                 ? null
@@ -2023,6 +2042,7 @@ focusAnnotation={focusAnnotation}
                   pageSizes={paper.page_sizes}
                   initialPage={visiblePage}
                   width={pdfWidth}
+                  zoom={dualZoom}
                   jump={pdfJump}
                   onPageChange={setPdfPage}
                   pageUrls={pageUrls}
@@ -2053,6 +2073,7 @@ focusAnnotation={focusAnnotation}
                     pageSizes={paper.page_sizes}
                     initialPage={dualStartPage}
                     width={pdfWidth}
+                    zoom={dualZoom}
                     onPageChange={() => undefined}
                     pageUrls={{}}
                     pdfUrl={translatedPdfUrl}

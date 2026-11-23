@@ -71,6 +71,9 @@ SYMBOLS = {
 }
 # 明确无法只靠字符还原结构的符号
 HARD_CHARS = set("∑∏∫∮√")
+# 列表项目符号会以 Symbol 字体出现，被误判成行内公式后只能裁图；它们没有
+# 数学语义，应留在正文里当普通字符（渲染层再替换成有字形的等价符号）。
+DECORATIVE_CHARS = set("◦•‣▪▫○●◆◇")
 # PDF 字体把数学字形塞进私用区（STIX PUA）或 ToUnicode 失败时留下替换符；
 # 前端没有对应字形，会渲染成「□」。这类字符不能猜，只能交给识图或裁图垫后。
 ABNORMAL_RE = re.compile(r"[\ue000-\uf8ff\ufffd]")
@@ -165,6 +168,32 @@ def _pos(span: dict, base_size: float, baseline: float) -> str:
     return "base"
 
 
+_TEX_COMMANDS = sorted(
+    {
+        value.lstrip("\\")
+        for value in list(GREEK.values()) + list(SYMBOLS.values())
+        if value.startswith("\\")
+    }
+    | {"text", "mathrm", "mathcal", "mathbb"},
+    key=len,
+    reverse=True,
+)
+# 只认已知命令名，避免把 `\in` 回溯切成 `\i`+`n` 这种误伤。
+_TEX_GLUE_RE = re.compile(
+    r"\\(" + "|".join(re.escape(name) for name in _TEX_COMMANDS) + r")(?=[A-Za-z])"
+)
+
+
+def _join_tex(parts: list[str]) -> str:
+    r"""拼 LaTeX 片段：命令与后续字母之间补空格。
+
+    ``×``→``\times`` 后紧跟 ``N`` 会粘成 ``\timesN``，``\in`` 后紧跟 ``R``
+    粘成 ``\inR``。MathJax 把它们当未知命令，整条公式渲染失败后退回原文
+    文本，白白丢掉矢量化机会。这里只对已知命令名匹配，不会破坏 ``\in``。
+    """
+    return _TEX_GLUE_RE.sub(r"\\\1 ", "".join(parts))
+
+
 def _letter(span: dict, text: str) -> str:
     """单段 span 文本 → LaTeX 片段；无法可靠还原时返回空串。"""
     font = span.get("font") or ""
@@ -197,7 +226,7 @@ def _letter(span: dict, text: str) -> str:
                 out.append(SYMBOLS[part])
             elif not part.isspace():
                 out.append(part)
-        return "".join(out)
+        return _join_tex(out)
 
     out = []
     for ch in text:
@@ -226,7 +255,7 @@ def _letter(span: dict, text: str) -> str:
             return ""
         else:
             out.append(ch)
-    return "".join(out)
+    return _join_tex(out)
 
 
 def build_symbol_fallbacks(
@@ -294,6 +323,11 @@ def build_inline_math(spans: list[dict], ranges: list[tuple[int, int, dict]]) ->
         start += lead
         end -= trail
         raw = raw.strip()
+
+        # 整组只是列表项目符号：不是公式，留在正文当普通字符。
+        if raw and all(ch in DECORATIVE_CHARS for ch in raw):
+            group = []
+            return
 
         atoms: list[dict] = []
         hard = False

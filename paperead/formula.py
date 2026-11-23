@@ -254,6 +254,87 @@ async def recognize_equations(
     return stats
 
 
+async def recognize_inline_math(
+    pdf_path: str | Path,
+    blocks: list[Block],
+    concurrency: int = 4,
+    force: bool = False,
+    backend=None,
+    dpi: float = 300,
+) -> dict:
+    """给正文行内公式补 `inline_math[].latex`。
+
+    equation 块有自己的裁图资产；行内公式没有，需要按 bbox 现场裁图。
+    与 equation 共用同一份 sha1 缓存，同一公式只识别一次。
+    识别结果必须能通过本地 mathtext 编译才写入；否则留空，渲染时回退裁图。
+    """
+    import pymupdf
+
+    from .mathrender import latex_pdf
+
+    targets: list[tuple[Block, dict, list[float]]] = []
+    for block in blocks:
+        if block.page <= 0:
+            continue
+        for item in block.inline_math or []:
+            bbox = item.get("bbox")
+            if not bbox or len(bbox) < 4:
+                continue
+            if force or not item.get("latex"):
+                targets.append((block, item, bbox))
+    stats = {"total": len(targets), "ok": 0, "failed": 0, "cached": 0}
+    if not targets:
+        return stats
+
+    cache = _cache_dir()
+    sem = asyncio.Semaphore(concurrency)
+    doc = pymupdf.open(pdf_path)
+
+    async def one(block: Block, item: dict, bbox: list[float]) -> None:
+        try:
+            page = doc[block.page - 1]
+            pix = page.get_pixmap(
+                clip=pymupdf.Rect(bbox), dpi=dpi, alpha=False
+            )
+            image = pix.tobytes("png")
+            key = _cache_key(image)
+            cpath = cache / f"{key}.tex"
+            if not force and cpath.exists():
+                item["latex"] = cpath.read_text(encoding="utf-8")
+                stats["cached"] += 1
+                return
+            async with sem:
+                for attempt in range(2):
+                    try:
+                        tex = await recognize_latex(image, backend=backend)
+                        if not tex:
+                            continue
+                        if latex_pdf(tex, 9.5) is None:
+                            logger.info(
+                                "行内公式 LaTeX 不可编译，回退裁图：%s", tex[:80]
+                            )
+                            break
+                        item["latex"] = tex
+                        cpath.write_text(tex, encoding="utf-8")
+                        stats["ok"] += 1
+                        return
+                    except Exception as exc:  # 单条失败不影响整篇
+                        logger.warning(
+                            "行内公式识别失败（第 %d 次）：%s", attempt + 1, exc
+                        )
+            stats["failed"] += 1
+        except Exception:
+            logger.warning("行内公式裁图失败", exc_info=True)
+            stats["failed"] += 1
+
+    try:
+        await asyncio.gather(*(one(b, i, bb) for b, i, bb in targets))
+    finally:
+        doc.close()
+    logger.info("行内公式识别完成：%s", stats)
+    return stats
+
+
 def configure(config: LLMConfig) -> None:
     """用一份显式配置创建后端（服务端按请求传配置时用）。"""
     set_backend(OpenAICompatBackend(config))

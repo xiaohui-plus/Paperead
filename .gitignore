@@ -66,3 +66,5 @@ release/
 .wxt/
 # 发版/验证临时审计目录（重解析备份、临时脚本，不入库）
 /reparse-work/
+# 公式渲染用的 node 运行时（构建时放入，不入库；MathJax js 资源入库）
+paperead/vendor/node/

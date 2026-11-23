@@ -1,9 +1,11 @@
+import { isValidElement, useEffect, useRef, useState, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import rehypeKatex from 'rehype-katex'
 import remarkBreaks from 'remark-breaks'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import { normalizeMath } from '../lib/math'
+import { upgradeSvgMath } from '../lib/mermaidMath'
 
 /**
  * 流式输出时补上未闭合的 Markdown 标记。
@@ -24,6 +26,55 @@ export function balanceMarkdown(src: string): string {
   return src
 }
 
+/** mermaid 体积较大，只在真正遇到图表时才加载。 */
+function MermaidDiagram({ chart }: { chart: string }) {
+  const host = useRef<HTMLDivElement>(null)
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    setFailed(false)
+    void (async () => {
+      try {
+        const mermaid = (await import('mermaid')).default
+        mermaid.initialize({
+          startOnLoad: false,
+          securityLevel: 'strict',
+          theme: 'default',
+          fontFamily: 'inherit',
+        })
+        const id = `mermaid-${Math.random().toString(36).slice(2)}`
+        const { svg } = await mermaid.render(id, chart)
+        if (!cancelled && host.current) {
+          host.current.innerHTML = svg
+          upgradeSvgMath(host.current.querySelector('svg'))
+        }
+      } catch {
+        if (!cancelled) setFailed(true)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [chart])
+
+  if (failed) return <pre className="md-mermaid-error">{chart}</pre>
+  return <div className="md-mermaid" ref={host} />
+}
+
+/** 从 <pre> 的子元素里认出 ```mermaid 代码块。 */
+function mermaidChartOf(children: ReactNode): string | null {
+  const list = Array.isArray(children) ? children : [children]
+  for (const child of list) {
+    if (!isValidElement(child)) continue
+    const props = child.props as { className?: string; children?: ReactNode }
+    if (typeof props.className === 'string' && props.className.includes('language-mermaid')) {
+      return String(props.children ?? '')
+    }
+  }
+  return null
+}
+
 /**
  * 助手回答的 Markdown 渲染。
  *
@@ -32,12 +83,18 @@ export function balanceMarkdown(src: string): string {
  * - 公式交给 KaTeX（样式已在 main.tsx 引入）；模型常见的 `\(...\)`、
  *   `\[...\]`、`\begin{equation}` 等写法先统一成 `$` / `$$` 再渲染；
  * - remark-breaks 保留单换行，和旧版 pre-wrap 的观感一致。
+ *
+ * `breaks` 设为 false 时按标准 Markdown 解析，用于外部笔记：remark-breaks
+ * 会把表格行之间的换行变成 <br>，导致 GFM 表格退化成纯文本。
  */
-export function Markdown({ text }: { text: string }) {
+export function Markdown({ text, breaks = true }: { text: string; breaks?: boolean }) {
+  const remarkPlugins = breaks
+    ? [remarkGfm, remarkMath, remarkBreaks]
+    : [remarkGfm, remarkMath]
   return (
     <div className="md">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath, remarkBreaks]}
+        remarkPlugins={remarkPlugins}
         rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]}
         components={{
           a: ({ node, ...props }) => {
@@ -51,6 +108,11 @@ export function Markdown({ text }: { text: string }) {
                 <table {...props} />
               </div>
             )
+          },
+          pre: ({ children }) => {
+            const chart = mermaidChartOf(children)
+            if (chart) return <MermaidDiagram chart={chart} />
+            return <pre>{children}</pre>
           },
         }}
       >

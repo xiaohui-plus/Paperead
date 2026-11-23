@@ -20,7 +20,7 @@ import json
 import sys
 from pathlib import Path
 
-from .formula import recognize_equations
+from .formula import recognize_equations, recognize_inline_math
 from .layout import parse_pdf
 from .translate import build_glossary, translate_paper
 
@@ -77,6 +77,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.formula:
         stats = asyncio.run(recognize_equations(paper.blocks, concurrency=args.concurrency))
         print(f"公式识别：{stats}")
+        inline_stats = asyncio.run(
+            recognize_inline_math(src, paper.blocks, concurrency=args.concurrency)
+        )
+        print(f"行内公式识别：{inline_stats}")
 
     if args.translate:
         asyncio.run(_translate(paper, args))
