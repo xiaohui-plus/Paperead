@@ -157,13 +157,6 @@ export async function recognizePaperFormulas(
   })
 }
 
-export async function translatePaper(id: string, config: LLMConfigPayload): Promise<void> {
-  await jsonFetch(`/api/papers/${id}/translate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ config }),
-  })
-}
 
 export interface TextTranslation {
   ok: boolean

@@ -227,6 +227,10 @@ export interface CatalogCard {
 export interface CatalogOverview {
   status: {
     state: 'idle' | 'loading' | 'ready' | 'error'
+    /** 构建阶段：fetching 拉文件树 / indexing 建检索索引 / ready */
+    phase: string
+    /** 0–100，目录构建进度 */
+    percent: number
     total: number
     stale: boolean
     error: string
@@ -251,6 +255,8 @@ export interface CatalogField {
 
 export interface CatalogResult {
   state: 'idle' | 'loading' | 'ready' | 'error'
+  phase: string
+  percent: number
   total: number
   matched: number
   offset: number

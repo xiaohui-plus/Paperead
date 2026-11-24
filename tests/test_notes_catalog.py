@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -52,6 +54,10 @@ def _catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> NotesCatalog:
     catalog = NotesCatalog(tmp_path)
     catalog._items = catalog._fetch()
     catalog._state = "ready"
+    catalog._phase = "ready"
+    catalog._percent = 100
+    # 缓存放进 TTL 内，ensure() 才不会又拉起一次后台刷新。
+    catalog._updated_at = time.time()
     return catalog
 
 
@@ -107,6 +113,8 @@ def test_catalog_endpoint(tmp_path: Path, monkeypatch) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["state"] == "ready"
+    assert body["phase"] == "ready"
+    assert body["percent"] == 100
     assert body["matched"] == 3
     assert len(body["items"]) == 2
     assert body["conferences"]
@@ -185,6 +193,9 @@ def _cn_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> NotesCatalog
     catalog = NotesCatalog(tmp_path)
     catalog._items = catalog._fetch()
     catalog._state = "ready"
+    catalog._phase = "ready"
+    catalog._percent = 100
+    catalog._updated_at = time.time()
     return catalog
 
 
@@ -246,3 +257,55 @@ def test_catalog_endpoint_expands_chinese_query(tmp_path: Path, monkeypatch) -> 
     assert body["query"]["concepts"] == ["推理"]
     assert all(item["field"] == "llm_reasoning" for item in body["items"])
     assert all("reasoning" in item["hits"] for item in body["items"])
+
+def test_catalog_reports_build_progress(tmp_path: Path, monkeypatch) -> None:
+    """构建期间 status 带阶段与百分比，索引完成后才进入 ready。"""
+    monkeypatch.setattr(
+        "server.notes_catalog.http_get_text", lambda *a, **k: json.dumps(TREE)
+    )
+    catalog = NotesCatalog(tmp_path)
+    # 手动推进，避免后台线程抢在断言前把状态推到 ready。
+    catalog._warm_async = lambda: None
+
+    catalog._refresh()
+    mid = catalog.status()
+    assert mid["state"] == "loading"
+    assert mid["phase"] == "indexing"
+    assert 40 <= mid["percent"] < 100
+
+    catalog._build_index()
+    done = catalog.status()
+    assert done["state"] == "ready"
+    assert done["phase"] == "ready"
+    assert done["percent"] == 100
+
+
+def test_catalog_ensure_starts_background_build(tmp_path: Path, monkeypatch) -> None:
+    """目录为空时 ensure 立即返回 loading，并在后台构建。"""
+    monkeypatch.setattr(
+        "server.notes_catalog.http_get_text", lambda *a, **k: json.dumps(TREE)
+    )
+    catalog = NotesCatalog(tmp_path)
+    started: list[str] = []
+    gate = threading.Event()
+
+    def fake_refresh() -> None:
+        # 卡住后台线程，确保 ensure() 返回时仍是 loading（不要依赖线程调度）。
+        gate.wait(2)
+        started.append("refresh")
+        catalog._items = catalog._fetch()
+        catalog._updated_at = time.time()
+        catalog._state = "ready"
+        catalog._phase = "ready"
+        catalog._percent = 100
+
+    catalog._refresh = fake_refresh
+    status = catalog.ensure()
+    assert status["state"] == "loading"
+    gate.set()
+    for _ in range(200):
+        if started:
+            break
+        time.sleep(0.01)
+    assert started == ["refresh"]
+    assert catalog.status()["state"] == "ready"

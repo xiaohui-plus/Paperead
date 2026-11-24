@@ -62,7 +62,7 @@ from paperead.formula import (
 from paperead.highlights import CATEGORIES as HIGHLIGHT_CATEGORIES
 from paperead.highlights import extract_highlights
 from paperead.layout import Block, parse_pdf
-from paperead.pdf_export import AUTO_BODY_SIZE, PDF_ALGO_VER, build_translated_pdf
+
 from paperead.llm import LLMConfig, OpenAICompatBackend
 from paperead.tutor import build_guide
 from paperead.tutor.guide import GUIDE_VERSION
@@ -88,7 +88,6 @@ from paperead.translate import (
     build_glossary,
     quality_ok,
     translate_block,
-    translate_paper,
     translate_text,
 )
 from paperead.translation_task import (
@@ -102,7 +101,6 @@ from paperead.translation_task import (
     published_ids,
     read_job as read_translation_job,
     retry_delay,
-    split_text,
     write_job as write_translation_job,
 )
 from paperead.translation_manifest import (
@@ -230,6 +228,13 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         daemon=True,
     ).start()
     _schedule_scholar_daily_prefetch()
+    # 笔记广场目录在软件启动时就开始构建：缓存过期/首次安装就拉起后台刷新，
+    # 用户点开广场时大概率已经就绪，不用再等一次文件树下载与索引预热。
+    if env("PAPEREAD_MOCK", "0") != "1":
+        try:
+            notes_catalog.ensure()
+        except Exception as exc:
+            log.warning("笔记目录预热失败：%s", exc)
     # 进程重启后把卡在 running 的研究会话标回 idle，避免界面一直显示在运行。
     # 原来挂在研究路由的 startup 事件上，同样依赖 Starlette 的事件 API，
     # 这里一并收进 lifespan。
@@ -1296,25 +1301,19 @@ async def paper_file(paper_id: str) -> FileResponse:
     return FileResponse(path, media_type="application/pdf", filename=f"{paper_id}.pdf")
 
 
-def _translated_pdf_path(paper_id: str, lang: str):
-    return DATA_DIR / "papers" / f"{paper_id}_translated" / lang / "translated.pdf"
+def _engine_output_dir(paper_id: str, lang: str) -> Path:
+    return DATA_DIR / "papers" / f"{paper_id}_translated" / lang
 
-
-def _blocks_cache_key(paper_id: str) -> str:
-    """译文 PDF 的失效依据：blocks 文件任何变化都会换 key。"""
-    try:
-        path = store.blocks_path(paper_id)
-        return hashlib.sha256(path.read_bytes()).hexdigest()[:16] if path else ""
-    except OSError:
-        return ""
 
 
 def _engine_pdf_meta(paper_id: str, lang: str, mode: str = "mono") -> dict | None:
-    """BabelDOC 成品 PDF 的登记信息；缺失/语种不符/译文已变时返回 None。
+    """BabelDOC 成品 PDF 的登记信息；缺失或语种不符时返回 None。
 
-    ``mode="dual"`` 时优先返回双语对照版；没有对照版则退回单语版。
+    引擎产物只与「原文 PDF + 本次译文」绑定，不随 blocks 的阅读流增量翻译
+    失效：阅读页补翻几段不应让已生成的整篇译文 PDF 变成 404，否则用户每次
+    局部翻译后都得重跑一遍引擎。``mode="dual"`` 优先取双语对照版。
     """
-    base = DATA_DIR / "papers" / f"{paper_id}_translated" / lang
+    base = _engine_output_dir(paper_id, lang)
     try:
         meta = json.loads((base / "engine.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -1329,9 +1328,6 @@ def _engine_pdf_meta(paper_id: str, lang: str, mode: str = "mono") -> dict | Non
     path = base / name
     if not path.is_file():
         return None
-    key = str(meta.get("cache_key") or "")
-    if key and key != _blocks_cache_key(paper_id):
-        return None
     return {**meta, "path": path, "mode": "dual" if name == meta.get("dual_file") else "mono"}
 
 
@@ -1344,13 +1340,12 @@ def _mark_engine_pdf(paper_id: str, job: dict) -> None:
     if not path.is_file():
         return
     lang = str(job.get("lang") or "zh-Hans")
-    base = DATA_DIR / "papers" / f"{paper_id}_translated" / lang
+    base = _engine_output_dir(paper_id, lang)
     meta = {
         "provider": "babeldoc",
         "file": path.name,
         "lang": lang,
         "pages": int(job.get("_engine_pages") or 0),
-        "cache_key": _blocks_cache_key(paper_id),
         "built_at": int(time.time()),
     }
     try:
@@ -1392,46 +1387,31 @@ async def translation_report(paper_id: str, lang: str = "zh-Hans") -> dict:
 def _translated_pdf_gate(
     paper_id: str, lang: str, mode: str = "mono"
 ) -> tuple[bool, str, str, Path]:
-    """译文 PDF 是否可交付：文件存在、覆盖率 > 0、且版式不是旧缓存。
+    """译文 PDF 是否可交付：只认 BabelDOC 引擎排好版的成品。
 
-    顺序很重要：0 覆盖要先报 ``zero_coverage``（历史坏产物），再报版本过期，
-    否则用户只会看到「需要重建」而不知道根本原因是没翻译。
+    自研页级回写器已下线，交付链路只剩一条来源：引擎产出的 PDF 经
+    ``engine.json`` 登记。引擎缺失时报 ``engine_missing``，不再静默退回
+    内部排版，避免两套实现互相干扰。
     """
-    path = _translated_pdf_path(paper_id, lang)
-    # 优先交付 BabelDOC 自己排好版的成品 PDF：它的版面、公式绕排和表格处理
-    # 比我们的回写器完整，不再需要自研 pdf_export 的旧产物。
-    engine = _engine_pdf_meta(paper_id, _norm_lang(lang), mode)
-    if engine is not None:
-        path = engine["path"]
-    # 构建时若 translated.pdf 正被 pdf.js / 下载请求读取，新产物会写到
-    # translated.next.pdf 或唯一名；取修改时间最新的一份，保证拿到最新排版。
-    try:
-        candidates = [p for p in path.parent.glob("translated*.pdf") if p.is_file()]
-        if candidates and engine is None:
-            path = max(candidates, key=lambda p: p.stat().st_mtime)
-    except OSError:
-        pass
-    if not path.is_file():
-        return False, "missing", "译文 PDF 尚未生成", path
+    target = _norm_lang(lang)
+    engine = _engine_pdf_meta(paper_id, target, mode)
+    if engine is None:
+        return (
+            False,
+            "engine_missing",
+            "译文 PDF 需要由全局翻译引擎生成",
+            _engine_output_dir(paper_id, target) / "babeldoc.mono.pdf",
+        )
+    path = engine["path"]
     blocks = store.read_blocks(paper_id)
     if blocks is None:
         return False, "parsing", "论文还在解析中", path
-    target = _norm_lang(lang)
     manifest = build_manifest(
         blocks, paper_id, target, report=read_report(DATA_DIR, paper_id, target)
     )
     allowed, code, message = coverage_guard(manifest)
     if not allowed:
         return False, code, message, path
-    if engine is not None:
-        return True, "", "", path
-    # 排版算法/字号策略升级后，旧 PDF 必须重建，否则用户继续看到旧版式。
-    try:
-        meta = json.loads((path.parent / "meta.json").read_text(encoding="utf-8"))
-    except Exception:
-        meta = {}
-    if meta.get("algo_ver") != PDF_ALGO_VER or meta.get("lang") not in (None, target):
-        return False, "stale", "译文 PDF 需要按新版排版重建", path
     return True, "", "", path
 
 
@@ -1543,6 +1523,9 @@ def _recover_translation_jobs() -> None:
         _remember_job(job)
 
 
+_ENGINE_MISSING = "全局翻译引擎尚未就绪：首次使用需要联网下载引擎，下载完成后重试即可。"
+
+
 @app.post("/api/papers/{paper_id}/translation/jobs")
 async def start_translation_job(paper_id: str, req: TranslationJobIn) -> dict:
     """启动（或复用）整篇翻译任务；返回 job_id，后续用轮询/重连接口取进度。"""
@@ -1559,6 +1542,12 @@ async def start_translation_job(paper_id: str, req: TranslationJobIn) -> dict:
             raise HTTPException(status_code=404, detail="翻译任务不存在")
         if job.get("status") not in {"paused", "failed", "cancelled"}:
             raise HTTPException(status_code=409, detail="任务不在可续跑状态")
+        if not babeldoc_engine.available(str(job.get("lang") or "zh-Hans")):
+            raise HTTPException(
+                status_code=409,
+                detail=_ENGINE_MISSING,
+                headers={"X-Translation-Code": "engine_missing"},
+            )
         job["failures"] = []
         job["failed"] = 0
         _launch_translation_job(job, req.config, req.auto_highlights)
@@ -1571,9 +1560,14 @@ async def start_translation_job(paper_id: str, req: TranslationJobIn) -> dict:
     manifest = build_manifest(blocks, paper_id, target)
     if manifest["eligible_total"] == 0:
         raise HTTPException(status_code=409, detail="本篇没有可翻译的正文块")
-    pages = sorted({p for p in (req.pages or []) if 1 <= p <= 10_000}) or None
-    block_ids = list(req.block_ids or []) or None
-    job = new_job(paper_id, target, pages=pages, block_ids=block_ids)
+    # 全局翻译只走外部引擎：引擎缺失时直接报错，不回退内部实现。
+    if not babeldoc_engine.available(target):
+        raise HTTPException(
+            status_code=409,
+            detail=_ENGINE_MISSING,
+            headers={"X-Translation-Code": "engine_missing"},
+        )
+    job = new_job(paper_id, target)
     job["skipped"] = manifest["skipped"]
     job["total"] = manifest["pending"] + manifest["failed"]
     if req.rebuild_pdf:
@@ -1686,15 +1680,16 @@ async def translated_pdf(
 async def build_translated_pdf_route(
     paper_id: str,
     lang: str = "zh-Hans",
-    body_size: float = AUTO_BODY_SIZE,
     mode: str = "mono",
 ) -> dict:
-    """按当前 blocks 重新生成页级译文 PDF（翻译完成后由前端调用）。"""
+    """报告译文 PDF 是否已有引擎成品（不再由服务端重排）。
+
+    译文 PDF 唯一来源是全局翻译引擎：正文已译完、只缺成品时，前端用
+    ``translation/jobs`` 的 ``rebuild_pdf`` 触发一次引擎任务；这里只核对
+    引擎登记，避免再维护第二套排版实现。
+    """
     if not store.get(paper_id):
         raise HTTPException(status_code=404, detail="论文不存在")
-    pdf = store.pdf_path(paper_id)
-    if not pdf:
-        raise HTTPException(status_code=404, detail="论文 PDF 不存在")
     blocks = store.read_blocks(paper_id)
     if blocks is None:
         raise HTTPException(status_code=400, detail="论文尚未解析")
@@ -1704,69 +1699,40 @@ async def build_translated_pdf_route(
     )
     allowed, code, message = coverage_guard(manifest)
     if not allowed:
-        # 0 覆盖时绝不产出「看起来翻译完成、实际仍是原文」的 PDF。
+        # 0 覆盖时绝不承认「翻译完成」，也不产出仍显示原文的 PDF。
         raise HTTPException(
             status_code=409,
             detail=message,
             headers={"X-Translation-Code": code},
         )
-    out_dir = DATA_DIR / "papers" / f"{paper_id}_translated" / target
-    # 引擎已经产出成品 PDF：直接返回，不再用自研回写器重排。
     engine = _engine_pdf_meta(paper_id, target, mode)
-    if engine is not None:
-        return {
-            "status": (
-                "partial"
-                if manifest["coverage"] < 1.0 or manifest["failed"]
-                else "succeeded"
-            ),
-            "engine": "babeldoc",
-            "mode": engine.get("mode"),
-            "dual": bool(engine.get("dual_file")),
-            "pages": int(engine.get("pages") or 0),
-            "failed_pages": [],
-            "coverage": manifest["coverage"],
-            "translation": {
-                "eligible": manifest["eligible_total"],
-                "translated": manifest["translated"],
-                "failed": manifest["failed"],
-                "pending": manifest["pending"],
-                "skipped": manifest["skipped"],
-                "excluded": manifest["excluded"],
-            },
-        }
-    blocks_path = store.blocks_path(paper_id)
-    cache_key = (
-        hashlib.sha256(blocks_path.read_bytes()).hexdigest()[:16]
-        if blocks_path
-        else ""
-    )
-    result = await asyncio.to_thread(
-        build_translated_pdf,
-        pdf,
-        blocks,
-        out_dir,
-        lang=target,
-        body_size=body_size,
-        cache_key=cache_key,
-    )
-    result["coverage"] = manifest["coverage"]
-    result["status"] = (
-        "partial"
-        if manifest["coverage"] < 1.0
-        or manifest["failed"]
-        or result.get("failed_pages")
-        else "succeeded"
-    )
-    result["translation"] = {
-        "eligible": manifest["eligible_total"],
-        "translated": manifest["translated"],
-        "failed": manifest["failed"],
-        "pending": manifest["pending"],
-        "skipped": manifest["skipped"],
-        "excluded": manifest["excluded"],
+    if engine is None:
+        raise HTTPException(
+            status_code=409,
+            detail="译文 PDF 由全局翻译引擎产出，当前还没有成品；请重新发起一次全文翻译。",
+            headers={"X-Translation-Code": "engine_missing"},
+        )
+    return {
+        "status": (
+            "partial"
+            if manifest["coverage"] < 1.0 or manifest["failed"]
+            else "succeeded"
+        ),
+        "engine": "babeldoc",
+        "mode": engine.get("mode"),
+        "dual": bool(engine.get("dual_file")),
+        "pages": int(engine.get("pages") or 0),
+        "failed_pages": [],
+        "coverage": manifest["coverage"],
+        "translation": {
+            "eligible": manifest["eligible_total"],
+            "translated": manifest["translated"],
+            "failed": manifest["failed"],
+            "pending": manifest["pending"],
+            "skipped": manifest["skipped"],
+            "excluded": manifest["excluded"],
+        },
     }
-    return result
 
 
 @app.get("/api/papers/{paper_id}/thumb")
@@ -4261,133 +4227,6 @@ async def _extract_page_highlights(
         _highlighting.discard(key)
 
 
-@app.post("/api/papers/{paper_id}/translate")
-async def translate(paper_id: str, req: TranslateReq) -> dict:
-    """按页翻译（默认整篇）。
-
-    前端阅读页只请求「当前页 + 下一页」，随滚动增量翻译；已在翻译的页会被跳过，
-    避免重复计费。
-    """
-    row = store.get(paper_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="论文不存在")
-    if store.read_blocks(paper_id) is None:
-        raise HTTPException(status_code=409, detail="还在解析中，请稍后再试")
-
-    pages = sorted({p for p in (req.pages or []) if 1 <= p <= 10_000}) or None
-    if pages is not None:
-        key = f"{paper_id}:{','.join(map(str, pages))}"
-        if key in _translating:
-            return {"ok": True, "status": "translating", "blocks": []}
-        _translating.add(key)
-    else:
-        key = f"{paper_id}:*"
-        if key in _translating:
-            return {"ok": True, "status": "translating", "blocks": []}
-        _translating.add(key)
-
-    try:
-        blocks = await _translate_pages(paper_id, req.config, pages, req.target_lang)
-        translated_pages = sorted({int(b.get("page") or 0) for b in blocks})
-        highlights: list[dict] = []
-        if req.auto_highlights:
-            for page in translated_pages:
-                page_highlights = await _extract_page_highlights(
-                    paper_id, page, model=req.config.model
-                )
-                if page_highlights:
-                    highlights.extend(page_highlights)
-        return {
-            "ok": True,
-            "status": "done",
-            "pages": pages,
-            "blocks": blocks,
-            "highlights": highlights,
-        }
-    except Exception as e:
-        log.exception("翻译失败 %s", paper_id)
-        raise HTTPException(status_code=502, detail=f"翻译失败：{e}") from e
-    finally:
-        _translating.discard(key)
-
-
-async def _translate_pages(
-    paper_id: str,
-    cfg: LLMConfigIn,
-    pages: list[int] | None,
-    target_lang: str = "zh-Hans",
-) -> list[dict]:
-    """翻译指定页的块，返回这些块的最新数据。"""
-    lang = _norm_lang(target_lang)
-    async with _lock_for(paper_id):
-        _reset_for_language(paper_id, lang)
-        all_blocks = store.read_blocks(paper_id) or []
-        # 可译口径统一由 manifest 提供：公式碎片、目录点线、参考文献都不再
-        # 反复进入待译队列，避免「前端说还有、服务端说 0 块」。
-        before = build_manifest(all_blocks, paper_id, lang)
-        eligible_ids = set(before["eligible_ids"])
-        targets = [
-            (i, b) for i, b in enumerate(all_blocks)
-            if (pages is None or b.get("page") in pages)
-            and b.get("id") in eligible_ids
-            and not b.get("translated")
-        ]
-        if not targets:
-            return []
-
-        objs = [Block(**{**b, "bbox": tuple(b["bbox"])}) for _, b in targets]
-
-        backend = OpenAICompatBackend(
-            LLMConfig(
-                api_key=cfg.api_key,
-                base_url=cfg.base_url.rstrip("/"),
-                model=cfg.model,
-                timeout=cfg.timeout,
-            )
-        )
-        from paperead.llm import set_backend
-
-        set_backend(backend)
-
-        row = store.get(paper_id) or {}
-        glossary = row.get("glossary") or {}
-        if not glossary:
-            # 术语表对整篇扫一次就够，缓存下来给后续每次按页翻译复用
-            everything = [Block(**{**b, "bbox": tuple(b["bbox"])}) for b in all_blocks]
-            glossary = await build_glossary(everything, target_name=_target_name(lang))
-
-        started_at = time.time()
-        stats = await translate_paper(
-            objs,
-            glossary,
-            concurrency=8,
-            target_name=_target_name(lang),
-            target_lang=lang,
-        )
-
-        for (idx, _), obj in zip(targets, objs):
-            all_blocks[idx] = obj.to_dict()
-
-        store.write_blocks(paper_id, all_blocks)
-        done = sum(1 for b in all_blocks if b.get("translated"))
-        store.update(
-            paper_id,
-            translated=done,
-            glossary=glossary,
-            translation_lang=lang,
-        )
-        after = build_manifest(all_blocks, paper_id, lang)
-        report = build_report(
-            after,
-            started_at=started_at,
-            new_translated=int(stats.get("translated") or 0),
-            extra_failed=int(stats.get("failed") or 0),
-            usage={"calls": len(targets)},
-        )
-        write_report(DATA_DIR, paper_id, lang, report)
-        return [all_blocks[i] for i, _ in targets]
-
-
 def _lock_for(paper_id: str) -> asyncio.Lock:
     lock = _locks.get(paper_id)
     if lock is None:
@@ -4663,84 +4502,6 @@ async def translate_stream(paper_id: str, req: TranslateReq) -> StreamingRespons
     )
 
 
-def _job_targets(
-    paper_id: str,
-    job: dict,
-    blocks: list[dict],
-) -> tuple[dict, list[tuple[int, dict]]]:
-    lang = str(job.get("lang") or "zh-Hans")
-    manifest = build_manifest(blocks, paper_id, lang)
-    eligible = set(manifest["eligible_ids"])
-    pages = set(job.get("pages") or [])
-    wanted = set(job.get("block_ids") or [])
-    targets: list[tuple[int, dict]] = []
-    for index, block in enumerate(blocks):
-        bid = str(block.get("id") or "")
-        if bid not in eligible or (block.get("translated") or "").strip():
-            continue
-        page = int(block.get("page") or 0)
-        if pages and page not in pages:
-            continue
-        if wanted and bid not in wanted:
-            continue
-        targets.append((index, block))
-    return manifest, targets
-
-
-async def _translate_job_block(
-    job: dict,
-    block: Block,
-    glossary: dict[str, str],
-    target_name: str,
-    prev_tail: str,
-    next_head: str,
-    limiter: AdaptiveLimiter,
-) -> str:
-    """单块翻译：自适应并发 + 指数退避 + 超长块切分。"""
-    job["concurrency"] = limiter.limit
-    chunks = split_text(block.text)
-    outputs: list[str] = []
-    for index, chunk in enumerate(chunks):
-        current = (
-            replace(block, id=f"{block.id}#c{index}", text=chunk)
-            if len(chunks) > 1
-            else block
-        )
-        last_error: BaseException | None = None
-        for attempt in range(3):
-            try:
-                # 只把模型调用放进限流器：退避等待期间释放槽位，
-                # 否则限流时并发会被睡眠中的任务占满。
-                async with limiter:
-                    tex = await translate_block(
-                        current,
-                        glossary,
-                        prev_tail,
-                        next_head,
-                        temperature=0.25 if attempt == 0 else 0.15,
-                        target_name=target_name,
-                    )
-                outputs.append(tex)
-                last_error = None
-                break
-            except Exception as exc:
-                last_error = exc
-                code, message = classify_error(exc)
-                limiter.on_error(code)
-                if code in FATAL_CODES:
-                    raise FatalTranslationError(code, message) from exc
-                if attempt >= 2:
-                    raise
-                await asyncio.sleep(retry_delay(attempt, code))
-        if last_error is not None:
-            raise last_error
-    merged = "\n\n".join(outputs).strip()
-    if not merged:
-        raise RuntimeError("模型返回空译文")
-    limiter.on_success()
-    return merged
-
-
 def _flush_job(paper_id: str, job: dict, all_blocks: list[dict]) -> None:
     store.write_blocks(paper_id, all_blocks)
     job["published_ids"] = list(job.get("translated_ids") or [])
@@ -4808,8 +4569,8 @@ async def _try_engine_translation(
     """用 BabelDOC 整篇翻译并映射回 Block。
 
     只处理「整篇」任务：引擎一次翻完整篇，按页任务（阅读页滚动时的增量翻译）
-    仍走分块模型路径。引擎失败时返回 False，由调用方回退到分块翻译；
-    映射不到任何块也算失败，避免白跑一趟。
+    仍走分块模型路径。返回 False 表示引擎不可用/运行失败/没有映射到任何块，
+    调用方据此显式报错，不再回退到内部排版实现。
     """
     lang = str(job.get("lang") or "zh-Hans")
     if job.get("pages") or job.get("block_ids"):
@@ -4839,7 +4600,7 @@ async def _try_engine_translation(
             pass
 
     try:
-        engine_dir = DATA_DIR / "papers" / f"{paper_id}_translated" / lang
+        engine_dir = _engine_output_dir(paper_id, lang)
         # 只留单语成品：阅读页的「对照」是左原文 PDF + 右译文 PDF 两栏，
         # 不需要引擎把双语并排印在同一份 PDF 里。
         engine_pdf = engine_dir / "babeldoc.mono.pdf"
@@ -4860,7 +4621,7 @@ async def _try_engine_translation(
         job["done"] = base_done
         return False
     except Exception as exc:  # noqa: BLE001 - 引擎任何异常都只降级，不影响主流程
-        log.warning("BabelDOC 引擎失败，回退分块翻译：%s", exc)
+        log.warning("BabelDOC 引擎失败：%s", exc)
         job["done"] = base_done
         return False
 
@@ -4927,12 +4688,8 @@ async def _run_translation_job(
     job["resume_available"] = False
     write_translation_job(DATA_DIR, job)
 
-    limiter = _model_limiter()
     all_blocks: list[dict] = []
-    active_tasks: set[asyncio.Task] = set()
     fatal: dict | None = None
-    consecutive_errors = 0
-    flush_counter = 0
     try:
         from paperead.llm import set_backend
 
@@ -4952,147 +4709,60 @@ async def _run_translation_job(
                 job["published_ids"] = []
                 job["done"] = 0
             all_blocks = store.read_blocks(paper_id) or []
-            manifest, targets = _job_targets(paper_id, job, all_blocks)
+            manifest = build_manifest(all_blocks, paper_id, lang)
+            eligible = set(manifest["eligible_ids"])
+            targets = [
+                (i, b)
+                for i, b in enumerate(all_blocks)
+                if b.get("id") in eligible and not (b.get("translated") or "").strip()
+            ]
             job["total"] = len(job.get("translated_ids") or []) + len(targets)
             job["skipped"] = manifest["skipped"]
             _flush_job(paper_id, job, all_blocks)
             if not targets:
                 if job.get("engine_pdf_only"):
-                    # 正文已有译文、只缺成品 PDF：跑一遍引擎补出 mono/dual。
-                    await _try_engine_translation(
+                    # 正文已有译文、只缺成品 PDF：跑一遍引擎补出成品。
+                    if not await _try_engine_translation(
                         paper_id, job, cfg, all_blocks, [], manifest
-                    )
-                _finish_job(paper_id, job, all_blocks)
+                    ):
+                        fatal = {
+                            "code": "engine_failed",
+                            "message": "全局翻译引擎没能生成译文 PDF，任务已暂停；可稍后重试。",
+                        }
+                _finish_job(paper_id, job, all_blocks, fatal=fatal)
                 return
 
-            # 整篇任务优先用 BabelDOC 引擎：公式与版面保留更好。引擎不可用、
-            # 运行失败或没映射到任何块时，接着走下面的分块模型路径。
-            if await _try_engine_translation(
+            # 全局翻译只走 BabelDOC 引擎：引擎不可用或运行失败都显式报错，
+            # 不再用内部模型分块补译，避免两套全局翻译实现互相干扰。
+            if not babeldoc_engine.available(lang):
+                _finish_job(
+                    paper_id,
+                    job,
+                    all_blocks,
+                    fatal={"code": "engine_missing", "message": _ENGINE_MISSING},
+                )
+                return
+            if not await _try_engine_translation(
                 paper_id, job, cfg, all_blocks, targets, manifest
             ):
-                manifest, targets = _job_targets(paper_id, job, all_blocks)
-                job["total"] = len(job.get("translated_ids") or []) + len(targets)
-                job["skipped"] = manifest["skipped"]
-                _flush_job(paper_id, job, all_blocks)
-                if not targets:
+                if job.get("cancel_requested"):
+                    _flush_job(paper_id, job, all_blocks)
                     _finish_job(paper_id, job, all_blocks)
                     return
-            if job.get("cancel_requested"):
-                _flush_job(paper_id, job, all_blocks)
-                _finish_job(paper_id, job, all_blocks)
-                return
-
-            glossary = (store.get(paper_id) or {}).get("glossary") or {}
-            if not glossary:
-                try:
-                    everything = [
-                        Block(**{**block, "bbox": tuple(block["bbox"])})
-                        for block in all_blocks
-                    ]
-                    glossary = await build_glossary(everything, target_name=target_name)
-                    store.update(paper_id, glossary=glossary)
-                except Exception as exc:
-                    code, message = classify_error(exc)
-                    log.warning("术语表构建失败（%s）：%s", code, exc)
-
-            page_groups: dict[int, list[tuple[int, dict]]] = {}
-            for index, block in targets:
-                page_groups.setdefault(int(block.get("page") or 0), []).append(
-                    (index, block)
+                _finish_job(
+                    paper_id,
+                    job,
+                    all_blocks,
+                    fatal={
+                        "code": "engine_failed",
+                        "message": "全局翻译引擎未能完成翻译，任务已暂停；可稍后重试。",
+                    },
                 )
-
-            for page in sorted(page_groups):
-                if job.get("cancel_requested") or fatal is not None:
-                    break
-                job["current_page"] = page
-                items = page_groups[page]
-                tasks: list[asyncio.Task] = []
-                for pos, (index, block) in enumerate(items):
-                    obj = Block(**{**block, "bbox": tuple(block["bbox"])})
-                    prev_tail = ""
-                    if pos > 0:
-                        prev_tail = (items[pos - 1][1].get("translated") or "")[-120:]
-                    next_head = ""
-                    if pos + 1 < len(items):
-                        next_head = (items[pos + 1][1].get("text") or "")[:120]
-
-                    async def one(
-                        idx: int = index,
-                        current: Block = obj,
-                        prev: str = prev_tail,
-                        nxt: str = next_head,
-                    ):
-                        try:
-                            tex = await _translate_job_block(
-                                job,
-                                current,
-                                glossary,
-                                target_name,
-                                prev,
-                                nxt,
-                                limiter,
-                            )
-                            return idx, current, tex, None
-                        except BaseException as exc:  # noqa: BLE001
-                            return idx, current, None, exc
-
-                    task = asyncio.create_task(one())
-                    tasks.append(task)
-                    active_tasks.add(task)
-                    task.add_done_callback(active_tasks.discard)
-
-                for fut in asyncio.as_completed(tasks):
-                    idx, current, tex, exc = await fut
-                    if exc is not None:
-                        if isinstance(exc, FatalTranslationError):
-                            fatal = {"code": exc.code, "message": exc.message}
-                            for task in tasks:
-                                task.cancel()
-                            break
-                        code, message = classify_error(exc)
-                        job.setdefault("failures", []).append(
-                            {
-                                "block_id": current.id,
-                                "page": current.page,
-                                "code": code,
-                                "message": message,
-                                "attempts": 3,
-                            }
-                        )
-                        job["failed"] = len(job.get("failures") or [])
-                        limiter.on_error(code)
-                        consecutive_errors += 1
-                        if (
-                            code in {"network", "rate_limit"}
-                            and int(job.get("done") or 0) == 0
-                            and consecutive_errors >= 8
-                        ):
-                            fatal = {
-                                "code": "endpoint_unavailable",
-                                "message": "模型服务连续失败，任务已暂停；检查网络/额度后可继续。",
-                            }
-                            for task in tasks:
-                                task.cancel()
-                            break
-                    else:
-                        current.translated = str(tex or "")
-                        all_blocks[idx] = current.to_dict()
-                        if current.id not in (job.get("translated_ids") or []):
-                            job.setdefault("translated_ids", []).append(current.id)
-                        job["done"] = len(job.get("translated_ids") or [])
-                        consecutive_errors = 0
-                        limiter.on_success()
-                    flush_counter += 1
-                    if flush_counter >= 4:
-                        _flush_job(paper_id, job, all_blocks)
-                        flush_counter = 0
-
-                _flush_job(paper_id, job, all_blocks)
-                if fatal is not None:
-                    break
-
+                return
             _flush_job(paper_id, job, all_blocks)
             _finish_job(paper_id, job, all_blocks, fatal=fatal)
+            return
+
     except asyncio.CancelledError:
         if all_blocks:
             _flush_job(paper_id, job, all_blocks)
@@ -5124,10 +4794,6 @@ async def _run_translation_job(
             job["resume_available"] = True
             write_translation_job(DATA_DIR, job)
     finally:
-        # 任务被取消/异常时，别让已派生的块继续写回。
-        for task in list(active_tasks):
-            task.cancel()
-        job["concurrency"] = limiter.limit
         try:
             write_translation_job(DATA_DIR, job)
         except Exception:

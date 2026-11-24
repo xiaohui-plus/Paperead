@@ -1,10 +1,11 @@
 """Paperead：学术论文 PDF 版面重排 + 英中逐段翻译。
 
-    from paperead import parse_pdf, build_glossary, translate_paper
+    from paperead import parse_pdf, build_glossary, translate_block
 
     paper = parse_pdf("paper.pdf", figure_dir="assets")
     glossary = await build_glossary(paper.blocks)
-    await translate_paper(paper.blocks, glossary)
+    block = paper.blocks[0]
+    block.translated = await translate_block(block, glossary)
 
     for block in paper.blocks:
         print(block.kind, block.text[:60], "->", block.translated[:60])
@@ -25,10 +26,9 @@ from .translate import (
     quality_ok,
     restore,
     translate_block,
-    translate_paper,
 )
 
-__version__ = "0.2.31"
+__version__ = "0.2.32"
 
 __all__ = [
     # 解析
@@ -41,7 +41,6 @@ __all__ = [
     "validate_latex",
     # 翻译
     "build_glossary",
-    "translate_paper",
     "translate_block",
     "protect",
     "restore",

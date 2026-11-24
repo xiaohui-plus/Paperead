@@ -14938,6 +14938,32 @@ button.reward-tile {
   font-size: 12.5px;
 }
 
+/* 目录构建：进度条沿用细线风格，颜色只出现在轨道上，不抢正文注意力。 */
+.notes-building {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.notes-building-text {
+  font-variant-numeric: tabular-nums;
+}
+
+.notes-progress {
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(15, 60, 116, 0.12);
+  overflow: hidden;
+}
+
+.notes-progress > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--blue-ink);
+  transition: width 0.45s ease;
+}
+
 .notes-state-error {
   background: #fff4f2;
   color: #a3341f;

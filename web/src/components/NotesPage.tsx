@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ComponentType, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react'
 import { Markdown } from './Markdown'
 import { SettingsDialog } from './SettingsDialog'
 import { Sidebar, type NavKey } from './Sidebar'
@@ -311,12 +311,27 @@ export function NotesPage({ onNav, onOpenPaper }: Props) {
     if (found) setFieldLabel(found.label)
   }, [field, fieldLabel, overview, conference])
 
-  // 目录首次构建需要拉一次文件树；构建期间每 3 秒回看一次，就绪后停下。
+  // 目录首次构建要拉文件树 + 预热检索索引；构建期间 1.5 秒回看一次进度。
   useEffect(() => {
     const state = overview?.status.state
     if (!state || state === 'ready') return
-    const timer = window.setTimeout(() => void loadOverview(), 3000)
+    const timer = window.setTimeout(() => void loadOverview(), 1500)
     return () => window.clearTimeout(timer)
+  }, [overview?.status.state])
+
+  // 目录构建完成后自动刷新当前视图：用户不用离开/切回广场才看到新内容。
+  const lastCatalogState = useRef('')
+  useEffect(() => {
+    const state = overview?.status.state
+    if (!state) return
+    const previous = lastCatalogState.current
+    lastCatalogState.current = state
+    if (previous && previous !== 'ready' && state === 'ready' && mode === 'list') {
+      if (field) void loadField(0)
+      else void reload(0)
+    }
+    // 目录状态变化才需要补刷一次；筛选变化由上面的加载 effect 负责。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [overview?.status.state])
 
   const reload = async (offset = 0) => {
@@ -573,6 +588,16 @@ export function NotesPage({ onNav, onOpenPaper }: Props) {
   }, [query, field, fieldLabel, conference])
 
   const state = overview?.status.state
+  const catalogPercent = Math.max(0, Math.min(100, overview?.status.percent ?? 0))
+  const phase = overview?.status.phase || ''
+  const catalogPhaseText =
+    phase === 'fetching'
+      ? '正在获取笔记目录'
+      : phase === 'indexing'
+        ? '正在建立检索索引'
+        : overview?.total
+          ? '正在更新笔记目录'
+          : '正在构建笔记目录'
   const busyState = state === 'loading' || state === 'idle'
 
   return (
@@ -715,8 +740,23 @@ export function NotesPage({ onNav, onOpenPaper }: Props) {
             {notice && <div className={'library-notice ' + notice.kind}>{notice.text}</div>}
 
             {busyState && (
-              <div className="notes-state">
-                {overview?.total ? `正在更新目录（已有 ${overview.total} 篇）…` : '正在构建笔记目录…'}
+              <div className="notes-state notes-building" role="status" aria-live="polite">
+                <span className="notes-building-text">
+                  {catalogPhaseText}
+                  {overview?.total ? `（已有 ${overview.total} 篇）` : ''}
+                  {catalogPercent > 0 ? ` · ${catalogPercent}%` : ''}
+                </span>
+                {catalogPercent > 0 && (
+                  <div
+                    className="notes-progress"
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={catalogPercent}
+                  >
+                    <span style={{ width: `${catalogPercent}%` }} />
+                  </div>
+                )}
               </div>
             )}
             {state === 'error' && (

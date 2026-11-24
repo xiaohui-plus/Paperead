@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import time
@@ -88,91 +89,80 @@ def _wait_job(client, paper_id: str, job_id: str, timeout: float = 5.0) -> dict:
 
 
 def test_job_runs_in_background_and_publishes_blocks(monkeypatch, tmp_path) -> None:
+    """整篇任务只走引擎：引擎成功即发布译文与报告。"""
     main = _load_main(monkeypatch, tmp_path)
-    paper_id = _add_paper(main)
+    paper_id = _add_paper(main, "job.pdf")
     _write_blocks(main, paper_id)
 
-    async def fake_glossary(*args, **kwargs):
-        return {}
+    async def fake_engine(pid, job, cfg, all_blocks, targets, manifest):
+        for index, block in targets:
+            all_blocks[index]["translated"] = "中文译文"
+        main.store.write_blocks(pid, all_blocks)
+        job["translated_ids"] = [b["id"] for _, b in targets]
+        job["done"] = len(targets)
+        main._flush_job(pid, job, all_blocks)
+        return True
 
-    monkeypatch.setattr(main, "build_glossary", fake_glossary)
-    monkeypatch.setattr(main, "translate_block", _fake_translate(""))
+    monkeypatch.setattr(main.babeldoc_engine, "available", lambda lang=None: True)
+    monkeypatch.setattr(main, "_try_engine_translation", fake_engine)
 
-    from fastapi.testclient import TestClient
+    job = main.new_job(paper_id, "zh-Hans", total=2)
+    main._remember_job(job)
+    asyncio.run(
+        main._run_translation_job(paper_id, job["job_id"], main.LLMConfigIn(**CONFIG))
+    )
 
-    with TestClient(main.app) as client:
-        started = client.post(
-            f"/api/papers/{paper_id}/translation/jobs",
-            json={
-                "config": CONFIG,
-                "target_lang": "zh-Hans",
-                "auto_highlights": False,
-            },
-        )
-        assert started.status_code == 200, started.text
-        job_id = started.json()["job_id"]
-        done = _wait_job(client, paper_id, job_id)
+    done = main._job_by_id(job["job_id"])
+    assert done["status"] == "succeeded", done
+    assert done["done"] == 2
+    assert done["published_ids"] == ["b1", "b2"]
+    assert done["report"]["status"] == "succeeded"
 
-        assert done["status"] == "succeeded", done
-        assert done["total"] == 2
-        assert done["done"] == 2
-        assert done["report"]["coverage"] == 1.0
-        assert len(done["blocks"]) == 2
-        assert all("中文译文" in block["translated"] for block in done["blocks"])
-
-        report_res = client.get(f"/api/papers/{paper_id}/translation/report")
-        assert report_res.status_code == 200
-        assert report_res.json()["status"] == "succeeded"
-
-        manifest = client.get(f"/api/papers/{paper_id}/translation/manifest").json()
-        assert manifest["translated"] == 2
-        assert manifest["eligible_total"] == 2
-
-        # 断线重连：since=0 一次补回全部已发布块；游标之后不再重复返回。
-        replay = client.get(f"/api/papers/{paper_id}/translation/jobs/{job_id}?since=0").json()
-        assert len(replay["blocks"]) == 2
-        assert replay["next_cursor"] == 2
-        tail = client.get(f"/api/papers/{paper_id}/translation/jobs/{job_id}?since=2").json()
-        assert tail["blocks"] == []
-        assert tail["next_cursor"] == 2
+    stored = main.store.read_blocks(paper_id)
+    assert all(
+        "中文译文" in block["translated"] for block in stored if block["id"] in {"b1", "b2"}
+    )
 
 
-def test_auth_failure_pauses_then_resume(monkeypatch, tmp_path) -> None:
+def test_engine_failure_pauses_then_resume(monkeypatch, tmp_path) -> None:
+    """引擎失败 → 任务暂停；续跑后引擎成功 → 任务完成。"""
     main = _load_main(monkeypatch, tmp_path)
-    paper_id = _add_paper(main, "auth.pdf")
+    paper_id = _add_paper(main, "resume.pdf")
     _write_blocks(main, paper_id)
 
-    async def fake_glossary(*args, **kwargs):
-        return {}
+    calls = {"n": 0}
 
-    async def deny(block, glossary, prev_tail, next_head, **kwargs):
-        raise AuthenticationError("401 invalid api key")
+    async def flaky_engine(pid, job, cfg, all_blocks, targets, manifest):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return False
+        for index, block in targets:
+            all_blocks[index]["translated"] = "中文译文"
+        main.store.write_blocks(pid, all_blocks)
+        job["translated_ids"] = [b["id"] for _, b in targets]
+        job["done"] = len(targets)
+        main._flush_job(pid, job, all_blocks)
+        return True
 
-    monkeypatch.setattr(main, "build_glossary", fake_glossary)
-    monkeypatch.setattr(main, "translate_block", deny)
+    monkeypatch.setattr(main.babeldoc_engine, "available", lambda lang=None: True)
+    monkeypatch.setattr(main, "_try_engine_translation", flaky_engine)
 
-    from fastapi.testclient import TestClient
+    job = main.new_job(paper_id, "zh-Hans", total=2)
+    main._remember_job(job)
+    asyncio.run(
+        main._run_translation_job(paper_id, job["job_id"], main.LLMConfigIn(**CONFIG))
+    )
+    failed = main._job_by_id(job["job_id"])
+    assert failed["status"] in {"paused", "failed"}
+    assert failed["error"]["code"] == "engine_failed"
+    assert failed["resume_available"] is True
 
-    with TestClient(main.app) as client:
-        started = client.post(
-            f"/api/papers/{paper_id}/translation/jobs",
-            json={"config": CONFIG, "target_lang": "zh-Hans"},
-        )
-        job_id = started.json()["job_id"]
-        failed = _wait_job(client, paper_id, job_id)
-        assert failed["status"] == "failed"
-        assert failed["error"]["code"] == "auth"
-        assert failed["resume_available"] is True
-
-        monkeypatch.setattr(main, "translate_block", _fake_translate(""))
-        resumed = client.post(
-            f"/api/papers/{paper_id}/translation/jobs/{job_id}/resume",
-            json={"config": CONFIG},
-        )
-        assert resumed.status_code == 200, resumed.text
-        done = _wait_job(client, paper_id, job_id)
-        assert done["status"] == "succeeded", done
-        assert done["done"] == 2
+    asyncio.run(
+        main._run_translation_job(paper_id, job["job_id"], main.LLMConfigIn(**CONFIG))
+    )
+    done = main._job_by_id(job["job_id"])
+    assert done["status"] == "succeeded", done
+    assert done["done"] == 2
 
 
 def test_job_file_recovers_as_paused(monkeypatch, tmp_path) -> None:
@@ -221,3 +211,65 @@ def test_cancel_paused_job(monkeypatch, tmp_path) -> None:
         body = res.json()
         assert body["status"] == "cancelled"
         assert body["resume_available"] is False
+
+
+def test_full_translation_requires_engine(monkeypatch, tmp_path) -> None:
+    """整篇全局翻译只走外部引擎：引擎没就绪时直接报错，不再静默回退分块。"""
+    main = _load_main(monkeypatch, tmp_path)
+    paper_id = _add_paper(main, "engine-missing.pdf")
+    _write_blocks(main, paper_id)
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(main.app) as client:
+        res = client.post(
+            f"/api/papers/{paper_id}/translation/jobs",
+            json={"config": CONFIG, "target_lang": "zh-Hans"},
+        )
+        assert res.status_code == 409, res.text
+        assert res.headers.get("x-translation-code") == "engine_missing"
+        assert "引擎" in res.json()["detail"]
+
+
+def test_engine_failure_does_not_fall_back_to_block_translation(
+    monkeypatch, tmp_path
+) -> None:
+    """引擎运行失败时任务显式失败；不允许再走分块翻译 + 内部回写器。"""
+    main = _load_main(monkeypatch, tmp_path)
+    paper_id = _add_paper(main, "engine-failed.pdf")
+    _write_blocks(main, paper_id)
+
+    calls = {"translate": 0}
+
+    async def fake_glossary(*args, **kwargs):
+        return {}
+
+    async def fake_translate(*args, **kwargs):
+        calls["translate"] += 1
+        return "中文译文"
+
+    async def boom(*args, **kwargs):
+        raise main.babeldoc_engine.EngineError("boom")
+
+    monkeypatch.setattr(main, "build_glossary", fake_glossary)
+    monkeypatch.setattr(main, "translate_block", fake_translate)
+    monkeypatch.setattr(main.babeldoc_engine, "available", lambda lang=None: True)
+    monkeypatch.setattr(main.babeldoc_engine, "run", boom)
+
+    job = main.new_job(paper_id, "zh-Hans", total=2)
+    main.write_translation_job(main.DATA_DIR, job)
+    main._remember_job(job)
+
+    asyncio.run(
+        main._run_translation_job(
+            paper_id,
+            job["job_id"],
+            main.LLMConfigIn(**CONFIG),
+        )
+    )
+
+    done = main._job_by_id(job["job_id"])
+    assert done["status"] in {"paused", "failed"}
+    assert done["error"]["code"] == "engine_failed"
+    assert calls["translate"] == 0
+    assert done["done"] == 0

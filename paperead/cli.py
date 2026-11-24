@@ -22,7 +22,6 @@ from pathlib import Path
 
 from .formula import recognize_equations, recognize_inline_math
 from .layout import parse_pdf
-from .translate import build_glossary, translate_paper
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -32,25 +31,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("pdf", help="PDF 路径")
     p.add_argument("-o", "--out", default="output", help="输出目录（默认 output/）")
-    p.add_argument("--translate", action="store_true", help="解析后逐段翻译")
     p.add_argument("--formula", action="store_true", help="识别显示公式为 LaTeX（需要视觉模型）")
-    p.add_argument("--limit", type=int, default=None, help="最多翻译多少段（调试用）")
     p.add_argument("--concurrency", type=int, default=4, help="并发数（默认 4）")
     p.add_argument("--no-figures", action="store_true", help="不抽取图片/表格/公式")
     p.add_argument("--json", metavar="PATH", default=None, help="块数据输出路径")
     return p
-
-
-async def _translate(paper, args) -> None:
-    glossary = await build_glossary(paper.blocks)
-    print(f"术语表：{len(glossary)} 条")
-    stats = await translate_paper(
-        paper.blocks,
-        glossary,
-        concurrency=args.concurrency,
-        limit=args.limit,
-    )
-    print(f"翻译完成：{stats}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -82,8 +67,6 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"行内公式识别：{inline_stats}")
 
-    if args.translate:
-        asyncio.run(_translate(paper, args))
 
     payload = {
         "source": str(src),

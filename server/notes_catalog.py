@@ -201,6 +201,8 @@ class NotesCatalog:
         self._items: list[dict[str, Any]] = []
         self._updated_at = 0.0
         self._state = "idle"
+        self._phase = "idle"
+        self._percent = 0
         self._error = ""
         # 检索用的规范化文本与结果缓存，避免每次分页都重扫 2 万条目录。
         self._hay: dict[str, tuple[str, str, str]] = {}
@@ -229,6 +231,8 @@ class NotesCatalog:
         self._items = items if isinstance(items, list) else []
         self._updated_at = float(data.get("updated_at") or 0)
         self._state = "ready" if self._items else "idle"
+        self._phase = "ready" if self._items else "idle"
+        self._percent = 100 if self._items else 0
         try:
             desc = json.loads(self.desc_path.read_text(encoding="utf-8"))
             if isinstance(desc, dict):
@@ -260,11 +264,18 @@ class NotesCatalog:
     def status(self) -> dict[str, Any]:
         return {
             "state": self._state,
+            "phase": self._phase,
+            "percent": self._percent,
             "total": len(self._items),
             "updated_at": self._updated_at,
             "stale": self.stale,
             "error": self._error,
         }
+
+    def _set_progress(self, phase: str, percent: int) -> None:
+        with self._lock:
+            self._phase = phase
+            self._percent = max(0, min(100, int(percent)))
 
     # ── 刷新 ────────────────────────────────────────────
 
@@ -280,7 +291,11 @@ class NotesCatalog:
     def refresh_async(self) -> None:
         if self._state == "loading":
             return
-        self._state = "loading"
+        with self._lock:
+            self._state = "loading"
+            self._phase = "fetching"
+            self._percent = 5
+            self._error = ""
         threading.Thread(target=self._refresh, daemon=True).start()
 
     def _refresh(self) -> None:
@@ -288,10 +303,13 @@ class NotesCatalog:
             items = self._fetch()
             if not items:
                 raise RuntimeError("目录为空")
+            self._set_progress("saving", 40)
             with self._lock:
                 self._items = items
                 self._updated_at = time.time()
-                self._state = "ready"
+                self._state = "loading"
+                self._phase = "indexing"
+                self._percent = 45
                 self._error = ""
                 self._hay.clear()
                 self._en_index.clear()
@@ -303,6 +321,8 @@ class NotesCatalog:
         except Exception as error:  # 网络/限流都只影响目录，不影响已缓存内容
             with self._lock:
                 self._state = "error"
+                self._phase = "error"
+                self._percent = 0
                 self._error = str(error)
 
     def _fetch(self) -> list[dict[str, Any]]:
@@ -465,17 +485,27 @@ class NotesCatalog:
         """英文词倒排：短语候选取各单词路径的交集，再由精确匹配过滤。"""
         if generation is None:
             generation = self._index_generation
+        rows = list(self._items)
+        total = len(rows) or 1
         index: dict[str, set[str]] = {}
-        for row in list(self._items):
+        for done, row in enumerate(rows, start=1):
             _title, _field, hay = self._hay_of(row)
             path = str(row.get("path") or "")
             for token in set(hay.split()):
                 index.setdefault(token, set()).add(path)
+            # 2 万条规范化文本要几秒；按 500 条推进一次进度，前端才能看到活。
+            if done % 500 == 0:
+                self._set_progress("indexing", 45 + int(50 * done / total))
         # 构建期间目录被刷新：丢弃旧索引，让新一轮预热接手。
         if generation != self._index_generation:
             return
         self._en_index = index
         self._index_ready = True
+        with self._lock:
+            if self._state == "loading":
+                self._state = "ready"
+                self._phase = "ready"
+                self._percent = 100
 
     def _warm_async(self) -> None:
         if self._warming or not self._items:
@@ -486,6 +516,13 @@ class NotesCatalog:
         def run() -> None:
             try:
                 self._build_index(generation)
+            except Exception as error:  # 索引只是加速检索，失败不能拖住目录可用
+                with self._lock:
+                    self._error = f"检索索引构建失败：{error}"
+                    if generation == self._index_generation and self._state == "loading":
+                        self._state = "ready"
+                        self._phase = "ready"
+                        self._percent = 100
             finally:
                 self._warming = False
                 if generation != self._index_generation and self._items:

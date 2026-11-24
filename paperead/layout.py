@@ -2841,7 +2841,7 @@ def _card_block(card: list[Block]) -> Block:
 
 
 # L2 列模型：页缘信息栏（作者单位 / 期刊信息 / 资助声明）判据。
-# 与 pdf_export 的区域判据保持一致，但这里用解析行数据判定，供拆块使用。
+# 只用解析行数据判定，供拆块与译文排版共用同一套几何。
 SIDE_RATIO_MIN = 0.06
 SIDE_RATIO_MAX = 0.22
 SIDE_EDGE_RATIO = 0.32

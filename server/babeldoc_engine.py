@@ -762,7 +762,7 @@ async def run(
         if not il.get("page"):
             raise EngineError("BabelDOC 未识别到可翻译页面")
         # BabelDOC 自己排好版的 PDF 比我们回写原版面更稳（公式/表格/行距
-        # 都由它处理），译文 PDF 直接用它，不再走自研 pdf_export。
+        # 都由它处理），译文 PDF 直接用它；应用侧不再维护第二套回写实现。
         saved: dict[str, Path] = {}
         if save_pdf is not None:
             mono = await asyncio.to_thread(_save_pdf_copy, out_dir, Path(save_pdf), "mono")

@@ -330,8 +330,8 @@ def test_empty_parse_is_failed_not_ready(monkeypatch, tmp_path) -> None:
     assert manifest["blocks_total"] == 0
 
 
-def test_zero_coverage_pdf_is_not_served(monkeypatch, tmp_path) -> None:
-    """历史坏产物：0 译文的 translated.pdf 必须在读取侧被拒绝。"""
+def test_only_engine_pdf_is_served(monkeypatch, tmp_path) -> None:
+    """译文 PDF 只认引擎登记：内部回写器留下的旧文件不得被当成译文。"""
     main = _load_main(monkeypatch, tmp_path)
     paper_id = _add_paper(main, "stale.pdf")
     _write_blocks(
@@ -340,26 +340,47 @@ def test_zero_coverage_pdf_is_not_served(monkeypatch, tmp_path) -> None:
         [_block("b1", "This paragraph has not been translated yet.")],
     )
 
+    out = main._engine_output_dir(paper_id, "zh-Hans")
+    out.mkdir(parents=True, exist_ok=True)
     doc = pymupdf.open()
     page = doc.new_page()
     page.insert_text((72, 72), "Looks like a translated PDF", fontsize=12)
-    stale = main._translated_pdf_path(paper_id, "zh-Hans")
-    stale.parent.mkdir(parents=True, exist_ok=True)
-    stale.write_bytes(doc.tobytes())
-    (stale.parent / "meta.json").write_text(
-        json.dumps({"algo_ver": main.PDF_ALGO_VER, "lang": "zh-Hans"}),
+    (out / "translated.pdf").write_bytes(doc.tobytes())
+    doc.close()
+    (out / "meta.json").write_text(
+        json.dumps({"algo_ver": "p2-autofit-v78", "lang": "zh-Hans"}),
         encoding="utf-8",
     )
-    doc.close()
     from fastapi.testclient import TestClient
 
     client = TestClient(main.app)
     head = client.head(f"/api/papers/{paper_id}/translated-pdf")
     assert head.status_code == 404
-    assert head.headers.get("x-translation-code") == "zero_coverage"
+    assert head.headers.get("x-translation-code") == "engine_missing"
     assert client.get(f"/api/papers/{paper_id}/translated-pdf").status_code == 404
 
-    # 有译文后同一文件才允许交付
+    # 登记引擎成品后，仍要先过「0 覆盖」守卫：不能把没翻译的原文当译文交付
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "Engine output", fontsize=12)
+    (out / "babeldoc.mono.pdf").write_bytes(doc.tobytes())
+    doc.close()
+    (out / "engine.json").write_text(
+        json.dumps(
+            {
+                "provider": "babeldoc",
+                "file": "babeldoc.mono.pdf",
+                "lang": "zh-Hans",
+                "pages": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    head = client.head(f"/api/papers/{paper_id}/translated-pdf")
+    assert head.status_code == 404
+    assert head.headers.get("x-translation-code") == "zero_coverage"
+
+    # 有译文 + 引擎成品：按引擎文件交付
     blocks = main.store.read_blocks(paper_id)
     blocks[0]["translated"] = "这一段已经翻译完成。"
     main.store.write_blocks(paper_id, blocks)
@@ -370,7 +391,7 @@ def test_zero_coverage_pdf_is_not_served(monkeypatch, tmp_path) -> None:
     assert served.content.startswith(b"%PDF")
 
 
-def test_build_allows_partial_coverage(monkeypatch, tmp_path) -> None:
+def test_build_reports_engine_state(monkeypatch, tmp_path) -> None:
     main = _load_main(monkeypatch, tmp_path)
     paper_id = _add_paper(main, "partial.pdf")
     _write_blocks(
@@ -389,8 +410,32 @@ def test_build_allows_partial_coverage(monkeypatch, tmp_path) -> None:
 
     client = TestClient(main.app)
     res = client.post(f"/api/papers/{paper_id}/translated-pdf/build")
+    assert res.status_code == 409
+    assert res.headers.get("x-translation-code") == "engine_missing"
+    assert "全文翻译" in res.json()["detail"]
+
+    out = main._engine_output_dir(paper_id, "zh-Hans")
+    out.mkdir(parents=True, exist_ok=True)
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "Engine output", fontsize=12)
+    (out / "babeldoc.mono.pdf").write_bytes(doc.tobytes())
+    doc.close()
+    (out / "engine.json").write_text(
+        json.dumps(
+            {
+                "provider": "babeldoc",
+                "file": "babeldoc.mono.pdf",
+                "lang": "zh-Hans",
+                "pages": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    res = client.post(f"/api/papers/{paper_id}/translated-pdf/build")
     assert res.status_code == 200, res.text
     body = res.json()
+    assert body["engine"] == "babeldoc"
     assert body["status"] == "partial"
     assert body["coverage"] == 0.5
     assert body["translation"]["translated"] == 1

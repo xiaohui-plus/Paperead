@@ -372,7 +372,7 @@ export function ReaderView({ paperId, onBack }: Props) {
     void refreshTranslationManifest()
   }, [paperId, targetLang, refreshTranslationManifest])
 
-  /** 重建译文 PDF；字号由后端按每篇内容自动统一，命中缓存时不重生成 */
+  /** 确认译文 PDF 是否已由全局翻译引擎产出；缺失时服务端会要求重新发起全文翻译 */
   const buildTranslatedPdf = useCallback(async () => {
     if (paperId === 'demo') return
     setPdfBuilding(true)
