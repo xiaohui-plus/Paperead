@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import time
@@ -16,10 +17,18 @@ from typing import Any
 from server.notes_http import http_get_text
 from server.notes_terms import QueryPlan, expand_query, normalize, term_hit
 
+log = logging.getLogger("paperead.notes_catalog")
+
 TREE_URL = (
     "https://api.github.com/repos/M0rtzz/paper-notes/git/trees/main?recursive=1"
 )
+# 目录索引由 Gitee 提供（随笔记镜像一起发布），国内用户不再先等 GitHub API。
+GITEE_CATALOG_URL = (
+    "https://gitee.com/deng_xiaohui/paperead/raw/master/notes-catalog.json"
+)
 CACHE_TTL = 24 * 3600
+# 自动刷新失败后的冷却时间：网络恢复前不反复重下文件树（前端轮询也不会把界面卡在 5%）。
+REFRESH_RETRY_SECONDS = 60
 _CONF_RE = re.compile(r"^[A-Z]{2,8}\d{4}$")
 
 _THEME_STOP = {
@@ -191,9 +200,43 @@ def _slug_title(slug: str) -> str:
     return text[:1].upper() + text[1:]
 
 
+def _items_from_entries(entries: Any) -> list[dict[str, Any]]:
+    """把 GitHub 文件树或 Gitee 目录索引的条目统一成目录项。"""
+    items: list[dict[str, Any]] = []
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        kind = entry.get("type")
+        if kind is not None and kind != "blob":
+            continue
+        path = str(entry.get("path") or "")
+        if not path.startswith("docs/") or not path.endswith(".md"):
+            continue
+        if path.endswith("/index.md"):
+            continue
+        parts = path.split("/")
+        if len(parts) != 4 or not _CONF_RE.fullmatch(parts[1]):
+            continue
+        slug = parts[3][: -len(".md")]
+        items.append(
+            {
+                "path": path,
+                "conference": parts[1],
+                "field": parts[2],
+                "slug": slug,
+                "title": _slug_title(slug),
+            }
+        )
+    items.sort(key=lambda item: (item["conference"], item["field"], item["slug"]))
+    return items
+
+
 class NotesCatalog:
     def __init__(self, data_dir: Path):
         self.root = Path(data_dir) / "notes"
+        # 从 Gitee 同步下来的会议分卷解压在 notes-mirror/docs：目录优先直接
+        # 扫本地文件，国内用户刷新目录不再依赖 GitHub API。
+        self.mirror_docs = Path(data_dir) / "notes-mirror" / "docs"
         self.path = self.root / "catalog.json"
         self.desc_path = self.root / "descriptions.json"
         self._lock = threading.Lock()
@@ -204,6 +247,9 @@ class NotesCatalog:
         self._phase = "idle"
         self._percent = 0
         self._error = ""
+        # 上次刷新开始时间：失败后短时间内不再自动重试，避免前端轮询
+        # 每 1.5 秒重新发起一次文件树下载、永远停在 5%。
+        self._last_attempt_at = 0.0
         # 检索用的规范化文本与结果缓存，避免每次分页都重扫 2 万条目录。
         self._hay: dict[str, tuple[str, str, str]] = {}
         self._en_index: dict[str, set[str]] = {}
@@ -274,16 +320,26 @@ class NotesCatalog:
 
     def _set_progress(self, phase: str, percent: int) -> None:
         with self._lock:
+            # 只有正在构建（loading）时才上报进度：已有缓存时 load() 会在
+            # ready 状态下静默预热索引，不能把状态改回 indexing/94%。
+            if self._state != "loading":
+                return
             self._phase = phase
             self._percent = max(0, min(100, int(percent)))
 
     # ── 刷新 ────────────────────────────────────────────
 
     def ensure(self) -> dict[str, Any]:
-        """目录为空或过期时在后台刷新，立即返回当前状态。"""
+        """目录为空或过期时在后台刷新，立即返回当前状态。
+
+        失败退避：网络不通时 ``_fetch`` 本身要等几十秒，若每次轮询都立即重来，
+        界面会永远停在 5%。有缓存时刷新失败也保留旧目录可用，只记录 error。
+        """
         if self._state == "loading":
             return self.status()
         if self._items and not self.stale:
+            return self.status()
+        if time.time() - self._last_attempt_at < REFRESH_RETRY_SECONDS:
             return self.status()
         self.refresh_async()
         return self.status()
@@ -296,6 +352,7 @@ class NotesCatalog:
             self._phase = "fetching"
             self._percent = 5
             self._error = ""
+            self._last_attempt_at = time.time()
         threading.Thread(target=self._refresh, daemon=True).start()
 
     def _refresh(self) -> None:
@@ -320,38 +377,65 @@ class NotesCatalog:
             self._warm_async()
         except Exception as error:  # 网络/限流都只影响目录，不影响已缓存内容
             with self._lock:
-                self._state = "error"
-                self._phase = "error"
-                self._percent = 0
                 self._error = str(error)
+                if self._items:
+                    # 已有目录：刷新失败不降级成不可用，前端继续展示上次缓存。
+                    self._state = "ready"
+                    self._phase = "ready"
+                    self._percent = 100
+                else:
+                    self._state = "error"
+                    self._phase = "error"
+                    self._percent = 0
+
+    def _local_items(self) -> list[dict[str, Any]]:
+        """本地镜像（Gitee 会议分卷）直接生成目录，零网络请求。"""
+        docs = self.mirror_docs
+        if not docs.is_dir():
+            return []
+        entries: list[dict[str, str]] = []
+        for conference_dir in docs.iterdir():
+            if not conference_dir.is_dir() or not _CONF_RE.fullmatch(conference_dir.name):
+                continue
+            for note in conference_dir.rglob("*.md"):
+                rel = note.relative_to(docs).as_posix()
+                parts = rel.split("/")
+                if len(parts) != 3 or parts[2].lower() == "index.md":
+                    continue
+                entries.append({"path": f"docs/{rel}"})
+        items = _items_from_entries(entries)
+        if items:
+            log.info("笔记目录来自本地镜像：%s 篇", len(items))
+        return items
 
     def _fetch(self) -> list[dict[str, Any]]:
-        payload = json.loads(http_get_text(TREE_URL, timeout=60))
+        # 顺序按「国内可用性」排：本地镜像 → Gitee 目录索引 → GitHub 文件树。
+        # 失败要尽快返回：Gitee/GitHub 各自最坏约 40s，之后由 ensure 进入冷却，
+        # 否则前端轮询会反复发起下载、界面一直停在 5%。
+        local = self._local_items()
+        if local:
+            return local
 
-        items: list[dict[str, Any]] = []
-        for entry in payload.get("tree") or []:
-            if entry.get("type") != "blob":
-                continue
-            path = str(entry.get("path") or "")
-            if not path.startswith("docs/") or not path.endswith(".md"):
-                continue
-            if path.endswith("/index.md"):
-                continue
-            parts = path.split("/")
-            if len(parts) != 4 or not _CONF_RE.fullmatch(parts[1]):
-                continue
-            slug = parts[3][: -len(".md")]
-            items.append(
-                {
-                    "path": path,
-                    "conference": parts[1],
-                    "field": parts[2],
-                    "slug": slug,
-                    "title": _slug_title(slug),
-                }
-            )
-        items.sort(key=lambda item: (item["conference"], item["field"], item["slug"]))
-        return items
+        errors: list[str] = []
+        try:
+            payload = json.loads(http_get_text(GITEE_CATALOG_URL, timeout=15))
+            items = _items_from_entries(payload.get("items"))
+            if items:
+                return items
+            errors.append("Gitee 目录为空")
+        except Exception as error:  # noqa: BLE001 - 换下一个源
+            errors.append(f"Gitee：{error}")
+
+        try:
+            payload = json.loads(http_get_text(TREE_URL, timeout=15))
+            items = _items_from_entries(payload.get("tree"))
+            if items:
+                return items
+            errors.append("GitHub 目录为空")
+        except Exception as error:  # noqa: BLE001 - 两个源都失败才报错
+            errors.append(f"GitHub：{error}")
+
+        raise RuntimeError("；".join(errors) or "目录为空")
 
     # ── 查询 ────────────────────────────────────────────
 

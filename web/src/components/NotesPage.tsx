@@ -764,6 +764,11 @@ export function NotesPage({ onNav, onOpenPaper }: Props) {
                 目录暂时不可用：{overview?.status.error || '请检查网络'}
               </div>
             )}
+            {state === 'ready' && overview?.status.error && (
+              <div className="notes-state notes-state-error">
+                目录更新失败，正在使用上次缓存：{overview.status.error}
+              </div>
+            )}
             {overviewError && (
               <div className="notes-state notes-state-error">目录加载失败：{overviewError}</div>
             )}

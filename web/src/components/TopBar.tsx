@@ -162,6 +162,7 @@ export function TopBar({
 
   /** 双栏专用：把译文 PDF 另存到用户选择的位置；取消保存不算失败。 */
   const handleDownloadTranslated = async () => {
+    closeDownloadMenu()
     if (!translatedPdfUrl || busy) return
     setBusy('translated')
     try {
@@ -358,14 +359,33 @@ export function TopBar({
         <details className="topbar-download" ref={downloadRef}>
           <summary
             className="icon-btn"
-            title={canShowPdf ? '下载原版 PDF / 导出 Markdown' : '导出 Markdown'}
+            title={
+              dualMode && translatedPdfReady && translatedPdfUrl
+                ? '下载（原版 PDF / 译文 PDF / Markdown）'
+                : canShowPdf
+                  ? '下载（原版 PDF / Markdown）'
+                  : '导出 Markdown'
+            }
           >
-            {busy === 'download' ? <i className="spin-dot" /> : <IconDownload />}
+            {busy === 'download' || busy === 'translated' ? (
+              <i className="spin-dot" />
+            ) : (
+              <IconDownload />
+            )}
           </summary>
           <div className="topbar-download-menu">
             {canShowPdf && (
               <button type="button" onClick={handleDownload} disabled={busy !== null}>
                 下载原版 PDF
+              </button>
+            )}
+            {dualMode && translatedPdfReady && translatedPdfUrl && (
+              <button
+                type="button"
+                onClick={handleDownloadTranslated}
+                disabled={busy !== null}
+              >
+                下载译文 PDF
               </button>
             )}
             <button
@@ -411,17 +431,7 @@ export function TopBar({
                 联动
               </button>
             )}
-            {translatedPdfReady && translatedPdfUrl && (
-              <button
-                type="button"
-                className="icon-btn topbar-translated-download"
-                title="下载译文 PDF（选择保存位置）"
-                disabled={busy !== null}
-                onClick={handleDownloadTranslated}
-              >
-                {busy === 'translated' ? <i className="spin-dot" /> : <IconDownload />}
-              </button>
-            )}
+
           </div>
         )}
 

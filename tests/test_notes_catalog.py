@@ -309,3 +309,67 @@ def test_catalog_ensure_starts_background_build(tmp_path: Path, monkeypatch) -> 
         time.sleep(0.01)
     assert started == ["refresh"]
     assert catalog.status()["state"] == "ready"
+
+def test_catalog_prefers_local_mirror_without_network(tmp_path, monkeypatch) -> None:
+    """目录优先扫本地镜像：国内用户刷新不再依赖 GitHub/Gitee 在线请求。"""
+    folder = tmp_path / "notes-mirror" / "docs" / "CVPR2026" / "llm_reasoning"
+    folder.mkdir(parents=True)
+    (folder / "local_note.md").write_text("# note", encoding="utf-8")
+    (folder / "index.md").write_text("# index", encoding="utf-8")
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("本地镜像可用时不应联网")
+
+    monkeypatch.setattr("server.notes_catalog.http_get_text", no_network)
+    catalog = NotesCatalog(tmp_path)
+
+    items = catalog._fetch()
+
+    assert [item["path"] for item in items] == [
+        "docs/CVPR2026/llm_reasoning/local_note.md"
+    ]
+
+
+def test_catalog_keeps_cache_when_refresh_fails(tmp_path, monkeypatch) -> None:
+    """刷新失败时保留旧目录可用，只记错误，不把界面固定在 5%。"""
+    catalog = NotesCatalog(tmp_path)
+    catalog._items = [
+        {
+            "path": "docs/CVPR2026/llm_reasoning/kept.md",
+            "conference": "CVPR2026",
+            "field": "llm_reasoning",
+            "slug": "kept",
+            "title": "Kept",
+        }
+    ]
+    catalog._state = "ready"
+    catalog._phase = "ready"
+    catalog._percent = 100
+    catalog._updated_at = 0
+    monkeypatch.setattr(
+        catalog,
+        "_fetch",
+        lambda: (_ for _ in ()).throw(RuntimeError("网络不可用")),
+    )
+
+    catalog._refresh()
+
+    status = catalog.status()
+    assert status["state"] == "ready"
+    assert status["phase"] == "ready"
+    assert status["percent"] == 100
+    assert "网络不可用" in status["error"]
+    assert [item["slug"] for item in catalog._items] == ["kept"]
+
+
+def test_catalog_ensure_backs_off_after_refresh_attempt(tmp_path, monkeypatch) -> None:
+    """刷新刚失败过时不再自动重试，避免前端 1.5s 轮询反复拉起下载。"""
+    catalog = NotesCatalog(tmp_path)
+    calls: list[int] = []
+    monkeypatch.setattr(catalog, "refresh_async", lambda: calls.append(1))
+    catalog._last_attempt_at = time.time()
+
+    status = catalog.ensure()
+
+    assert calls == []
+    assert status["state"] == "idle"
