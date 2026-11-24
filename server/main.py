@@ -451,6 +451,9 @@ app.add_middleware(
     allow_origin_regex=r"^(chrome-extension|moz-extension)://[A-Za-z0-9_-]+$",
     allow_methods=["*"],
     allow_headers=["*"],
+    # 翻译任务的 409 用该头区分「引擎未就绪」与普通参数错误，
+    # 跨源（vite dev）下必须显式暴露，否则前端只能拿到一句文案。
+    expose_headers=["X-Translation-Code"],
     # Chrome 对「扩展/网页 → 127.0.0.1」会先发私有网络预检，
     # 不放行的话浏览器直接报 Failed to fetch。
     allow_private_network=True,

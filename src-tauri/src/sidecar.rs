@@ -108,7 +108,8 @@ impl Sidecar {
                 sidecar.stop();
                 return Err(format!("sidecar 启动超时：{last_error}"));
             }
-            std::thread::sleep(Duration::from_millis(200));
+            // 50ms 一探：启动耗时主要在 Python 侧，别把就绪检测再拖长。
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 

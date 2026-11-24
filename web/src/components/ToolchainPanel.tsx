@@ -25,6 +25,15 @@ interface ToolchainStatus {
   }
   engines: { name: string; path: string; version: string }[]
   bibtex: ToolInfo
+  /** 全局翻译引擎（BabelDOC）：独立于 PDF 导出链，需单独下载 */
+  engineDownload?: {
+    status: 'idle' | 'running' | 'done' | 'error'
+    percent: number
+    error: string
+    installed: boolean
+    ready: boolean
+    version: string
+  }
   installer: { winget: boolean; package: string }
   ready: boolean
   missing: string[]
@@ -88,6 +97,7 @@ export function ToolchainPanel() {
   const [copied, setCopied] = useState(false)
   const [startingPandoc, setStartingPandoc] = useState(false)
   const [startingNode, setStartingNode] = useState(false)
+  const [startingEngine, setStartingEngine] = useState(false)
 
   const load = useCallback(async (silent = false, refresh = false) => {
     if (!silent) setLoading(true)
@@ -111,11 +121,14 @@ export function ToolchainPanel() {
   // 下载完自动变成“已就绪”。
   const pandocState = status?.pandocDownload?.status
   const nodeState = status?.nodeDownload?.status
+  const engineState = status?.engineDownload?.status
   useEffect(() => {
-    if (pandocState !== 'running' && nodeState !== 'running') return
+    if (pandocState !== 'running' && nodeState !== 'running' && engineState !== 'running') {
+      return
+    }
     const timer = window.setInterval(() => void load(true), 2000)
     return () => window.clearInterval(timer)
-  }, [pandocState, nodeState, load])
+  }, [pandocState, nodeState, engineState, load])
 
   // 安装是后台任务：轮询到结束再重新检测一次，用户能看到引擎从“未检测到”变成“已就绪”。
   useEffect(() => {
@@ -198,12 +211,32 @@ export function ToolchainPanel() {
     }
   }
 
+  const startEngine = async () => {
+    setStartingEngine(true)
+    setError('')
+    try {
+      const res = await fetch('/api/toolchain/engine', { method: 'POST' })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`)
+      await load(true)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '下载翻译引擎失败')
+    } finally {
+      setStartingEngine(false)
+    }
+  }
+
   const engine = status?.engines[0]
   const installing = job?.status === 'running' || starting
   const download = status?.pandocDownload
   const downloading = download?.status === 'running'
   const nodeDownload = status?.nodeDownload
   const nodeDownloading = nodeDownload?.status === 'running'
+  const engineDownload = status?.engineDownload
+  // 翻译入口只看「有可用引擎」（installed）；ready 表示当前期望版本已升级到位，
+  // 旧版本在时翻译照样能跑，不该在设置页误报「未就绪」。
+  const engineReady = Boolean(engineDownload?.installed || engineDownload?.ready)
+  const engineDownloading = engineDownload?.status === 'running'
 
   return (
     <div className="modal-body toolchain-panel">
@@ -211,8 +244,8 @@ export function ToolchainPanel() {
         <div>
           <h3>写作工具</h3>
           <p>
-            首次启动会自动下载 pandoc（约 24MB）与公式引擎组件（约 32MB），
-            只需一次，之后离线可用。
+            首次启动会自动下载 pandoc（约 24MB）、公式引擎组件（约 32MB）与
+            全局翻译引擎（约 218MB），只需一次，之后离线可用。
             <br />
             导出 PDF 还需要本机的 LaTeX 引擎，可以在下面一键安装。
           </p>
@@ -255,6 +288,20 @@ export function ToolchainPanel() {
             status?.nodeDownload?.installed
               ? `node ${status.nodeDownload.version}`
               : ''
+          }
+        />
+        <ToolRow
+          name="全局翻译引擎"
+          hint="BabelDOC 整篇翻译（独立组件，约 218MB）"
+          ok={engineReady}
+          detail={
+            engineReady
+              ? engineDownload?.ready
+                ? `v${engineDownload?.version ?? ''}`
+                : '已安装'
+              : engineDownloading
+                ? `下载中 ${engineDownload?.percent ?? 0}%`
+                : ''
           }
         />
       </div>
@@ -310,6 +357,48 @@ export function ToolchainPanel() {
                   : nodeDownload?.status === 'error'
                     ? '重试下载公式引擎'
                     : '下载公式引擎'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {status && !engineReady && (
+        <div className="toolchain-install">
+          <p>
+            {engineDownloading
+              ? `全局翻译引擎正在后台下载（${engineDownload?.percent ?? 0}%），完成后「译文 / 对照」会自动开始翻译。`
+              : engineDownload?.status === 'error'
+                ? `全局翻译引擎下载失败：${engineDownload?.error || '网络不可用'}`
+                : '整篇翻译需要首次联网下载 BabelDOC 引擎（约 218MB），之后离线可用。'}
+          </p>
+          {engineDownloading && (
+            <div className="storage-progress">
+              <div className="storage-progress-track">
+                <span
+                  className="storage-progress-fill"
+                  style={{ width: `${Math.max(2, engineDownload?.percent ?? 0)}%` }}
+                />
+              </div>
+              <div className="storage-progress-meta">
+                <span>正在下载翻译引擎</span>
+                <span>{engineDownload?.percent ?? 0}%</span>
+              </div>
+            </div>
+          )}
+          <div className="toolchain-actions">
+            <button
+              className="btn primary"
+              onClick={() => void startEngine()}
+              disabled={engineDownloading || startingEngine}
+            >
+              <IconDownload />
+              {engineDownloading
+                ? `正在下载 ${engineDownload?.percent ?? 0}%`
+                : startingEngine
+                  ? '正在启动…'
+                  : engineDownload?.status === 'error'
+                    ? '重试下载翻译引擎'
+                    : '下载翻译引擎'}
             </button>
           </div>
         </div>

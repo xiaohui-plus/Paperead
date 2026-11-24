@@ -31,6 +31,7 @@ import {
   BrainCircuit,
   CalendarDays,
   Camera,
+  CircleArrowUp,
   CodeXml,
   Cuboid,
   Hash,
@@ -473,6 +474,8 @@ export const IconBookOpenText = lucideIcon(BookOpenText)
 export const IconLightbulb = lucideIcon(Lightbulb)
 /** 模型设置 */
 export const IconSettings2 = lucideIcon(Settings2)
+/** 侧栏：新版本已下载，可直接安装 */
+export const IconUpdate = lucideIcon(CircleArrowUp)
 /** 全文翻译：进入双栏对照 */
 export const IconTranslateAll = lucideIcon(Languages)
 /** 需要配置模型 */

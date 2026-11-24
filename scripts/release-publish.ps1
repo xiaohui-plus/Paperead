@@ -11,7 +11,10 @@ param(
     [string]$GiteeRepo = "deng_xiaohui/paperead",
     [string]$Notes = "",
     [switch]$SkipGithub,
-    [switch]$SkipGitee
+    [switch]$SkipGitee,
+    # 依赖（引擎/node/pandoc）已迁到独立仓库时跳过主仓库上传，释放配额。
+    # 迁移期先保持 false：新依赖仓库发布完成后再用它，避免旧客户端断供。
+    [switch]$SkipDeps
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,20 +32,25 @@ $latestJson   = Join-Path $root "release\latest.json"
 $androidJson  = Join-Path $root "release\android.json"
 $sums         = Join-Path $root "release\SHA256SUMS.txt"
 
-# 首启后台下载的运行时与引擎都跟 App 版本解耦，清单/分卷只挂 latest 固定发行版：
+# 首启后台下载的运行时与引擎都跟 App 版本解耦：
 # - BabelDOC 引擎（server/babeldoc_setup.py）
 # - node 运行时（server/node_setup.py，MathJax 完整引擎依赖）
 # - pandoc（server/research/pandoc_setup.py）
+# 已迁到独立依赖仓库（scripts/publish-deps.ps1）时用 -SkipDeps 跳过上传；
+# 迁移期默认仍挂到主仓库 latest 固定发行版，避免已装旧版客户端断供。
 # 没有构建对应产物时自动跳过。
-$engineFiles = @(
-    Get-ChildItem (Join-Path $root "release") -File -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.Name -match '^babeldoc-engine-.*\.json$' -or
-            $_.Name -match '^babeldoc-engine-.*\.zip\.part\d+$' -or
-            $_.Name -match '^node-.*-lite\.zip$' -or
-            $_.Name -match '^pandoc-.*-windows-x86_64\.zip$'
-        }
-)
+$engineFiles = @()
+if (-not $SkipDeps) {
+    $engineFiles = @(
+        Get-ChildItem (Join-Path $root "release") -File -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.Name -match '^babeldoc-engine-.*\.json$' -or
+                $_.Name -match '^babeldoc-engine-.*\.zip\.part\d+$' -or
+                $_.Name -match '^node-.*-lite\.zip$' -or
+                $_.Name -match '^pandoc-.*-windows-x86_64\.zip$'
+            }
+    )
+}
 
 # ---------- 前置检查 ----------
 $missing = @()

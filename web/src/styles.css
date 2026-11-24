@@ -2075,7 +2075,8 @@ html[data-sidebar='collapsed'] .library {
 .library-side[data-collapsed='true'] .library-nav-item span,
 .library-side[data-collapsed='true'] .library-nav-item em,
 .library-side[data-collapsed='true'] .library-folders,
-.library-side[data-collapsed='true'] .library-settings span {
+.library-side[data-collapsed='true'] .library-settings span,
+.library-side[data-collapsed='true'] .library-update span {
   display: none;
 }
 
@@ -2100,6 +2101,11 @@ html[data-sidebar='collapsed'] .library {
 }
 
 .library-side[data-collapsed='true'] .library-settings {
+  justify-content: center;
+  padding: 10px 0;
+}
+
+.library-side[data-collapsed='true'] .library-update {
   justify-content: center;
   padding: 10px 0;
 }
@@ -2382,6 +2388,31 @@ html[data-sidebar='collapsed'] .library {
   font-size: 13.5px;
   color: var(--muted);
   border: 1px solid transparent;
+}
+
+/* 新版本已下载完成：入口放在设置图标上方，点击直接安装，不再等下载。 */
+.library-update {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 11px;
+  border-radius: 8px;
+  font-size: 13.5px;
+  color: var(--blue);
+  border: 1px solid var(--blue-line);
+  background: var(--bg-soft);
+  margin-top: auto;
+  margin-bottom: 2px;
+  flex-shrink: 0;
+}
+
+.library-update:hover {
+  background: var(--bg-hover);
+}
+
+.library-update:disabled {
+  cursor: default;
+  opacity: 0.7;
 }
 
 .library-side-body {
@@ -7263,7 +7294,7 @@ html[data-sidebar='collapsed'] .library {
   }
 
   .library-settings {
-    order: 2;
+    order: 3;
     flex: none;
     margin: 0;
     padding: 11px;
@@ -7271,6 +7302,19 @@ html[data-sidebar='collapsed'] .library {
   }
 
   .library-settings svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .library-update {
+    order: 2;
+    flex: none;
+    margin: 0;
+    padding: 11px;
+    font-size: 0;
+  }
+
+  .library-update svg {
     width: 18px;
     height: 18px;
   }
@@ -7610,6 +7654,99 @@ html[data-sidebar='collapsed'] .library {
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* 全局翻译引擎下载弹窗 */
+.engine-dialog-mask {
+  z-index: 120;
+}
+
+.engine-dialog {
+  width: min(440px, 100%);
+}
+
+.engine-dialog-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.engine-dialog-icon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 9px;
+  background: var(--blue-soft);
+  color: var(--blue-ink);
+}
+
+.engine-dialog-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.engine-dialog-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.engine-dialog-title h2 {
+  margin: 0 0 4px;
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.engine-dialog-title p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.engine-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 18px;
+}
+
+.engine-dialog-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.engine-dialog-failed {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid #f3d3cf;
+  border-radius: var(--radius-sm);
+  background: #fff6f5;
+}
+
+.engine-dialog-failed p {
+  margin: 0;
+  color: #a1372b;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.engine-dialog-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 18px 14px;
+  color: var(--faint);
+  font-size: 11.5px;
 }
 
 /* 设置 · 论文模板 */
@@ -15313,11 +15450,16 @@ button.reward-tile {
     margin-top: 0;
   }
 
+  .library-update {
+    margin-top: 0;
+  }
+
   .library-side[data-collapsed='true'] .brand-name,
   .library-side[data-collapsed='true'] .library-nav-item span,
   .library-side[data-collapsed='true'] .library-nav-item em,
   .library-side[data-collapsed='true'] .library-folders,
-  .library-side[data-collapsed='true'] .library-settings span {
+  .library-side[data-collapsed='true'] .library-settings span,
+  .library-side[data-collapsed='true'] .library-update span {
     display: revert;
   }
 
@@ -15334,6 +15476,11 @@ button.reward-tile {
   }
 
   .library-side[data-collapsed='true'] .library-settings {
+    justify-content: flex-start;
+    padding: 10px 11px;
+  }
+
+  .library-side[data-collapsed='true'] .library-update {
     justify-content: flex-start;
     padding: 10px 11px;
   }

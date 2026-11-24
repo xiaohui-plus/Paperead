@@ -73,10 +73,8 @@ def _ready() -> bool:
     return babeldoc_engine.launcher(install_dir()) is not None
 
 
-def _manifest_sources() -> list[str]:
-    override = os.environ.get("PAPEREAD_BABELDOC_ENGINE_URL", "").strip()
-    if override:
-        return [override]
+def _legacy_manifest_urls() -> list[str]:
+    """改造前的地址：依赖仓库未配置或尚未发布时兜底。"""
     from paperead import __version__
 
     return [
@@ -87,10 +85,46 @@ def _manifest_sources() -> list[str]:
     ]
 
 
+def _manifest_sources() -> list[str]:
+    override = os.environ.get("PAPEREAD_BABELDOC_ENGINE_URL", "").strip()
+    if override:
+        return [override]
+    from server import deps_source
+
+    return deps_source.release_urls(MANIFEST_NAME, extra=_legacy_manifest_urls())
+
+
+def _download_bases(primary: str) -> list[str]:
+    """分卷下载的候选目录（按优先级）。
+
+    清单与分卷可能来自不同渠道：依赖仓库正常时优先用它，迁移期或依赖仓库
+    尚未发布时回落到主仓库的旧目录。同一份清单（版本 + SHA-256 校验）允许
+    跨源组合分卷，所以主源 404 时自动换下一个。
+    """
+    # 显式指定清单地址（内网/测试）时，分卷只认该源的目录，不回落公网。
+    if os.environ.get("PAPEREAD_BABELDOC_ENGINE_URL", "").strip():
+        return [primary]
+
+    from paperead import __version__
+    from server import deps_source
+
+    legacy = [
+        f"https://gitee.com/deng_xiaohui/paperead/releases/download/v{__version__}",
+        "https://gitee.com/deng_xiaohui/paperead/releases/download/latest",
+        "https://ghproxy.net/https://github.com/xiaohui-plus/Paperead/releases/latest/download",
+        "https://github.com/xiaohui-plus/Paperead/releases/latest/download",
+    ]
+    return deps_source.merged_bases(primary, extra=legacy)
+
+
 def status() -> dict[str, Any]:
     with _LOCK:
         data = dict(_STATE)
+    # ``installed`` 表示「任意版本可用」（开发态 rev/旧版本也算），翻译入口按它
+    # 判断能否开跑；``ready`` 才是「当前 App 期望的引擎版本已就位」，用于决定
+    # 启动时是否需要补下载新版本。两者分开，旧引擎目录存在时不会误报升级完成。
     data["installed"] = installed()
+    data["ready"] = _ready()
     data["version"] = ENGINE_VERSION
     data["home"] = str(babeldoc_engine.engine_home() or install_dir())
     return data
@@ -104,15 +138,31 @@ def _set(**fields: Any) -> None:
 def _fetch_json(url: str, timeout: int = 30) -> dict[str, Any]:
     request = urllib.request.Request(url, headers={"User-Agent": "paperead"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        raw = response.read()
+    if "html" in content_type:
+        # Gitee 空仓库 / 尚未发布发行版时，附件地址会 302 到仓库首页；
+        # 不识别的话只会报 JSON 解析失败，看不出真实原因。
+        raise ValueError("下载源返回网页而不是清单（依赖仓库为空或发行版未发布）")
+    payload = json.loads(raw.decode("utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("清单格式不正确")
+    message = str(payload.get("message") or "").strip()
+    if message and not payload.get("version"):
+        # Gitee 空仓库 / 不存在的附件也可能返回 200 + {"message": "..."}。
+        raise ValueError(f"下载源返回错误：{message}")
     return payload
 
 
 def _download(url: str, dest: Path, on_bytes) -> None:
     request = urllib.request.Request(url, headers={"User-Agent": "paperead"})
     with urllib.request.urlopen(request, timeout=60) as response:
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        if content_type.startswith("application/json"):
+            detail = response.read(400).decode("utf-8", errors="replace")
+            raise ValueError(f"下载源返回错误：{detail.strip()}")
+        if "html" in content_type:
+            raise ValueError("下载源返回网页而不是文件（依赖仓库为空或附件不存在）")
         with dest.open("wb") as handle:
             while True:
                 block = response.read(CHUNK)
@@ -203,9 +253,24 @@ def _install(manifest: dict[str, Any], base_url: str) -> Path:
         archive = work / ZIP_NAME
         with archive.open("wb") as handle:
             for name in parts:
-                url = f"{base_url}/{urllib.parse.quote(name)}"
                 temp = work / f"{name}.part"
-                _download(url, temp, on_bytes)
+                ok = False
+                last_error: Exception | None = None
+                for base in _download_bases(base_url):
+                    # 失败换源时回滚进度，避免同分卷重复计数把百分比顶满。
+                    mark = downloaded
+                    url = f"{base}/{urllib.parse.quote(name)}"
+                    try:
+                        _download(url, temp, on_bytes)
+                        ok = True
+                        break
+                    except (OSError, ValueError, urllib.error.URLError) as error:
+                        last_error = error
+                        downloaded = mark
+                        temp.unlink(missing_ok=True)
+                        log.warning("分卷 %s 从 %s 下载失败：%s", name, base, error)
+                if not ok:
+                    raise ValueError(f"分卷 {name} 下载失败：{last_error}")
                 with temp.open("rb") as source:
                     shutil.copyfileobj(source, handle, CHUNK)
                 temp.unlink(missing_ok=True)
@@ -258,6 +323,9 @@ def _run() -> None:
             host = urllib.parse.urlparse(manifest_url).netloc or manifest_url
             errors.append(f"{host}: {error}")
             log.warning("BabelDOC 引擎下载失败（%s）：%s", host, error)
+            # 失败后把当前源写进状态：前端能显示「正在切换备用源」，而不是
+            # 一直停在 0% 让人以为卡死。
+            _set(percent=0, error=f"{host}：{error}，正在尝试备用下载源…")
     _set(
         status="error",
         error="；".join(errors)[-800:] or "下载失败",

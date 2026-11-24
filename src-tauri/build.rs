@@ -30,6 +30,8 @@ fn main() {
     let attributes = tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "install_update",
+            "install_prepared_update",
+            "get_update_status",
             "check_desktop_update",
             "restart_app",
             "save_pdf_file",

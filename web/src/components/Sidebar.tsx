@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
+import { useSyncExternalStore, useEffect, useState, type ReactElement, type ReactNode } from 'react'
 import {
   BrandMark,
   IconBook,
@@ -9,8 +9,16 @@ import {
   IconList,
   IconSearch,
   IconSettings,
+  IconUpdate,
 } from './icons'
 import { isMobileShell } from '../lib/mobile'
+import { installUpdateInApp } from '../lib/update'
+import {
+  getUpdateCenterState,
+  markUpdateInstalling,
+  reportUpdateInstallError,
+  subscribeUpdateCenter,
+} from '../lib/updateCenter'
 
 export type NavKey = 'library' | 'notes' | 'search' | 'research' | 'review'
 
@@ -54,6 +62,24 @@ export function Sidebar({
 }: Props) {
   const mobile = isMobileShell()
   const [collapsed, setCollapsed] = useState(() => !mobile && readCollapsed())
+  const update = useSyncExternalStore(
+    subscribeUpdateCenter,
+    getUpdateCenterState,
+    getUpdateCenterState,
+  )
+  const updateReady = update.stage === 'ready' && Boolean(update.version)
+  const updateBusy = update.stage === 'installing' || update.stage === 'launching'
+  const updateVisible = updateReady || updateBusy
+
+  const installPrepared = () => {
+    if (!updateReady || updateBusy) return
+    markUpdateInstalling()
+    void installUpdateInApp().catch((error) => {
+      reportUpdateInstallError(
+        typeof error === 'string' ? error : String((error as any)?.message || ''),
+      )
+    })
+  }
 
   useEffect(() => {
     if (mobile) {
@@ -129,6 +155,19 @@ export function Sidebar({
           </div>
         )}
       </div>
+
+      {updateVisible && (
+        <button
+          className="library-update"
+          title={update.message || `安装新版本 v${update.version}`}
+          aria-label={`安装新版本 v${update.version}`}
+          disabled={updateBusy}
+          onClick={installPrepared}
+        >
+          <IconUpdate />
+          <span>{updateBusy ? '正在安装…' : `更新到 v${update.version}`}</span>
+        </button>
+      )}
 
       <button className="library-settings" data-tour="settings-entry" onClick={onSettings}>
         <IconSettings />

@@ -11,6 +11,7 @@ import { syncVisionConfig } from './lib/settings'
 import { syncResearchModel } from './lib/researchModel'
 import { syncScholarConfig } from './lib/scholarConfig'
 import { autoCheckUpdate, isAndroidApp, isDesktopApp } from './lib/update'
+import { startUpdateCenter } from './lib/updateCenter'
 import { hasMobileServer, installMobileFetch, isMobileShell } from './lib/mobile'
 import {
   pullModelSettings,
@@ -71,6 +72,8 @@ async function boot() {
     // 每天自动检查一次新版本；桌面走 latest.json，安卓走原生 android.json
     void autoCheckUpdate()
   }
+  // 桌面壳在后台下载新版本，这里接住它的状态，供侧栏更新入口使用
+  startUpdateCenter()
 
   createRoot(document.getElementById('root')!).render(
     <React.StrictMode>

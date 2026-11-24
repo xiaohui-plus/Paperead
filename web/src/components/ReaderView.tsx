@@ -16,6 +16,7 @@ import { outlineOf } from '../lib/blocks'
 import { keyPoints } from '../lib/assistant'
 import {
   addAnnotation,
+  ApiError,
   deleteAnnotation,
   extractHighlights,
   fetchTranslationManifest,
@@ -66,6 +67,7 @@ import { LeftPanel, PANEL_TABS, type TabKey } from './LeftPanel'
 import { MobileDock } from './MobileDock'
 import { Reader } from './Reader'
 import { DualReader } from './DualReader'
+import { EngineDownloadDialog } from './EngineDownloadDialog'
 import { TranslationSkeleton } from './TranslationSkeleton'
 import { SettingsDialog } from './SettingsDialog'
 
@@ -156,6 +158,8 @@ export function ReaderView({ paperId, onBack }: Props) {
     text: string
     action?: 'retry' | 'settings' | 'resume'
   } | null>(null)
+  // 整篇翻译引擎未就绪时打开下载弹窗（带进度），下载完成后自动继续翻译
+  const [engineDialogOpen, setEngineDialogOpen] = useState(false)
   const manifestStatus = useMemo(
     () =>
       new Map(
@@ -752,6 +756,12 @@ export function ReaderView({ paperId, onBack }: Props) {
       await pollTranslationJob(job, 0)
     } catch (e) {
       setTranslateStarting(false)
+      // 引擎未就绪不是失败：打开带进度的下载弹窗，装好后自动继续翻译。
+      if (e instanceof ApiError && e.code === 'engine_missing') {
+        setTranslationNotice(null)
+        setEngineDialogOpen(true)
+        return
+      }
       const msg = e instanceof Error ? e.message : String(e)
       setTranslationNotice({
         tone: 'error',
@@ -1929,6 +1939,15 @@ export function ReaderView({ paperId, onBack }: Props) {
         translatedPdfReady={translatedPdfReady}
         translatedPdfUrl={translatedPdfUrl}
         translationLang={targetLang}
+      />
+
+      <EngineDownloadDialog
+        open={engineDialogOpen}
+        onClose={() => setEngineDialogOpen(false)}
+        onReady={() => {
+          setEngineDialogOpen(false)
+          void translateAll('enter')
+        }}
       />
 
       {translationNotice && (

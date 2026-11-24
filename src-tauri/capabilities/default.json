@@ -13,6 +13,8 @@
     "opener:default",
     "allow-check-desktop-update",
     "allow-install-update",
+    "allow-install-prepared-update",
+    "allow-get-update-status",
     "allow-restart-app",
     "allow-save-pdf-file",
     "allow-save-translated-pdf",

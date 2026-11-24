@@ -43,10 +43,29 @@ export interface LLMConfigPayload {
   model: string
 }
 
+/** 带状态码与业务 code 的接口错误；翻译入口靠 code 区分「引擎未就绪」。 */
+export class ApiError extends Error {
+  status: number
+  code: string
+
+  constructor(message: string, status: number, code = '') {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = code
+  }
+}
+
 async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init)
   const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error((data as any).detail || `HTTP ${res.status}`)
+  if (!res.ok) {
+    throw new ApiError(
+      (data as any).detail || `HTTP ${res.status}`,
+      res.status,
+      res.headers.get('X-Translation-Code') || '',
+    )
+  }
   return data as T
 }
 
@@ -1340,6 +1359,30 @@ export async function extractHighlights(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ config, pages }),
   })
+}
+
+export interface EngineDownloadStatus {
+  status: 'idle' | 'running' | 'done' | 'error'
+  percent: number
+  error: string
+  /** 任意版本可用（含开发态/旧版本） */
+  installed: boolean
+  /** 当前 App 期望的引擎版本已就位 */
+  ready: boolean
+  version: string
+  home: string
+  startedAt: number
+  finishedAt: number
+}
+
+/** 全局翻译引擎（BabelDOC）的安装状态与实时下载进度。 */
+export async function getEngineStatus(): Promise<EngineDownloadStatus> {
+  return jsonFetch('/api/toolchain/engine')
+}
+
+/** 开始或重试后台下载翻译引擎。 */
+export async function startEngineDownload(): Promise<EngineDownloadStatus> {
+  return jsonFetch('/api/toolchain/engine', { method: 'POST' })
 }
 
 /** 后端不可用时的示例条目。 */

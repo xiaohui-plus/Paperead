@@ -92,11 +92,49 @@ def test_install_rejects_bad_checksum(tmp_path: Path, monkeypatch: pytest.Monkey
     assert not babeldoc_setup.install_dir().exists()
 
 
+def test_install_falls_back_to_secondary_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """主源只上传了清单、分卷不全时，同一份清单可跨源拼出完整压缩包。
+
+    真实场景：Gitee 固定 latest 发行版漏传 part001/002，旧逻辑整轮必然失败。
+    """
+    data = _fake_zip()
+    release, manifest = _release(tmp_path, data)
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    first = manifest["parts"][0]
+    (release / first).rename(backup / first)
+    monkeypatch.setenv("PAPEREAD_DATA", str(tmp_path / "data"))
+    monkeypatch.setattr(
+        babeldoc_setup,
+        "_download_bases",
+        lambda primary: [primary, backup.as_uri()],
+    )
+
+    target = babeldoc_setup._install(manifest, release.as_uri())
+
+    assert (target / "run_babeldoc.py").is_file()
+    # 装到当前期望版本目录后 ready 才算真就绪
+    assert babeldoc_setup.status()["ready"] is True
+
+
 def test_safe_names_reject_traversal() -> None:
     with pytest.raises(ValueError):
         babeldoc_setup._safe_names("parts", ["../evil.zip"])
     with pytest.raises(ValueError):
         babeldoc_setup._safe_names("parts", [])
+
+
+def test_fetch_json_reports_gitee_empty_repo_message(tmp_path: Path) -> None:
+    """Gitee 空仓库返回 200 + message；要报真实原因，而不是「清单版本号非法」。"""
+    payload = tmp_path / "empty.json"
+    payload.write_text(
+        '{"message":"空仓库不允许进行的操作","status":200}', encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="空仓库"):
+        babeldoc_setup._fetch_json(payload.as_uri())
 
 
 def test_auto_download_is_skipped_in_mock(monkeypatch: pytest.MonkeyPatch) -> None:

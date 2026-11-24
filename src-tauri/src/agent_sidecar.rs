@@ -144,7 +144,8 @@ impl AgentSidecar {
                     log_path.display()
                 ));
             }
-            std::thread::sleep(Duration::from_millis(250));
+            // 100ms 一探：agent 已在后台，缩短探测间隔让它更早可用。
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
 

@@ -21,7 +21,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from server import node_setup
+from server import babeldoc_setup, node_setup
 from server.research import pandoc_setup
 from server.research.latex import find_winget, toolchain_status
 from server.winproc import popen_hidden
@@ -170,7 +170,24 @@ def status(refresh: bool = Query(False)) -> dict[str, Any]:
         },
         "pandocDownload": download,
         "nodeDownload": node_setup.status(),
+        "engineDownload": babeldoc_setup.status(),
     }
+
+
+@router.get("/engine")
+def engine_status() -> dict[str, Any]:
+    """全局翻译引擎（BabelDOC）的安装状态与实时下载进度。
+
+    与 PDF 导出链的 pandoc / TeX 检测分开暴露：翻译引擎是独立组件，
+    未就绪时点「译文/对照」需要弹进度窗口，而不是只给一句报错。
+    """
+    return babeldoc_setup.status()
+
+
+@router.post("/engine")
+def engine_start() -> dict[str, Any]:
+    """开始（或重试）后台下载翻译引擎；已就绪或正在下载时直接回状态。"""
+    return babeldoc_setup.start()
 
 
 @router.post("/pandoc")

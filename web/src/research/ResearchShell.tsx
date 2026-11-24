@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Sidebar, type NavKey } from '../components/Sidebar'
 import { SettingsDialog } from '../components/SettingsDialog'
@@ -50,6 +50,13 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : '项目加载失败'
 }
 
+/** sidecar 先起、研究 agent 在窗口打开后后台启动：这段时间研究接口是 503。 */
+function isAgentStarting(message: string): boolean {
+  return (
+    message.includes('研究 agent 尚未启动') || message.includes('研究 agent 不可用')
+  )
+}
+
 /** 研究与写综述共用的页面外壳：全局侧栏 + 本功能的项目分区。 */
 export function ResearchShell({
   kind,
@@ -66,21 +73,56 @@ export function ResearchShell({
   const [starting, setStarting] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
 
-  const load = useCallback(async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      setProjects(await researchApi.listProjects(kind))
-    } catch (loadError) {
-      setError(errorText(loadError))
-    } finally {
-      setLoading(false)
-    }
-  }, [kind])
+  const retryTimer = useRef<number | undefined>(undefined)
+  const agentRetry = useRef(0)
+  const loadRef = useRef<(options?: { silent?: boolean }) => Promise<void>>(
+    async () => {},
+  )
+
+  const load = useCallback(
+    async (options?: { silent?: boolean }) => {
+      const silent = options?.silent === true
+      if (retryTimer.current !== undefined) {
+        window.clearTimeout(retryTimer.current)
+        retryTimer.current = undefined
+      }
+      if (!silent) {
+        setLoading(true)
+        setError(null)
+      }
+      try {
+        setProjects(await researchApi.listProjects(kind))
+        setError(null)
+        agentRetry.current = 0
+      } catch (loadError) {
+        const message = errorText(loadError)
+        setError(message)
+        // agent 还在后台启动时自动退避补拉，用户不必手动点「重试」。
+        if (isAgentStarting(message) && agentRetry.current < 4) {
+          const delay = 1000 * 2 ** agentRetry.current
+          agentRetry.current += 1
+          retryTimer.current = window.setTimeout(() => {
+            void loadRef.current({ silent: true })
+          }, delay)
+        }
+      } finally {
+        if (!silent) setLoading(false)
+      }
+    },
+    [kind],
+  )
+  loadRef.current = load
 
   useEffect(() => {
     void load()
   }, [load])
+
+  useEffect(
+    () => () => {
+      if (retryTimer.current !== undefined) window.clearTimeout(retryTimer.current)
+    },
+    [],
+  )
 
   useEffect(() => {
     if (kind === 'research') tourBus.emit('research:opened')

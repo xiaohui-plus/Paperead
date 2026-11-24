@@ -49,6 +49,8 @@ export interface UpdateProgress {
   stage:
     | 'checking'
     | 'downloading'
+    /** 后台已把安装包下载完，只差点击安装 */
+    | 'ready'
     | 'installing'
     | 'launching'
     | 'up-to-date'
@@ -300,6 +302,15 @@ export async function installUpdateInApp(
     onProgress?.(progress)
   })
   try {
+    // 后台已经把安装包下好了：直接启动安装器，省掉点击后的下载等待。
+    try {
+      const version = await invoke('install_prepared_update')
+      return String(version ?? '') || launchedVersion
+    } catch (error) {
+      // 只有「还没准备好」才回退到完整更新流程；真正的安装失败要如实抛出。
+      const message = typeof error === 'string' ? error : String((error as any)?.message || '')
+      if (message !== 'not-ready') throw error
+    }
     const version = await invoke('install_update')
     return String(version ?? '') || launchedVersion
   } catch (error) {

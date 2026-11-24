@@ -26,6 +26,8 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+from server import deps_source
+
 log = logging.getLogger("paperead.node")
 
 NODE_VERSION = "24.11.1"
@@ -63,12 +65,16 @@ def _sources() -> list[str]:
         return [override]
     from paperead import __version__
 
-    return [
-        f"https://gitee.com/deng_xiaohui/paperead/releases/download/latest/{ASSET_NAME}",
-        f"https://gitee.com/deng_xiaohui/paperead/releases/download/v{__version__}/{ASSET_NAME}",
-        f"https://ghproxy.net/https://github.com/xiaohui-plus/Paperead/releases/latest/download/{ASSET_NAME}",
-        f"https://github.com/xiaohui-plus/Paperead/releases/latest/download/{ASSET_NAME}",
-    ]
+    # 依赖仓库优先（固定 tag，不随 App 版本覆盖），主仓库旧地址兜底。
+    return deps_source.release_urls(
+        ASSET_NAME,
+        extra=[
+            f"https://gitee.com/deng_xiaohui/paperead/releases/download/latest/{ASSET_NAME}",
+            f"https://gitee.com/deng_xiaohui/paperead/releases/download/v{__version__}/{ASSET_NAME}",
+            f"https://ghproxy.net/https://github.com/xiaohui-plus/Paperead/releases/latest/download/{ASSET_NAME}",
+            f"https://github.com/xiaohui-plus/Paperead/releases/latest/download/{ASSET_NAME}",
+        ],
+    )
 
 
 def status() -> dict[str, Any]:
@@ -98,6 +104,13 @@ def _sha256(path: Path) -> str:
 def _download(url: str, target: Path) -> None:
     request = urllib.request.Request(url, headers={"User-Agent": "paperead"})
     with urllib.request.urlopen(request, timeout=60) as response:
+        # Gitee 空仓库 / 缺少附件会返回 200 + JSON 错误，或 302 到仓库首页 HTML。
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        if content_type.startswith("application/json"):
+            detail = response.read(400).decode("utf-8", errors="replace")
+            raise ValueError(f"下载源返回错误：{detail.strip()}")
+        if "html" in content_type:
+            raise ValueError("下载源返回网页而不是文件（依赖仓库为空或附件不存在）")
         total = int(response.headers.get("Content-Length") or 0)
         done = 0
         with target.open("wb") as handle:

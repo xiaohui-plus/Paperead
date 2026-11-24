@@ -904,9 +904,7 @@ export function SettingsDialog({
             >
               <IconRefresh />
               <span>常规设置</span>
-              {updateInfo?.has_update && (
-                <i className="settings-nav-dot" title="发现新版本" />
-              )}
+
             </button>
             <button
               className="library-nav-item"

@@ -14,8 +14,8 @@ mod paths;
 #[path = "sidecar.rs"]
 mod sidecar;
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::{Arc, Mutex};
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -28,12 +28,33 @@ use agent_sidecar::AgentSidecar;
 use sidecar::Sidecar;
 
 static TRAY_READY: AtomicBool = AtomicBool::new(false);
+/// 应用开始退出后，后台启动线程不能再把 agent 放进状态（否则句柄没人回收）。
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
-struct AppState {
+struct Backend {
     port: u16,
     token: String,
-    sidecar: Mutex<Option<Sidecar>>,
+    sidecar: Sidecar,
+}
+
+struct AppState {
+    /// sidecar 就绪后才填充：splash 窗口先显示，sidecar 在后台并行启动。
+    backend: Mutex<Option<Backend>>,
     agent: Mutex<Option<AgentSidecar>>,
+}
+
+impl AppState {
+    /// 取本机 sidecar 的端口与令牌；后台启动尚未就绪时返回可展示的提示。
+    fn connection(&self) -> Result<(u16, String), String> {
+        let guard = self
+            .backend
+            .lock()
+            .map_err(|_| "本地服务状态异常，请重启应用".to_string())?;
+        match guard.as_ref() {
+            Some(backend) => Ok((backend.port, backend.token.clone())),
+            None => Err("本地服务正在启动，请稍后再试".into()),
+        }
+    }
 }
 
 pub fn run_desktop() {
@@ -53,6 +74,8 @@ pub fn run_desktop() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             install_update,
+            install_prepared_update,
+            get_update_status,
             check_desktop_update,
             restart_app,
             save_pdf_file,
@@ -75,6 +98,7 @@ pub fn run_desktop() {
             }
         })
         .setup(|app| {
+            let boot_started = std::time::Instant::now();
             let handle = app.handle().clone();
             let data_dir = paths::ensure_data_dir(&handle);
             // Reserve the research-agent endpoint before Python starts so the
@@ -85,49 +109,35 @@ pub fn run_desktop() {
                     paths::log_line(&handle, &format!("reserve agent port failed: {error}"));
                 })
                 .ok();
-            let sidecar = match Sidecar::start(&handle, agent_endpoint.clone()) {
-                Ok(sidecar) => sidecar,
-                Err(error) => {
-                    paths::log_line(&handle, &format!("start failed: {error}"));
-                    handle
-                        .dialog()
-                        .message(&error)
-                        .title("Paperead 启动失败")
-                        .kind(MessageDialogKind::Error)
-                        .blocking_show();
-                    return Err(Box::new(std::io::Error::other(error)));
-                }
-            };
-
-            let port = sidecar.port;
-            let token = sidecar.token.clone();
-
-            let agent = match agent_endpoint {
-                Some((agent_port, agent_token)) => {
-                    match AgentSidecar::start(&handle, port, &token, &data_dir, agent_port, agent_token) {
-                        Ok(agent) => Some(agent),
-                        Err(error) => {
-                            // Research is optional: the library and reader must still open.
-                            paths::log_line(&handle, &format!("agent start failed: {error}"));
-                            None
-                        }
-                    }
-                }
-                None => None,
-            };
-
+            // 先立状态与更新中心，sidecar 就绪后再回填 backend。
             app.manage(AppState {
-                port,
-                token,
-                sidecar: Mutex::new(Some(sidecar)),
-                agent: Mutex::new(agent),
+                backend: Mutex::new(None),
+                agent: Mutex::new(None),
             });
+            // 后台更新中心：先下载新版本，下载完只差一次点击即可安装。
+            app.manage(UpdateCenter::default());
 
+            // 首屏先出极简加载页：WebView2 初始化与 sidecar 启动并行。
+            // 端口在启动时才确定，导航白名单只放行实际端口（先为 0 = 不放行回环）。
+            let sidecar_port = Arc::new(AtomicU16::new(0));
             paths::log_line(&handle, "creating main window");
-            if let Err(error) = create_main_window(app, port, &data_dir) {
+            if let Err(error) = create_main_window(app, &data_dir, sidecar_port.clone()) {
                 paths::log_line(&handle, &format!("create window failed: {error}"));
                 return Err(Box::new(error));
             }
+            paths::log_line(
+                &handle,
+                &format!("splash shown in {}ms", boot_started.elapsed().as_millis()),
+            );
+
+            // sidecar 在后台启动，就绪后切到真实页面并拉起研究 agent。
+            spawn_sidecar(
+                handle.clone(),
+                data_dir.clone(),
+                agent_endpoint,
+                sidecar_port,
+            );
+
             paths::log_line(&handle, "setting up menu");
             if let Err(error) = setup_menu(app) {
                 paths::log_line(&handle, &format!("setup menu failed: {error}"));
@@ -140,8 +150,11 @@ pub fn run_desktop() {
                 TRAY_READY.store(true, Ordering::Relaxed);
             }
 
-            paths::log_line(&handle, "desktop ready");
-            maybe_onboard(&handle, port, &data_dir);
+            paths::log_line(
+                &handle,
+                &format!("desktop ready in {}ms", boot_started.elapsed().as_millis()),
+            );
+
 
             let updater_app = handle.clone();
             tauri::async_runtime::spawn(async move {
@@ -151,11 +164,13 @@ pub fn run_desktop() {
                     .max(30);
                 paths::log_line(
                     &updater_app,
-                    &format!("auto update check enabled, interval={interval}s"),
+                    &format!("auto update download enabled, interval={interval}s"),
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(8)).await;
                 loop {
-                    check_updates(updater_app.clone(), false).await;
+                    // 启动后静默检查并把新版本下到本地：用户在侧栏看到更新图标时
+                    // 安装包已经就绪，点击只差启动安装器这一步。
+                    prepare_update_once(&updater_app).await;
                     tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
                 }
             });
@@ -170,14 +185,84 @@ pub fn run_desktop() {
         });
 }
 
-fn create_main_window(app: &mut tauri::App, port: u16, data_dir: &std::path::Path) -> tauri::Result<()> {
-    let target = format!("http://127.0.0.1:{port}/");
-    let url = Url::parse(&target).expect("valid local url");
-    let allowed = format!("http://127.0.0.1:{port}");
+/// 在后台线程启动研究 agent：窗口已经显示，不再等 node 冷启动与健康轮询结束。
+///
+/// agent 本身仍是 sidecar 之后启动（端口/token 由 sidecar 启动时注入），只是
+/// 不再阻塞建窗。研究页在 agent 未就绪时返回 503，前端会退避重连/重试。
+fn spawn_agent(
+    app: AppHandle,
+    python_port: u16,
+    python_token: String,
+    data_dir: std::path::PathBuf,
+    agent_port: u16,
+    agent_token: String,
+) {
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        match AgentSidecar::start(
+            &app,
+            python_port,
+            &python_token,
+            &data_dir,
+            agent_port,
+            agent_token,
+        ) {
+            Ok(mut agent) => {
+                if SHUTTING_DOWN.load(Ordering::Relaxed) {
+                    agent.stop();
+                    return;
+                }
+                // 用 Option 承接：没被状态接管时就还在这里，可以主动 stop。
+                let mut pending = Some(agent);
+                let mut stored = false;
+                if let Some(state) = app.try_state::<AppState>() {
+                    if let Ok(mut guard) = state.agent.lock() {
+                        // 退出流程可能刚把状态置空并开始 stop：再确认一次。
+                        if !SHUTTING_DOWN.load(Ordering::Relaxed) {
+                            *guard = pending.take();
+                            stored = true;
+                        }
+                    }
+                }
+                if let Some(mut leftover) = pending {
+                    // 没接管句柄时必须主动结束，避免留下孤儿 node 进程。
+                    leftover.stop();
+                    return;
+                }
+                if stored {
+                    paths::log_line(
+                        &app,
+                        &format!(
+                            "agent ready in {}ms (background, window already shown)",
+                            started.elapsed().as_millis()
+                        ),
+                    );
+                }
+            }
+            Err(error) => {
+                // Research is optional: the library and reader must still work.
+                paths::log_line(
+                    &app,
+                    &format!(
+                        "agent start failed after {}ms: {error}",
+                        started.elapsed().as_millis()
+                    ),
+                );
+            }
+        }
+    });
+}
+
+/// 首屏窗口：先加载内置极简加载页，sidecar 就绪后由 `spawn_sidecar` 切到真实页面。
+fn create_main_window(
+    app: &mut tauri::App,
+    data_dir: &std::path::Path,
+    sidecar_port: Arc<AtomicU16>,
+) -> tauri::Result<()> {
     let webview_dir = data_dir.join("webview2");
     let _ = std::fs::create_dir_all(&webview_dir);
 
-    let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+    let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("splash.html".into()))
         .title("Paperead")
         .inner_size(1280.0, 860.0)
         // 分屏贴边时要能继续拉窄：过高的最小宽度会让 Windows 分屏卡在 1000px 以上。
@@ -188,7 +273,8 @@ fn create_main_window(app: &mut tauri::App, port: u16, data_dir: &std::path::Pat
         .drag_and_drop(true)
         .center()
         .on_navigation(move |url| {
-            if url.as_str().starts_with(&allowed) {
+            // 加载页走 Tauri 资源协议；真实页面与 ?p= 跳转走本机 sidecar 实际端口。
+            if is_local_app_url(url, sidecar_port.load(Ordering::Relaxed)) {
                 return true;
             }
             if url.scheme() == "http" || url.scheme() == "https" {
@@ -201,6 +287,120 @@ fn create_main_window(app: &mut tauri::App, port: u16, data_dir: &std::path::Pat
     window.show()?;
     window.set_focus()?;
     Ok(())
+}
+
+/// 是否属于应用自己的页面：Tauri 资源协议，或本机回环地址上当前 sidecar 端口。
+fn is_local_app_url(url: &Url, port: u16) -> bool {
+    if url.scheme() == "tauri" {
+        return true;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    // Windows 上 Tauri 资源页是 http://tauri.localhost/。
+    if host == "tauri.localhost" {
+        return true;
+    }
+    // 端口在 sidecar 就绪前是 0：加载页阶段不放行任何回环页。
+    port != 0
+        && url.port() == Some(port)
+        && (host == "127.0.0.1" || host == "localhost")
+}
+
+/// 后台启动 sidecar：加载页已经显示，就绪后切到真实页面，再拉起研究 agent。
+fn spawn_sidecar(
+    app: AppHandle,
+    data_dir: std::path::PathBuf,
+    agent_endpoint: Option<(u16, String)>,
+    sidecar_port: Arc<AtomicU16>,
+) {
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let sidecar = match Sidecar::start(&app, agent_endpoint.clone()) {
+            Ok(sidecar) => sidecar,
+            Err(error) => {
+                paths::log_line(&app, &format!("start failed: {error}"));
+                let dialog_app = app.clone();
+                let message = error;
+                let _ = app.run_on_main_thread(move || {
+                    dialog_app
+                        .dialog()
+                        .message(&message)
+                        .title("Paperead 启动失败")
+                        .kind(MessageDialogKind::Error)
+                        .blocking_show();
+                    dialog_app.exit(1);
+                });
+                return;
+            }
+        };
+
+        let port = sidecar.port;
+        let token = sidecar.token.clone();
+        // 先放开导航白名单，再切页面：navigate 会同步走 on_navigation。
+        sidecar_port.store(port, Ordering::Relaxed);
+
+        // 先占住句柄再切页面：切页后前端会立刻打 /api。
+        let mut pending = Some(sidecar);
+        let mut stored = false;
+        if let Some(state) = app.try_state::<AppState>() {
+            if let Ok(mut guard) = state.backend.lock() {
+                if !SHUTTING_DOWN.load(Ordering::Relaxed) {
+                    *guard = pending.take().map(|sidecar| Backend {
+                        port,
+                        token: token.clone(),
+                        sidecar,
+                    });
+                    stored = true;
+                }
+            }
+        }
+        if let Some(mut leftover) = pending {
+            // 没接管句柄（退出中或状态缺失）时必须主动结束。
+            leftover.stop();
+            return;
+        }
+        if !stored {
+            return;
+        }
+        paths::log_line(
+            &app,
+            &format!("backend ready in {}ms", started.elapsed().as_millis()),
+        );
+
+        // 研究 agent 与页面切换并行：先把页面切过去，agent 继续在后台准备。
+        if let Some((agent_port, agent_token)) = agent_endpoint {
+            spawn_agent(
+                app.clone(),
+                port,
+                token,
+                data_dir.clone(),
+                agent_port,
+                agent_token,
+            );
+        }
+
+        let nav_app = app.clone();
+        let nav_data = data_dir;
+        let target = format!("http://127.0.0.1:{port}/");
+        let _ = app.run_on_main_thread(move || {
+            if let Some(window) = nav_app.get_webview_window("main") {
+                if let Ok(url) = Url::parse(&target) {
+                    let _ = window.navigate(url);
+                }
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+            paths::log_line(
+                &nav_app,
+                &format!(
+                    "page switched in {}ms (window was already shown)",
+                    started.elapsed().as_millis()
+                ),
+            );
+            maybe_onboard(&nav_app, port, &nav_data);
+        });
+    });
 }
 
 fn setup_menu(app: &mut tauri::App) -> tauri::Result<()> {
@@ -259,9 +459,20 @@ fn pick_pdf(app: AppHandle) {
 }
 
 fn open_path(app: AppHandle, path: String) {
-    let (port, token) = {
-        let state = app.state::<AppState>();
-        (state.port, state.token.clone())
+    let (port, token) = match app.try_state::<AppState>() {
+        Some(state) => match state.connection() {
+            Ok(connection) => connection,
+            Err(message) => {
+                // 启动早期（双击 PDF 唤起第二实例）本地服务可能还没就绪。
+                app.dialog()
+                    .message(&message)
+                    .title("导入 PDF")
+                    .kind(MessageDialogKind::Info)
+                    .show(|_| {});
+                return;
+            }
+        },
+        None => return,
     };
 
     std::thread::spawn(move || match api::import_pdf(port, &token, &path) {
@@ -450,6 +661,58 @@ fn emit_update_progress(
     );
 }
 
+/// 后台已下载的更新状态：idle → checking → downloading → ready → installing → launching。
+///
+/// `ready` 表示安装包已经完整落盘，前端只需显示一个更新图标，点击即可安装。
+#[derive(Clone, Default)]
+struct UpdateCenterState {
+    stage: String,
+    version: String,
+    percent: u8,
+    message: String,
+}
+
+#[derive(Default)]
+struct UpdateCenter {
+    inner: Mutex<UpdateCenterState>,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct UpdateStatusPayload {
+    stage: String,
+    version: String,
+    percent: u8,
+    message: String,
+}
+
+fn set_update_status(app: &AppHandle, stage: &str, version: &str, percent: u8, message: &str) {
+    if let Some(center) = app.try_state::<UpdateCenter>() {
+        if let Ok(mut guard) = center.inner.lock() {
+            guard.stage = stage.into();
+            guard.version = version.into();
+            guard.percent = percent.min(100);
+            guard.message = message.into();
+        }
+    }
+}
+
+fn update_stage(app: &AppHandle) -> String {
+    app.try_state::<UpdateCenter>()
+        .and_then(|center| center.inner.lock().ok().map(|guard| guard.stage.clone()))
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn get_update_status(center: tauri::State<'_, UpdateCenter>) -> UpdateStatusPayload {
+    let state = center.inner.lock().map(|guard| guard.clone()).unwrap_or_default();
+    UpdateStatusPayload {
+        stage: if state.stage.is_empty() { "idle".into() } else { state.stage },
+        version: state.version,
+        percent: state.percent,
+        message: state.message,
+    }
+}
+
 fn updater_for(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
     // 仅保留给本机调试用的显式覆盖；正常安装包永远走 Gitee。
     let endpoint = paths::var("PAPEREAD_UPDATE_ENDPOINT");
@@ -514,6 +777,16 @@ async fn install_update(app: AppHandle) -> Result<String, String> {
     };
 
     let version = update.version.clone();
+
+    // 后台已经下好这个版本：直接启动安装器，不再重复下载约 90MB。
+    if let Some((temp_dir, installer, _)) = existing_installer(&app, &version) {
+        paths::log_line(&app, &format!("reuse prepared update: {version}"));
+        emit_update_progress(&app, "installing", &version, 0, 0, "正在启动安装程序…");
+        set_update_status(&app, "installing", &version, 100, "正在启动安装程序…");
+        launch_update_installer(&app, &version, &temp_dir, &installer)?;
+        return Ok(version);
+    }
+
     paths::log_line(&app, &format!("manual update download started: {version}"));
     emit_update_progress(&app, "downloading", &version, 0, 0, "正在下载安装包…");
 
@@ -559,6 +832,160 @@ async fn install_update(app: AppHandle) -> Result<String, String> {
     Ok(version)
 }
 
+/// 侧栏更新图标：用后台已经下载好的安装包直接启动安装器。
+///
+/// 没有准备好的安装包时返回 `not-ready`，前端会回退到完整更新流程。
+#[tauri::command]
+async fn install_prepared_update(app: AppHandle) -> Result<String, String> {
+    let version = app
+        .try_state::<UpdateCenter>()
+        .and_then(|center| center.inner.lock().ok().map(|guard| guard.version.clone()))
+        .unwrap_or_default();
+
+    let target = if version.is_empty() {
+        scan_prepared_installer(&app)
+    } else {
+        existing_installer(&app, &version).or_else(|| scan_prepared_installer(&app))
+    };
+
+    let Some((temp_dir, installer, version)) = target else {
+        return Err("not-ready".into());
+    };
+
+    paths::log_line(&app, &format!("install prepared update: {version}"));
+    emit_update_progress(&app, "installing", &version, 0, 0, "正在启动安装程序…");
+    set_update_status(&app, "installing", &version, 100, "正在启动安装程序…");
+    launch_update_installer(&app, &version, &temp_dir, &installer)?;
+    Ok(version)
+}
+
+/// 后台准备：检查 → 下载 → 落盘，成功后状态置 `ready` 并广播事件。
+///
+/// 前端不可见时也会跑（由启动后的定时任务驱动），用户看到更新图标时安装包已在本地。
+#[cfg(windows)]
+async fn prepare_update_once(app: &AppHandle) {
+    if matches!(
+        update_stage(app).as_str(),
+        "checking" | "downloading" | "installing" | "launching"
+    ) {
+        return;
+    }
+
+    set_update_status(app, "checking", "", 0, "正在检查更新…");
+
+    let updater = match updater_for(app) {
+        Ok(updater) => updater,
+        Err(error) => {
+            paths::log_line(app, &format!("background updater init failed: {error}"));
+            restore_prepared_status(app);
+            return;
+        }
+    };
+
+    let update = match updater.check().await {
+        Ok(Some(update)) => update,
+        Ok(None) => {
+            // 当前已是最新：清掉旧版本安装包，避免侧栏残留「可安装」入口。
+            if let Some((_, path, _)) = scan_prepared_installer(app) {
+                let _ = std::fs::remove_file(&path);
+            }
+            set_update_status(app, "up-to-date", "", 100, "当前已是最新版本");
+            emit_update_progress(app, "up-to-date", "", 0, 0, "当前已是最新版本");
+            return;
+        }
+        Err(error) => {
+            paths::log_line(app, &format!("background update check failed: {error}"));
+            restore_prepared_status(app);
+            return;
+        }
+    };
+
+    let version = update.version.clone();
+    if existing_installer(app, &version).is_some() {
+        paths::log_line(app, &format!("prepared update already on disk: {version}"));
+        mark_update_ready(app, &version);
+        return;
+    }
+
+    paths::log_line(app, &format!("background update download started: {version}"));
+    set_update_status(app, "downloading", &version, 0, "正在下载安装包…");
+    emit_update_progress(app, "downloading", &version, 0, 0, "正在下载安装包…");
+
+    let progress_app = app.clone();
+    let progress_version = version.clone();
+    let mut downloaded: u64 = 0;
+    let mut last_emit = std::time::Instant::now();
+    let bytes = match update
+        .download(
+            move |chunk, total| {
+                downloaded += chunk as u64;
+                // 与大包下载一致：~120ms 一次，避免事件队列被进度塞满。
+                if last_emit.elapsed().as_millis() >= 120 {
+                    last_emit = std::time::Instant::now();
+                    let total = total.unwrap_or(0);
+                    let percent = if total > 0 {
+                        (downloaded.saturating_mul(100) / total).min(100) as u8
+                    } else {
+                        0
+                    };
+                    set_update_status(
+                        &progress_app,
+                        "downloading",
+                        &progress_version,
+                        percent,
+                        "正在下载安装包…",
+                    );
+                    emit_update_progress(
+                        &progress_app,
+                        "downloading",
+                        &progress_version,
+                        downloaded,
+                        total,
+                        "正在下载安装包…",
+                    );
+                }
+            },
+            || {},
+        )
+        .await
+    {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            // 下载失败保持静默：下次启动或下一个检查周期会重试。
+            paths::log_line(app, &format!("background update download failed: {error}"));
+            restore_prepared_status(app);
+            return;
+        }
+    };
+
+    match write_update_files(app, &version, &bytes) {
+        Ok(_) => {
+            mark_update_ready(app, &version);
+            paths::log_line(app, &format!("background update prepared: {version}"));
+        }
+        Err(error) => {
+            paths::log_line(app, &format!("background update save failed: {error}"));
+            restore_prepared_status(app);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+async fn prepare_update_once(_app: &AppHandle) {}
+
+fn mark_update_ready(app: &AppHandle, version: &str) {
+    set_update_status(app, "ready", version, 100, "新版本已下载，点击安装");
+    emit_update_progress(app, "ready", version, 0, 0, "新版本已下载，点击安装");
+}
+
+/// 失败/取消后回到「已有安装包就仍是 ready，否则 idle」。
+fn restore_prepared_status(app: &AppHandle) {
+    match scan_prepared_installer(app) {
+        Some((_, _, version)) => mark_update_ready(app, &version),
+        None => set_update_status(app, "idle", "", 0, ""),
+    }
+}
+
 /// 设置页更改文献库保存路径后：数据已复制完成，重启应用让 sidecar 指向新目录。
 #[tauri::command]
 fn restart_app(app: AppHandle) {
@@ -573,8 +1000,7 @@ async fn save_pdf_file(
     paper_id: String,
     path: String,
 ) -> Result<String, String> {
-    let port = state.port;
-    let token = state.token.clone();
+    let (port, token) = state.connection()?;
     let target = path.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let url = format!("http://127.0.0.1:{port}/api/papers/{paper_id}/file");
@@ -611,8 +1037,7 @@ async fn save_translated_pdf(
     lang: String,
     path: String,
 ) -> Result<String, String> {
-    let port = state.port;
-    let token = state.token.clone();
+    let (port, token) = state.connection()?;
     let target = path.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let url = format!(
@@ -660,44 +1085,126 @@ async fn check_updates(app: AppHandle, interactive: bool) {
     match updater.check().await {
         Ok(Some(update)) => {
             let version = update.version.clone();
-            let app_for_dialog = app.clone();
-            app.dialog()
-                .message(format!("发现新版本 {version}（Gitee），是否从 Gitee 下载并安装？"))
-                .title("发现更新")
-                .buttons(MessageDialogButtons::OkCancel)
-                .show(move |confirmed| {
-                    if !confirmed {
-                        return;
+
+            // 已经下好安装包：先问用户是否现在安装，同意后才启动安装器。
+            if let Some((temp_dir, installer, prepared_version)) =
+                existing_installer(&app, &version)
+            {
+                paths::log_line(
+                    &app,
+                    &format!("check-updates: reuse prepared {prepared_version}"),
+                );
+                prompt_install_after_ready(&app, &prepared_version, &temp_dir, &installer);
+                return;
+            }
+
+            if !interactive {
+                prepare_update_once(&app).await;
+                return;
+            }
+
+            // 后台正在下载：等它下完再装，避免重复下载约 90MB。
+            if matches!(update_stage(&app).as_str(), "downloading" | "checking") {
+                notify_download_in_progress(&app, &version);
+                match wait_for_prepared_update(&app, &version).await {
+                    Some((temp_dir, installer, prepared_version)) => {
+                        prompt_install_after_ready(
+                            &app,
+                            &prepared_version,
+                            &temp_dir,
+                            &installer,
+                        );
                     }
-                    let app_for_update = app_for_dialog.clone();
-                    let version_for_update = version.clone();
-                    tauri::async_runtime::spawn(async move {
-                        match update.download(|_, _| {}, || {}).await {
-                            Ok(bytes) => {
-                                if let Err(error) = install_downloaded_update(
-                                    &app_for_update,
-                                    &version_for_update,
-                                    &bytes,
-                                ) {
-                                    app_for_update
-                                        .dialog()
-                                        .message(format!("更新失败：{error}"))
-                                        .title("更新失败")
-                                        .kind(MessageDialogKind::Error)
-                                        .show(|_| {});
-                                }
-                            }
-                            Err(error) => {
-                                app_for_update
-                                    .dialog()
-                                    .message(format!("更新失败：{error}"))
-                                    .title("更新失败")
-                                    .kind(MessageDialogKind::Error)
-                                    .show(|_| {});
-                            }
+                    None => {
+                        app.dialog()
+                            .message(format!(
+                                "新版本 {version} 下载未完成，可稍后重新检查更新，或在左下角点击更新图标重试。"
+                            ))
+                            .title("检查更新")
+                            .kind(MessageDialogKind::Info)
+                            .show(|_| {});
+                    }
+                }
+                return;
+            }
+
+            // 没下好就现场下：只提示预计耗时，下载完自动安装，不需要用户再操作。
+            notify_download_in_progress(&app, &version);
+            paths::log_line(&app, &format!("check-updates: downloading {version}"));
+
+            set_update_status(&app, "downloading", &version, 0, "正在下载安装包…");
+            emit_update_progress(&app, "downloading", &version, 0, 0, "正在下载安装包…");
+
+            let progress_app = app.clone();
+            let progress_version = version.clone();
+            let mut downloaded: u64 = 0;
+            let mut last_emit = std::time::Instant::now();
+            let bytes = match update
+                .download(
+                    move |chunk, total| {
+                        downloaded += chunk as u64;
+                        if last_emit.elapsed().as_millis() >= 120 {
+                            last_emit = std::time::Instant::now();
+                            let total = total.unwrap_or(0);
+                            let percent = if total > 0 {
+                                (downloaded.saturating_mul(100) / total).min(100) as u8
+                            } else {
+                                0
+                            };
+                            set_update_status(
+                                &progress_app,
+                                "downloading",
+                                &progress_version,
+                                percent,
+                                "正在下载安装包…",
+                            );
+                            emit_update_progress(
+                                &progress_app,
+                                "downloading",
+                                &progress_version,
+                                downloaded,
+                                total,
+                                "正在下载安装包…",
+                            );
                         }
-                    });
-                });
+                    },
+                    || {},
+                )
+                .await
+            {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    paths::log_line(&app, &format!("check-updates download failed: {error}"));
+                    set_update_status(&app, "idle", "", 0, "");
+                    emit_update_progress(&app, "failed", &version, 0, 0, "下载更新失败");
+                    app.dialog()
+                        .message(format!("下载新版本失败：{error}"))
+                        .title("检查更新")
+                        .kind(MessageDialogKind::Error)
+                        .show(|_| {});
+                    return;
+                }
+            };
+
+            match save_update_package(&app, &version, &bytes) {
+                Ok((temp_dir, installer)) => {
+                    mark_update_ready(&app, &version);
+                    paths::log_line(
+                        &app,
+                        &format!("check-updates: prepared {version}, asking to install"),
+                    );
+                    prompt_install_after_ready(&app, &version, &temp_dir, &installer);
+                }
+                Err(error) => {
+                    set_update_status(&app, "idle", "", 0, "");
+                    emit_update_progress(&app, "failed", &version, 0, 0, "保存安装包失败");
+                    app.dialog()
+                        .message(format!("更新失败：{error}"))
+                        .title("更新失败")
+                        .kind(MessageDialogKind::Error)
+                        .show(|_| {});
+                }
+            }
         }
         Ok(None) => {
             if interactive {
@@ -719,6 +1226,117 @@ async fn check_updates(app: AppHandle, interactive: bool) {
             }
         }
     }
+}
+
+/// 用户主动「检查更新」时的下载提示：只说预计耗时与「无需手动操作」，
+/// 下载完成后由调用方直接进入安装，不再弹二次确认。
+fn notify_download_in_progress(app: &AppHandle, version: &str) {
+    app.dialog()
+        .message(format!(
+            "新版本 {version} 正在下载（安装包约 90 MB，视网络情况通常需要 1–3 分钟）。\n\n下载完成后会询问你是否立即安装，期间无需手动操作。"
+        ))
+        .title("检查更新")
+        .kind(MessageDialogKind::Info)
+        .show(|_| {});
+}
+
+/// 安装包已就绪后才弹「是否立即安装」：用户同意才启动安装器。
+///
+/// 取消时保留已下载的安装包，左下角的更新入口仍可再次触发安装。
+fn prompt_install_after_ready(
+    app: &AppHandle,
+    version: &str,
+    temp_dir: &std::path::Path,
+    installer: &std::path::Path,
+) {
+    let app_for_dialog = app.clone();
+    let version = version.to_string();
+    let temp_dir = temp_dir.to_path_buf();
+    let installer = installer.to_path_buf();
+    app.dialog()
+        .message(format!(
+            "新版本 {version} 的安装包已下载完成。\n\n是否立即安装？安装期间应用会关闭，完成后自动打开。"
+        ))
+        .title("发现更新")
+        .buttons(MessageDialogButtons::OkCancel)
+        .show(move |confirmed| {
+            if !confirmed {
+                paths::log_line(
+                    &app_for_dialog,
+                    &format!("update install skipped: {version}"),
+                );
+                return;
+            }
+            begin_update_install(&app_for_dialog, &version, &temp_dir, &installer);
+        });
+}
+
+/// 启动安装器：上报阶段状态，失败时回到「可重试」并提示原因。
+fn begin_update_install(
+    app: &AppHandle,
+    version: &str,
+    temp_dir: &std::path::Path,
+    installer: &std::path::Path,
+) {
+    emit_update_progress(app, "installing", version, 0, 0, "正在启动安装程序…");
+    set_update_status(app, "installing", version, 100, "正在启动安装程序…");
+    if let Err(error) = launch_update_installer(app, version, temp_dir, installer) {
+        set_update_status(app, "ready", version, 100, "安装失败，点击重试");
+        app.dialog()
+            .message(format!("启动安装程序失败：{error}"))
+            .title("更新失败")
+            .kind(MessageDialogKind::Error)
+            .show(|_| {});
+    }
+}
+
+/// 后台已在下载时，等待它落盘（不重复下载一份），最多等 15 分钟。
+#[cfg(windows)]
+async fn wait_for_prepared_update(
+    app: &AppHandle,
+    version: &str,
+) -> Option<(std::path::PathBuf, std::path::PathBuf, String)> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
+    loop {
+        if let Some(found) = existing_installer(app, version) {
+            return Some(found);
+        }
+        let stage = update_stage(app);
+        // 后台下载已结束却没产出安装包：失败或已是最新，直接返回让调用方提示。
+        if stage != "downloading" && stage != "checking" {
+            return None;
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    }
+}
+
+#[cfg(not(windows))]
+async fn wait_for_prepared_update(
+    _app: &AppHandle,
+    _version: &str,
+) -> Option<(std::path::PathBuf, std::path::PathBuf, String)> {
+    None
+}
+
+#[cfg(windows)]
+fn save_update_package(
+    app: &AppHandle,
+    version: &str,
+    bytes: &[u8],
+) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    write_update_files(app, version, bytes)
+}
+
+#[cfg(not(windows))]
+fn save_update_package(
+    _app: &AppHandle,
+    _version: &str,
+    _bytes: &[u8],
+) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    Err("当前平台暂不支持自动安装更新".into())
 }
 
 #[cfg(windows)]
@@ -762,15 +1380,110 @@ fn write_update_files(
     Err(message)
 }
 
+/// 版本号比较键：非数字片段按 0 处理，避免 `0.2.10` 被当成小于 `0.2.9`。
+fn version_key(value: &str) -> Vec<u64> {
+    value
+        .split(['.', '-', '+'])
+        .map(|part| part.parse::<u64>().unwrap_or(0))
+        .collect()
+}
+
+/// 指定版本的安装包是否已经完整落在本机（后台下载完成后在这里命中）。
+#[cfg(windows)]
+fn existing_installer(
+    app: &AppHandle,
+    version: &str,
+) -> Option<(std::path::PathBuf, std::path::PathBuf, String)> {
+    for dir in update_temp_dirs(app) {
+        let installer = dir.join(format!("paperead-{version}-setup.exe"));
+        if let Ok(meta) = std::fs::metadata(&installer) {
+            // 小于 1MB 视为上次中断留下的残片，重新下载。
+            if meta.len() > 1_000_000 {
+                return Some((dir, installer, version.to_string()));
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn existing_installer(
+    _app: &AppHandle,
+    _version: &str,
+) -> Option<(std::path::PathBuf, std::path::PathBuf, String)> {
+    None
+}
+
+/// 扫描更新目录里任意已准备好的安装包，返回 (目录, 安装包, 版本)。
+#[cfg(windows)]
+fn scan_prepared_installer(
+    app: &AppHandle,
+) -> Option<(std::path::PathBuf, std::path::PathBuf, String)> {
+    const PREFIX: &str = "paperead-";
+    const SUFFIX: &str = "-setup.exe";
+    let mut best: Option<(std::path::PathBuf, std::path::PathBuf, String)> = None;
+
+    for dir in update_temp_dirs(app) {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = match path.file_name().and_then(|name| name.to_str()) {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
+            if !name.starts_with(PREFIX) || !name.ends_with(SUFFIX) {
+                continue;
+            }
+            let version = name[PREFIX.len()..name.len() - SUFFIX.len()].to_string();
+            if version.is_empty() {
+                continue;
+            }
+            let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+            if size <= 1_000_000 {
+                continue;
+            }
+            let higher = best
+                .as_ref()
+                .map(|(_, _, current)| version_key(&version) > version_key(current))
+                .unwrap_or(true);
+            if higher {
+                best = Some((dir.clone(), path, version));
+            }
+        }
+    }
+    best
+}
+
+#[cfg(not(windows))]
+fn scan_prepared_installer(
+    _app: &AppHandle,
+) -> Option<(std::path::PathBuf, std::path::PathBuf, String)> {
+    None
+}
+
 #[cfg(windows)]
 fn install_downloaded_update(
     app: &AppHandle,
     version: &str,
     bytes: &[u8],
 ) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-
     let (temp_dir, installer) = write_update_files(app, version, bytes)?;
+    launch_update_installer(app, version, &temp_dir, &installer)
+}
+
+/// 启动已经写盘的安装器：批处理延迟拉起 NSIS，随后应用退出。
+///
+/// 后台预下载与「立即更新」共用这一段，避免两条链路各自维护启动脚本。
+#[cfg(windows)]
+fn launch_update_installer(
+    app: &AppHandle,
+    version: &str,
+    temp_dir: &std::path::Path,
+    installer: &std::path::Path,
+) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
 
     let cmd = std::env::var("SystemRoot")
         .map(|root| format!("{root}\\System32\\cmd.exe"))
@@ -789,8 +1502,8 @@ fn install_downloaded_update(
         return Err(message);
     }
     std::process::Command::new(cmd)
-        .env("TEMP", &temp_dir)
-        .env("TMP", &temp_dir)
+        .env("TEMP", temp_dir)
+        .env("TMP", temp_dir)
         .args(["/C", &batch.to_string_lossy()])
         .creation_flags(0x0800_0000)
         .spawn()
@@ -827,6 +1540,16 @@ fn install_downloaded_update(
 }
 
 #[cfg(not(windows))]
+fn launch_update_installer(
+    _app: &AppHandle,
+    _version: &str,
+    _temp_dir: &std::path::Path,
+    _installer: &std::path::Path,
+) -> Result<(), String> {
+    Err("当前平台暂不支持自动安装更新".into())
+}
+
+#[cfg(not(windows))]
 fn install_downloaded_update(
     _app: &AppHandle,
     _version: &str,
@@ -846,15 +1569,17 @@ fn show_about(app: &AppHandle) {    let message = format!(
 }
 
 fn shutdown(app: &AppHandle) {
+    // 先立退出标记：后台 agent 线程若此刻刚好启动成功，会自己收掉句柄。
+    SHUTTING_DOWN.store(true, Ordering::Relaxed);
     if let Some(state) = app.try_state::<AppState>() {
         if let Ok(mut guard) = state.agent.lock() {
             if let Some(mut agent) = guard.take() {
                 agent.stop();
             }
         }
-        if let Ok(mut guard) = state.sidecar.lock() {
-            if let Some(mut sidecar) = guard.take() {
-                sidecar.stop();
+        if let Ok(mut guard) = state.backend.lock() {
+            if let Some(mut backend) = guard.take() {
+                backend.sidecar.stop();
             }
         }
     }
