@@ -312,12 +312,15 @@ export function NotesPage({ onNav, onOpenPaper }: Props) {
   }, [field, fieldLabel, overview, conference])
 
   // 目录首次构建要拉文件树 + 预热检索索引；构建期间 1.5 秒回看一次进度。
+  // 依赖整个 overview：构建期间 state 一直是 loading，若只依赖 state，
+  // effect 不会重新排定定时器，界面就会停在某一档百分比（如 53%）。
   useEffect(() => {
     const state = overview?.status.state
     if (!state || state === 'ready') return
     const timer = window.setTimeout(() => void loadOverview(), 1500)
     return () => window.clearTimeout(timer)
-  }, [overview?.status.state])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overview])
 
   // 目录构建完成后自动刷新当前视图：用户不用离开/切回广场才看到新内容。
   const lastCatalogState = useRef('')
@@ -540,7 +543,7 @@ export function NotesPage({ onNav, onOpenPaper }: Props) {
   const doRefreshCatalog = async () => {
     try {
       await refreshCatalog()
-      notify('已开始刷新笔记目录')
+      // 刷新反馈只由进度条承担：不再额外弹黄色提示条。
       setOverview((prev) => (prev ? { ...prev, status: { ...prev.status, state: 'loading' } } : prev))
     } catch (error) {
       notify(errorText(error), 'err')
