@@ -35,6 +35,8 @@ from .inline_math import (
     build_inline_math,
     build_symbol_fallbacks,
     spans_with_offsets,
+    tex_brace_delta,
+    tex_braces_balanced,
 )
 from .regions import PageRegions, build_page_regions
 from .textnorm import (
@@ -1397,7 +1399,7 @@ def _merge_math_fragments(text: str, inline_math: list[dict]) -> list[dict]:
                     bridge_tex = _math_bridge_latex(middle)
                     if bridge_tex is not None:
                         candidate = prev["latex"] + bridge_tex + cur["latex"]
-                        if candidate.count("{") == candidate.count("}"):
+                        if tex_braces_balanced(candidate):
                             merged_tex = candidate
                 if merged_tex:
                     prev["latex"] = merged_tex
@@ -1411,6 +1413,112 @@ def _merge_math_fragments(text: str, inline_math: list[dict]) -> list[dict]:
                 continue
         merged.append(cur)
     return merged
+
+
+def _union_rect(
+    a: list[float] | tuple[float, ...] | None,
+    b: list[float] | tuple[float, ...] | None,
+):
+    if not a:
+        return list(b) if b else None
+    if not b:
+        return list(a)
+    return [
+        min(a[0], b[0]), min(a[1], b[1]),
+        max(a[2], b[2]), max(a[3], b[3]),
+    ]
+
+
+def _inline_math_source(text: str, item: dict) -> str:
+    value = (item.get("source") or "").strip()
+    if value:
+        return value
+    start = int(item.get("start", 0))
+    end = int(item.get("end", 0))
+    if 0 <= start < end <= len(text):
+        return text[start:end]
+    return ""
+
+
+def _join_math_latex(prev: dict, cur: dict, bridge: str) -> str | None:
+    a = prev.get("latex") or ""
+    b = cur.get("latex") or ""
+    if not a or not b or prev.get("fallback") or cur.get("fallback"):
+        return None
+    middle = _math_bridge_latex(bridge)
+    if middle is None:
+        return None
+    return a + middle + b
+
+
+def _demote_unbalanced_math(text: str, inline_math: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for item in inline_math:
+        source = _inline_math_source(text, item)
+        if source and not tex_braces_balanced(source):
+            item = {**item, "latex": "", "fallback": True}
+        out.append(item)
+    return out
+
+
+def _merge_cross_row_math(text: str, inline_math: list[dict]) -> list[dict]:
+    r"""把被换行切断的行内公式拼回一条。
+
+    `build_inline_math` 以 PyMuPDF 的单条 line 为单位重建，集合公式
+    `{2×` + `10^{-3},…}` 跨行时会得到两条各自花括号残缺的片段。这里只在
+    「源文本净开 → 净闭」且中间没有正文时合并；拼不成完整公式的片段降级
+    为裁图（fallback），避免前端拿到半截 LaTeX 后渲染成红字。
+    """
+    if not inline_math:
+        return []
+    items = sorted(inline_math, key=lambda m: (int(m["start"]), int(m["end"])))
+    merged: list[dict] = []
+    index = 0
+    while index < len(items):
+        cur = {**items[index]}
+        acc_source = _inline_math_source(text, cur)
+        if tex_brace_delta(acc_source) <= 0:
+            merged.append(cur)
+            index += 1
+            continue
+        cursor = index + 1
+        while cursor < len(items):
+            prev = items[cursor - 1]
+            nxt = items[cursor]
+            gap = int(nxt["start"]) - int(prev["end"])
+            middle = text[int(prev["end"]): int(nxt["start"])] if gap > 0 else ""
+            if gap < 0 or gap > 4 or middle.strip():
+                break
+            candidate = _join_math_latex(cur, nxt, middle)
+            if candidate is None:
+                break
+            next_source = acc_source + _inline_math_source(text, nxt)
+            cur = {
+                **cur,
+                "end": max(int(cur["end"]), int(nxt["end"])),
+                "latex": candidate,
+                "fallback": False,
+                "source": next_source,
+                "bbox": _union_rect(cur.get("bbox"), nxt.get("bbox")),
+            }
+            acc_source = next_source
+            cursor += 1
+            if tex_brace_delta(acc_source) == 0:
+                break
+        if cursor > index + 1 and tex_brace_delta(acc_source) == 0:
+            merged.append(cur)
+            index = cursor
+        else:
+            merged.append({**items[index]})
+            index += 1
+    return _demote_unbalanced_math(text, merged)
+
+
+def _normalize_block_inline_math(blocks: list[Block]) -> list[Block]:
+    for block in blocks:
+        if block.inline_math:
+            block.inline_math = _merge_cross_row_math(block.text, block.inline_math)
+    return blocks
 
 
 def _merge_visual_rows(
@@ -6958,8 +7066,10 @@ def parse_pdf(
             # 图表裁好之后再清一次：图里的坐标轴/标注不该再作为公式出现
             blocks = _drop_equations_inside_floats(blocks)
             blocks = _crop_equations(doc, blocks, out / "equations")
+            blocks = _normalize_block_inline_math(blocks)
             blocks = _crop_inline_math(doc, blocks, out / "inline_math")
         else:
+            blocks = _normalize_block_inline_math(blocks)
             for i, b in enumerate(blocks):
                 b.order = i
                 b.id = f"b{i:04d}"

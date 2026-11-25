@@ -1,3 +1,4 @@
+import katex from 'katex'
 import type { InlineMath } from '../types'
 
 // 把含 LaTeX 的纯文本切成「文本段 / 公式段」，供页面用 KaTeX 渲染。
@@ -229,4 +230,26 @@ export function mapInlineMathToTranslation(
     from = range.end
   }
   return result
+}
+/**
+ * KaTeX 渲染；语法不完整时返回 null，由调用方回退到原文/裁图。
+ *
+ * `throwOnError: false` 不会静默失败，而是输出 `<span class="katex-error"
+ * style="color:#cc0000">` 包住原始 LaTeX，页面上就是一段红字源码。解析层
+ * 被换行切断的公式、模型改写的公式都会命中这种情况，因此统一改用
+ * `throwOnError: true` + 兜底。
+ */
+export function renderMathHtml(latex: string, display = false): string | null {
+  if (!latex || !latex.trim()) return null
+  try {
+    const html = katex.renderToString(latex, {
+      throwOnError: true,
+      displayMode: display,
+      strict: false,
+      trust: false,
+    })
+    return html.includes('katex-error') ? null : html
+  } catch {
+    return null
+  }
 }

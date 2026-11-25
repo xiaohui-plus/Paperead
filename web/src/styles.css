@@ -11119,10 +11119,16 @@ html.mobile-shell .mobile-setup-card {
   color: var(--muted);
 }
 
-/* 覆盖全局 select.input 的 width:100%，避免把左侧说明挤成竖排 */
+/* 覆盖全局 select.input 的 width:100%，避免把左侧说明挤成竖排。
+   字体是多字体组合（如 “Times New Roman + 宋体（学术论文）”），固定 190px
+   会截断选项文字；改为按内容自适应宽度并缩小一档字号，保证完整可读。 */
 select.input.reading-select {
-  width: 190px;
+  width: auto;
+  min-width: 190px;
+  max-width: 100%;
   flex: none;
+  font-size: 12px;
+  text-overflow: clip;
 }
 
 .reading-stepper {

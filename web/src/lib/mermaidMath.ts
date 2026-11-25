@@ -5,7 +5,7 @@
  * 覆盖原文字，保留原有坐标与居中方式。
  */
 
-import katex from 'katex'
+import { renderMathHtml } from './math'
 
 const MATH_RE = /\$\$([\s\S]+?)\$\$|\$([^$\n]+?)\$/g
 
@@ -32,11 +32,7 @@ function labelHtml(text: string): string {
     matched = true
     out += escapeHtml(text.slice(last, match.index))
     const latex = (match[1] ?? match[2] ?? '').trim()
-    out += katex.renderToString(latex, {
-      throwOnError: false,
-      displayMode: false,
-      strict: false,
-    })
+    out += renderMathHtml(latex) ?? escapeHtml(`$${latex}$`)
     last = match.index + match[0].length
   }
   out += escapeHtml(text.slice(last))
@@ -128,11 +124,7 @@ function upgradeForeignLabels(root: SVGSVGElement): void {
     const html = label.innerHTML
     if (!html.includes('$')) continue
     label.innerHTML = html.replace(/\$([^$\n]+?)\$/g, (_full, latex: string) =>
-      katex.renderToString(latex.trim(), {
-        throwOnError: false,
-        displayMode: false,
-        strict: false,
-      }),
+      renderMathHtml(latex.trim()) ?? escapeHtml(`$${latex.trim()}$`),
     )
   }
 }

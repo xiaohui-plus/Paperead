@@ -1,6 +1,5 @@
-import katex from 'katex'
 import type { ReactNode } from 'react'
-import { splitMath } from '../lib/math'
+import { renderMathHtml, splitMath } from '../lib/math'
 import { stripUnrenderable } from '../lib/text'
 
 interface Props {
@@ -20,25 +19,20 @@ export function MathText({ text, renderText, className }: Props) {
 
   return (
     <span className={className}>
-      {parts.map((part, i) =>
-        part.type === 'text' ? (
-          <span key={i}>{renderText ? renderText(part.value) : part.value}</span>
-        ) : (
+      {parts.map((part, i) => {
+        if (part.type === 'text') {
+          return <span key={i}>{renderText ? renderText(part.value) : part.value}</span>
+        }
+        const html = renderMathHtml(part.value, part.display)
+        if (!html) return <span key={i}>{part.value}</span>
+        return (
           <span
             key={i}
             className={part.display ? 'math-display' : undefined}
-            // KaTeX 输出的是受信任的静态标记（未开启 trust），可安全注入
-            dangerouslySetInnerHTML={{
-              __html: katex.renderToString(part.value, {
-                throwOnError: false,
-                displayMode: part.display,
-                strict: false,
-                trust: false,
-              }),
-            }}
+            dangerouslySetInnerHTML={{ __html: html }}
           />
-        ),
-      )}
+        )
+      })}
     </span>
   )
 }

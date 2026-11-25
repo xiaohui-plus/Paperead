@@ -18,12 +18,11 @@ import type {
   ReadingHighlight,
 } from '../lib/library'
 import type { InlineMath } from '../types'
-import katex from 'katex'
 import { mediaUrl } from '../lib/mobile'
 import { lastAnnotationColor, rememberAnnotationColor } from '../lib/annotationPrefs'
 import { CITE_RE, hasCitation } from '../lib/citationMark'
 import { blankUnrenderable, stripDotLeaders, stripUnrenderable } from '../lib/text'
-import { normalizeMath } from '../lib/math'
+import { normalizeMath, renderMathHtml } from '../lib/math'
 import { translateText } from '../lib/library'
 import { readyModel, loadModelSettings, toPayload } from '../lib/settings'
 import { langLabel, loadTargetLang } from '../lib/translation'
@@ -205,16 +204,14 @@ function InlineMathNode({ item }: { item: InlineMath }) {
   if (!item.latex) {
     return sourceText ? <span className="inline-math">{sourceText}</span> : null
   }
+  const html = renderMathHtml(item.latex)
+  if (!html) {
+    return sourceText ? <span className="inline-math">{sourceText}</span> : null
+  }
   return (
     <span
       className="inline-math"
-      dangerouslySetInnerHTML={{
-        __html: katex.renderToString(item.latex, {
-          throwOnError: false,
-          strict: false,
-          displayMode: false,
-        }),
-      }}
+      dangerouslySetInnerHTML={{ __html: html }}
     />
   )
 }

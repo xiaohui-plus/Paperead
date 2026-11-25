@@ -26,6 +26,41 @@ export function balanceMarkdown(src: string): string {
   return src
 }
 
+type HastNode = {
+  type?: string
+  value?: string
+  properties?: Record<string, unknown>
+  children?: HastNode[]
+}
+
+/**
+ * KaTeX 在 `throwOnError: false` 下会把语法错误输出成 `.katex-error` 红字源码。
+ * 流式回答或模型改写的公式可能残缺，这里把错误节点换成纯文本，去掉红字样式。
+ */
+function dropKaTeXErrors(node: HastNode): void {
+  if (!node.children?.length) return
+  node.children = node.children.map((child) => {
+    const klass = child.properties?.className
+    const names = Array.isArray(klass)
+      ? klass
+      : typeof klass === 'string'
+        ? [klass]
+        : []
+    if (names.includes('katex-error')) {
+      const value = (child.children ?? []).map((item) => item.value ?? '').join('')
+      return { type: 'text', value }
+    }
+    dropKaTeXErrors(child)
+    return child
+  })
+}
+
+function rehypeDropKaTeXErrors() {
+  return (tree: HastNode) => {
+    dropKaTeXErrors(tree)
+  }
+}
+
 /** mermaid 体积较大，只在真正遇到图表时才加载。 */
 function MermaidDiagram({ chart }: { chart: string }) {
   const host = useRef<HTMLDivElement>(null)
@@ -95,7 +130,7 @@ export function Markdown({ text, breaks = true }: { text: string; breaks?: boole
     <div className="md">
       <ReactMarkdown
         remarkPlugins={remarkPlugins}
-        rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]}
+        rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }], rehypeDropKaTeXErrors]}
         components={{
           a: ({ node, ...props }) => {
             void node

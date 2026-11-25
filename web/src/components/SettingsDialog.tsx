@@ -1880,6 +1880,7 @@ function ReadingPanel() {
             id="reader-font-source"
             className="input reading-select"
             value={readerFonts.source}
+            title={READER_FONTS.find((font) => font.key === readerFonts.source)?.label}
             onChange={(event) => changeReaderFont('source', event.target.value)}
           >
             {READER_FONTS.map((font) => (
@@ -1898,6 +1899,7 @@ function ReadingPanel() {
             id="reader-font-target"
             className="input reading-select"
             value={readerFonts.target}
+            title={READER_FONTS.find((font) => font.key === readerFonts.target)?.label}
             onChange={(event) => changeReaderFont('target', event.target.value)}
           >
             {READER_FONTS.map((font) => (

@@ -90,6 +90,37 @@ def _norm_math_char(ch: str) -> str:
     return ch
 
 
+_ESCAPED_BRACE_RE = re.compile(r"\\[{}]")
+
+
+def tex_brace_delta(text: str) -> int:
+    r"""花括号净开数；转义后的 ``\{`` / ``\}`` 是字面花括号，不计入分组。"""
+    cleaned = _ESCAPED_BRACE_RE.sub("", text or "")
+    return cleaned.count("{") - cleaned.count("}")
+
+
+def tex_braces_balanced(text: str) -> bool:
+    r"""花括号是否成对且顺序合法（忽略 ``\{`` / ``\}``）。"""
+    depth = 0
+    for ch in _ESCAPED_BRACE_RE.sub("", text or ""):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
+def _tex_char(ch: str) -> str:
+    r"""正文里的花括号在 LaTeX 中是分组符，必须转义才可见。"""
+    if ch == "{":
+        return r"\{"
+    if ch == "}":
+        return r"\}"
+    return ch
+
+
 @dataclass
 class InlineMath:
     start: int
@@ -225,7 +256,7 @@ def _letter(span: dict, text: str) -> str:
             elif part in SYMBOLS:
                 out.append(SYMBOLS[part])
             elif not part.isspace():
-                out.append(part)
+                out.append(_tex_char(part))
         return _join_tex(out)
 
     out = []
@@ -244,7 +275,7 @@ def _letter(span: dict, text: str) -> str:
             if ch.isascii() and ch.isalpha() and ch.isupper():
                 out.append(r"\mathcal{" + ch + "}")
             else:
-                out.append(ch)
+                out.append(_tex_char(ch))
         elif not ch.isascii():
             # 数学字体里出现韩文/私用区/未分配码点，说明 PDF 的 ToUnicode
             # 映射错乱（实测数学斜体 i 被映射成韩文 U+D456），前端没有
@@ -254,7 +285,7 @@ def _letter(span: dict, text: str) -> str:
             # 未收录的非 ASCII 运算符（KaTeX 不保证支持原字符）同样不猜。
             return ""
         else:
-            out.append(ch)
+            out.append(_tex_char(ch))
     return _join_tex(out)
 
 
