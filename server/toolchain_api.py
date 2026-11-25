@@ -1,17 +1,20 @@
 """写作工具链自检与一键安装（设置页使用）。
 
-安装包里只带 pandoc，PDF 编译需要本机的 TeX 引擎。这里提供两件事：
+安装包里只带 pandoc，PDF 编译需要本机的 TeX 引擎。这里提供三件事：
 
 - ``GET /api/toolchain``：返回 pandoc / TeX 引擎 / bibtex 的检测结果；
-- ``POST /api/toolchain/install``：在后台用 winget 安装 MiKTeX，前端轮询进度。
+- ``POST /api/toolchain/tex``：后台安装 MiKTeX 便携版（推荐，不需要管理员）；
+- ``POST /api/toolchain/install``：用 winget 安装 MiKTeX（备用路径）。
 
-安装是显式操作：不会在启动时自动装，也不会静默执行用户没点过的命令。
+winget 这条链对权限与环境敏感（UAC、系统 TEMP 不可写、装完 PATH 不刷新），
+线上失败几乎都出在这里，所以默认走 ``tex_setup`` 的自有安装链路。
 """
 
 from __future__ import annotations
 
 import json
-import shutil
+import os
+
 import subprocess
 import threading
 import time
@@ -21,9 +24,9 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from server import babeldoc_setup, node_setup
+from server import babeldoc_setup, node_setup, tex_setup
 from server.research import pandoc_setup
-from server.research.latex import find_winget, toolchain_status
+from server.research.latex import find_engines, find_winget, toolchain_status
 from server.winproc import popen_hidden
 
 router = APIRouter(prefix="/api/toolchain", tags=["toolchain"])
@@ -94,6 +97,66 @@ def _append(job: dict[str, Any], line: str) -> None:
             del job["log"][: len(job["log"]) - _MAX_LOG_LINES]
 
 
+def _install_env() -> dict[str, str]:
+    """winget / 安装器的环境：临时目录必须可写，否则安装器只报 Windows error。"""
+    from server.runtime import default_data_dir
+
+    env = dict(os.environ)
+    tmp = default_data_dir() / "tools" / "tmp"
+    try:
+        tmp.mkdir(parents=True, exist_ok=True)
+        env["TEMP"] = str(tmp)
+        env["TMP"] = str(tmp)
+    except OSError:
+        pass
+    return env
+
+
+def _refresh_path() -> None:
+    """把注册表里的最新 PATH 合并进当前进程。
+
+    winget 装完只在注册表里更新 PATH，当前进程（sidecar）不会自动感知，
+    于是设置页一直显示「未检测到」、必须重启应用——这就是原一键安装的第二类
+    报错来源。这里主动读一次注册表，装完立即就能探测到。
+    """
+    if os.name != "nt":
+        return
+    try:
+        import winreg
+
+        locations = [
+            (winreg.HKEY_CURRENT_USER, r"Environment"),
+            (
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+            ),
+        ]
+        current = os.environ.get("PATH", "")
+        parts = [item for item in current.split(";") if item]
+        for hive, subkey in locations:
+            try:
+                with winreg.OpenKey(hive, subkey) as key:
+                    raw, _ = winreg.QueryValueEx(key, "Path")
+            except OSError:
+                continue
+            for item in str(raw).split(";"):
+                item = item.strip()
+                if item and item not in parts:
+                    parts.append(item)
+        os.environ["PATH"] = ";".join(parts)
+    except Exception:  # noqa: BLE001 - 读注册表失败不影响后续探测
+        pass
+
+
+def _exit_hint(code: int) -> str:
+    hints = {
+        1603: "安装程序失败（1603），通常是管理员权限不足或被安全软件拦截。",
+        1625: "系统策略禁止安装（1625），请改用自动安装。",
+        3010: "安装成功，但系统要求重启后才完全生效。",
+    }
+    return hints.get(code, f"winget 退出码 {code}，请查看日志或改用自动安装。")
+
+
 def _run_install(job_id: str) -> None:
     global _CURRENT
     job = _JOBS[job_id]
@@ -101,7 +164,7 @@ def _run_install(job_id: str) -> None:
     if not winget:
         with _LOCK:
             job["status"] = "error"
-            job["error"] = "没有找到 winget，请从官网下载 MiKTeX 安装包。"
+            job["error"] = "没有找到 winget，请改用自动安装或从官网下载 MiKTeX 安装包。"
             job["finishedAt"] = int(time.time())
             _CURRENT = None
         return
@@ -127,6 +190,7 @@ def _run_install(job_id: str) -> None:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            env=_install_env(),
         )
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -134,13 +198,26 @@ def _run_install(job_id: str) -> None:
         code = proc.wait()
         with _LOCK:
             job["exitCode"] = code
-            job["status"] = "done" if code == 0 else "error"
-            if code != 0:
-                job["error"] = f"winget 退出码 {code}，请查看日志或改用官网安装包。"
-            job["finishedAt"] = int(time.time())
-        if code == 0:
-            # 安装完成后旧结果已经过期，下次请求重新检测一次。
+        if code == 0 or code == 3010:
+            # 安装器改的是注册表 PATH，当前进程刷新后才能立即探测到。
+            _refresh_path()
             invalidate_cache()
+            engines = find_engines()
+            with _LOCK:
+                if engines:
+                    job["status"] = "done"
+                else:
+                    job["status"] = "error"
+                    job["error"] = (
+                        "安装程序已结束，但仍未检测到 TeX 引擎。"
+                        "可能被安全软件拦截，建议改用自动安装。"
+                    )
+                job["finishedAt"] = int(time.time())
+        else:
+            with _LOCK:
+                job["status"] = "error"
+                job["error"] = _exit_hint(code) + " 日志：" + "\n".join(job["log"][-4:])
+                job["finishedAt"] = int(time.time())
     except Exception as error:  # noqa: BLE001 - 安装失败要回显给用户
         with _LOCK:
             job["status"] = "error"
@@ -155,11 +232,13 @@ def _run_install(job_id: str) -> None:
 def status(refresh: bool = Query(False)) -> dict[str, Any]:
     """默认返回缓存的自检结果；``?refresh=1`` 强制重新检测。"""
     download = pandoc_setup.status()
+    tex = tex_setup.status()
     data = None if refresh else _load_cache()
-    # pandoc 刚下载好但缓存还是“未检测到”时补测一次。
-    if data is None or (
-        download.get("installed") and not data.get("pandoc", {}).get("found")
-    ):
+    # 工具刚装好但缓存还是「未检测到」时补测一次：pandoc 下载完成、
+    # 应用内 LaTeX 引擎安装完成都属于这种情况。
+    stale_pandoc = download.get("installed") and not data.get("pandoc", {}).get("found")
+    stale_tex = tex.get("installed") and not (data or {}).get("engines")
+    if data is None or stale_pandoc or stale_tex:
         data = toolchain_status()
         _save_cache(data)
     return {
@@ -171,6 +250,7 @@ def status(refresh: bool = Query(False)) -> dict[str, Any]:
         "pandocDownload": download,
         "nodeDownload": node_setup.status(),
         "engineDownload": babeldoc_setup.status(),
+        "texDownload": tex,
     }
 
 
@@ -202,13 +282,19 @@ def install_node() -> dict[str, Any]:
     return node_setup.start()
 
 
+@router.post("/tex")
+def install_tex() -> dict[str, Any]:
+    """自动安装 LaTeX 引擎（MiKTeX 便携版）：无需管理员、装完立即生效。"""
+    return tex_setup.start()
+
+
 @router.post("/install")
 def install() -> dict[str, Any]:
     global _CURRENT
     with _LOCK:
         if _CURRENT is not None:
             return {"jobId": _CURRENT, "status": "running"}
-    if shutil.which("xelatex") or shutil.which("xelatex.exe"):
+    if find_engines():
         return {"jobId": None, "status": "done", "notice": "已经检测到 LaTeX 引擎。"}
 
     job_id = uuid.uuid4().hex[:12]

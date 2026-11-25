@@ -45,12 +45,27 @@ whenToUse: 用户要求以 LaTeX 交付综述、论文或章节时。
 中文稿（ctexart）的最小可用骨架，可直接作为 `main.tex` 的起点：
 
 ```latex
-\documentclass[UTF8,a4paper,11pt]{ctexart}
+\documentclass[UTF8,a4paper,12pt]{ctexart}
 \usepackage[margin=2.5cm]{geometry}
 \usepackage{amsmath,amssymb,amsfonts}
 \usepackage{graphicx}
 \usepackage{booktabs,longtable,array,multirow}
 \usepackage{natbib}
+% 与 Word 导出一致的中文论文版式：正文小四仿宋、西文 Times New Roman、
+% 1.2 倍行距、首行缩进 2 字符；标题三号/小三黑体、四号宋体加粗。
+\linespread{1.2}\selectfont
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0pt}
+\usepackage{iftex}
+\ifPDFTeX\else
+  \IfFontExistsTF{FangSong}{\setCJKmainfont{FangSong}}{}
+  \IfFontExistsTF{Times New Roman}{\setmainfont{Times New Roman}}{}
+\fi
+\ctexset{
+  section/format = {\zihao{3}\heiti\bfseries\raggedright},
+  subsection/format = {\zihao{-3}\heiti\bfseries\raggedright},
+  subsubsection/format = {\zihao{4}\songti\bfseries\raggedright},
+}
 \title{题目}
 \author{作者}
 \date{\today}
@@ -66,7 +81,7 @@ whenToUse: 用户要求以 LaTeX 交付综述、论文或章节时。
 \end{document}
 ```
 
-英文稿把文档类换成 `article`，去掉 `UTF8` 选项即可。
+英文稿把文档类换成 `article`，去掉 `UTF8` 与整段中文版式设置即可。
 
 ## 规范
 

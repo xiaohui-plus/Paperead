@@ -433,6 +433,23 @@ def test_europe_pmc_url_adds_year_range_and_sort():
     assert "sort=P_PDATE_D desc" in decoded
 
 
+def test_europe_pmc_url_limits_to_preprints():
+    url, _ = europe_pmc_url(
+        "crispr", field="all", phrase=False, from_year=None, to_year=None,
+        sort="rel", page=0, per_page=20, preprint=True,
+    )
+    decoded = unquote(url)
+    assert "SRC:PPR" in decoded
+    assert "crispr" in decoded
+
+
+def test_parse_europe_pmc_accepts_preprint_label():
+    papers = parse_europe_pmc(EPMC_PAYLOAD, source_label="preprints")
+    # id 仍保留 europepmc 前缀，详情接口和去重逻辑才能继续命中。
+    assert papers[0].id == "europepmc:PMC/PMC4744125"
+    assert papers[0].source == "preprints"
+
+
 PUBMED_SUMMARY = {
     "uid": "26780180",
     "title": "A PubMed Paper",

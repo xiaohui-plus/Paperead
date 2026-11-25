@@ -44,6 +44,7 @@ from server.research import explorer, ppt_templates, templates as template_store
 from server.research.citations import audit_review
 from server.research.deck import build_deck, parse_outline
 from server.research.docx_edit import DocxError, edit_docx, read_docx
+from server.research.docx_layout import apply_review_layout
 from server.research.files import resolve_in_root, safe_name, save_bytes_in
 from server.research.latex import (
     bib_stem,
@@ -1766,6 +1767,10 @@ def build_router(
             tmp.unlink(missing_ok=True)
             detail = proc.stderr.decode("utf-8", "replace")[:300]
             return {"format": "docx", "files": [], "error": f"pandoc 转换失败：{detail}"}
+        try:
+            apply_review_layout(tmp)
+        except Exception:  # noqa: BLE001 - 排版失败仍保留 pandoc 的原始结果
+            pass
         data = tmp.read_bytes()
         tmp.unlink(missing_ok=True)
         relative, size = save_bytes_in(root, filename, data)

@@ -7,10 +7,12 @@ import pytest
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
+from docx.shared import Pt
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from server.research.docx_edit import DocxError, edit_docx, read_docx
+from server.research.docx_layout import apply_review_layout
 from server.research.files import save_bytes
 from server.research.store import ResearchStore
 from server.research.tools_api import build_router
@@ -227,6 +229,41 @@ def test_format_paragraph_targets_indices_and_validates(tmp_path: Path):
         )
     with pytest.raises(DocxError):
         edit_docx(path, [{"op": "format_paragraph", "index": 99, "bold": True}])
+
+
+def test_apply_review_layout_sets_chinese_typesetting(tmp_path: Path):
+    path = tmp_path / "layout.docx"
+    document = Document()
+    document.add_heading("综述标题", level=1)
+    document.add_heading("引言", level=2)
+    document.add_heading("研究背景", level=3)
+    document.add_paragraph("正文段落：这是一段用于检查排版的中文正文。")
+    document.save(path)
+
+    apply_review_layout(path)
+
+    saved = Document(str(path))
+    normal = saved.styles["Normal"]
+    assert normal.font.size == Pt(12)
+    rfonts = normal.element.get_or_add_rPr().get_or_add_rFonts()
+    assert rfonts.get(qn("w:eastAsia")) == "仿宋"
+    assert rfonts.get(qn("w:ascii")) == "Times New Roman"
+
+    body = saved.paragraphs[-1]
+    assert body.alignment == WD_ALIGN_PARAGRAPH.JUSTIFY
+    assert body.paragraph_format.line_spacing == pytest.approx(1.2)
+    assert body.paragraph_format.first_line_indent == Pt(24)
+
+    expected = {
+        "Heading 1": (16, "黑体"),
+        "Heading 2": (15, "黑体"),
+        "Heading 3": (14, "宋体"),
+    }
+    for name, (size, font) in expected.items():
+        style = saved.styles[name]
+        assert style.font.size == Pt(size)
+        assert style.font.bold is True
+        assert style.element.get_or_add_rPr().get_or_add_rFonts().get(qn("w:eastAsia")) == font
 
 
 def test_insert_and_edit_tables(tmp_path: Path):

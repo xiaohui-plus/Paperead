@@ -282,11 +282,13 @@ function DualProgress({
   total: number
   building?: boolean
 }) {
-  const known = total > 0 && !building
+  // 只按「已知段数」判定百分比：排版阶段也已经有完整段数，
+  // 不能让进度条跳回 0 区间的流动动画（看起来像进度丢失）。
+  const known = total > 0
   const percent = known ? Math.min(100, Math.round((done / total) * 100)) : 0
   return (
     <div
-      className={`dual-progress${known ? '' : ' is-indeterminate'}`}
+      className={`dual-progress${known ? '' : ' is-indeterminate'}${building ? ' is-building' : ''}`}
       role="progressbar"
       aria-label="译文生成进度"
       aria-valuemin={0}

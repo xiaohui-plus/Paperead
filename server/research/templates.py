@@ -24,6 +24,7 @@ from server.research.review_standard import (
     DEFAULT_TEMPLATE,
     sections_from_markdown,
     template_sections,
+    template_sections_of,
 )
 
 DIR_NAME = "review-templates"
@@ -1282,7 +1283,7 @@ def list_options(root: Path) -> list[dict[str, Any]]:
             "kind": DEFAULT_TEMPLATE["kind"],
             "description": DEFAULT_TEMPLATE["description"],
             "outline": DEFAULT_TEMPLATE["outline"],
-            "sections": sections_from_markdown(DEFAULT_TEMPLATE["markdown"]),
+            "sections": template_sections_of(DEFAULT_TEMPLATE),
         }
     ]
     for template_id, meta in BUILTIN_TEMPLATES.items():
@@ -1294,7 +1295,7 @@ def list_options(root: Path) -> list[dict[str, Any]]:
                 "kind": meta["kind"],
                 "description": meta["description"],
                 "outline": meta["outline"],
-                "sections": sections_from_markdown(meta["markdown"]),
+                "sections": template_sections_of(meta),
             }
         )
     items.extend(list_uploads(root))
@@ -1334,7 +1335,7 @@ def describe(
             "kind": DEFAULT_TEMPLATE["kind"],
             "description": DEFAULT_TEMPLATE["description"],
             "outline": DEFAULT_TEMPLATE["outline"],
-            "sections": sections_from_markdown(DEFAULT_TEMPLATE["markdown"]),
+            "sections": template_sections_of(DEFAULT_TEMPLATE),
             "markdown": DEFAULT_TEMPLATE["markdown"],
             "guide": {},
             "error": "",
@@ -1348,7 +1349,7 @@ def describe(
             "kind": meta["kind"],
             "description": meta["description"],
             "outline": meta["outline"],
-            "sections": sections_from_markdown(meta["markdown"]),
+            "sections": template_sections_of(meta),
             "markdown": meta["markdown"],
             "guide": {},
             "error": "",

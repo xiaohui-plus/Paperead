@@ -58,3 +58,26 @@ def test_engine_route_registered(monkeypatch: pytest.MonkeyPatch, tmp_path) -> N
     body = res.json()
     assert body["ready"] is False
     assert body["version"]
+
+def test_toolchain_exposes_tex_download(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """设置页依赖 ``texDownload`` 展示 LaTeX 自动安装进度与错误。"""
+    monkeypatch.setenv("PAPEREAD_TOKEN", "tex-token")
+    monkeypatch.setenv("PAPEREAD_DATA", str(tmp_path / "data"))
+    monkeypatch.setenv("PAPEREAD_MOCK", "1")
+
+    import server.main as main
+
+    importlib.reload(main)
+    client = TestClient(main.app)
+
+    res = client.get(
+        "/api/toolchain", headers={"X-Paperead-Token": "tex-token"}
+    )
+
+    assert res.status_code == 200
+    tex = res.json()["texDownload"]
+    assert tex["status"] in {"idle", "running", "done", "error"}
+    assert "percent" in tex
+    assert "installed" in tex

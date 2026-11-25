@@ -42,6 +42,26 @@ AUX_SUFFIXES = {
 }
 STYLES = {"ctexart", "article"}
 
+# 中文稿统一版式：正文小四仿宋、西文 Times New Roman、1.2 倍行距、首行缩进 2 字符；
+# 一级/二级/三级标题分别为三号黑体、小三黑体、四号宋体（加粗）。
+# 字体用 \IfFontExistsTF 兜底：非 Windows 或精简 TeX 环境缺字体时保持 ctex 默认，
+# 不会因为找不到仿宋/Times 而编译失败（pdfLaTeX 走 ctex 的 CJK 字体集）。
+CTEX_LAYOUT = [
+    r"\linespread{1.2}\selectfont",
+    r"\setlength{\parindent}{2em}",
+    r"\setlength{\parskip}{0pt}",
+    r"\usepackage{iftex}",
+    r"\ifPDFTeX\else",
+    r"  \IfFontExistsTF{FangSong}{\setCJKmainfont{FangSong}}{}",
+    r"  \IfFontExistsTF{Times New Roman}{\setmainfont{Times New Roman}}{}",
+    r"\fi",
+    r"\ctexset{",
+    r"  section/format = {\zihao{3}\heiti\bfseries\raggedright},",
+    r"  subsection/format = {\zihao{-3}\heiti\bfseries\raggedright},",
+    r"  subsubsection/format = {\zihao{4}\songti\bfseries\raggedright},",
+    r"}",
+]
+
 
 def has_cjk(text: str) -> bool:
     """判断文本里是否出现中日韩字符，用来挑中文模板。"""
@@ -123,20 +143,24 @@ def find_engines() -> list[str]:
 
     xelatex 对中文最稳；某些 Windows 环境下 xdvipdfmx 会失败，因此保留
     pdflatex（ctexart 也能用）作为回退，lualatex 放最后。
+
+    先查已知安装目录（应用自带的 MiKTeX 便携版、MiKTeX / TeX Live 默认位置），
+    再回退 PATH：这样应用内装好引擎后立即可用，不需要重启刷新 PATH。
     """
-    engines: list[str] = []
-    for name in (
-        "xelatex",
-        "xelatex.exe",
-        "pdflatex",
-        "pdflatex.exe",
-        "lualatex",
-        "lualatex.exe",
-    ):
-        found = shutil.which(name)
-        if found and found not in engines:
-            engines.append(found)
-    return engines
+    found: dict[str, str] = {}
+    directories = _search_bin_dirs()
+    for name in ("xelatex", "pdflatex", "lualatex"):
+        for directory in directories:
+            exe = directory / f"{name}.exe"
+            if exe.is_file():
+                found[name] = str(exe)
+                break
+        if name in found:
+            continue
+        which = shutil.which(name) or shutil.which(f"{name}.exe")
+        if which:
+            found[name] = which
+    return [found[name] for name in ("xelatex", "pdflatex", "lualatex") if name in found]
 
 
 def find_engine() -> str | None:
@@ -145,7 +169,86 @@ def find_engine() -> str | None:
 
 
 def find_bibtex() -> str | None:
+    for directory in _search_bin_dirs():
+        exe = directory / "bibtex.exe"
+        if exe.is_file():
+            return str(exe)
     return shutil.which("bibtex") or shutil.which("bibtex.exe")
+
+
+def _search_bin_dirs() -> list[Path]:
+    """TeX 引擎所在的候选目录（去重、只保留存在的目录）。"""
+    candidates: list[Path] = []
+    try:
+        from server import tex_setup
+
+        candidates.append(tex_setup.bin_dir())
+    except Exception:  # noqa: BLE001 - 下载模块不可用时不拖累导出
+        pass
+
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        base = Path(local)
+        candidates.append(base / "Programs" / "MiKTeX" / "miktex" / "bin" / "x64")
+        candidates.append(base / "MiKTeX" / "miktex" / "bin" / "x64")
+        # MiKTeX 便携版解压到用户目录时的常见结构。
+        candidates.extend(
+            base.glob("Programs/MiKTeX/*/texmfs/install/miktex/bin/x64")
+        )
+    for key in ("PROGRAMFILES", "ProgramFiles", "ProgramFiles(x86)", "PROGRAMFILES(X86)"):
+        value = os.environ.get(key)
+        if value:
+            candidates.append(Path(value) / "MiKTeX" / "miktex" / "bin" / "x64")
+
+    home = Path.home()
+    # TeX Live 默认装在 C:\texlive\<年份>；用户级装在 ~\texlive\<年份>。
+    for root in (Path("C:/texlive"), home / "texlive"):
+        try:
+            candidates.extend(root.glob("*/bin/windows"))
+        except OSError:
+            pass
+    candidates.append(home / "AppData" / "Roaming" / "TinyTeX" / "bin" / "windows")
+
+    seen: set[str] = set()
+    result: list[Path] = []
+    for path in candidates:
+        try:
+            if not path.is_dir():
+                continue
+            key = str(path).lower()
+        except OSError:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(path)
+    return result
+
+
+def _tex_env(engine: str, workdir: Path) -> dict[str, str]:
+    """TeX 编译/装包子进程的环境：引擎同目录 + 系统目录 + 可写临时目录。
+
+    不继承用户 PATH 有两个原因：用户的 PATH 里可能有非法条目（把 exe 当目录
+    写进去），MiKTeX 遍历时会报错；系统 TEMP 也可能不可写。
+    """
+    env = dict(os.environ)
+    system = os.environ.get("SystemRoot") or r"C:\Windows"
+    env["PATH"] = ";".join(
+        [
+            str(Path(engine).parent),
+            str(Path(system) / "system32"),
+            system,
+            str(Path(system) / "System32" / "Wbem"),
+        ]
+    )
+    tmp = workdir / ".tex-tmp"
+    try:
+        tmp.mkdir(parents=True, exist_ok=True)
+        env["TEMP"] = str(tmp)
+        env["TMP"] = str(tmp)
+    except OSError:
+        pass
+    return env
 
 
 def _split_title(markdown: str, title: str) -> tuple[str, str]:
@@ -209,9 +312,11 @@ def _wrap_document(
     nocite: bool = False,
 ) -> str:
     if style == "ctexart":
-        document_class = r"\documentclass[UTF8,a4paper,11pt]{ctexart}"
+        document_class = r"\documentclass[UTF8,a4paper,12pt]{ctexart}"
+        layout = CTEX_LAYOUT
     else:
         document_class = r"\documentclass[a4paper,11pt]{article}"
+        layout = []
 
     abstract_block = ""
     if abstract.strip():
@@ -235,6 +340,7 @@ def _wrap_document(
     return "\n".join(
         [
             document_class,
+            *layout,
             r"\usepackage[margin=2.5cm]{geometry}",
             r"\usepackage{amsmath,amssymb,amsfonts}",
             r"\usepackage{graphicx}",
@@ -439,6 +545,7 @@ def _compile_with(engine: str, tex_path: Path) -> tuple[Path | None, str]:
     _cleanup_aux(tex_path)
     timeout = 90 if "lualatex" in Path(engine).stem.lower() else COMPILE_TIMEOUT
     logs: list[str] = []
+    env = _tex_env(engine, workdir)
 
     def run(command: list[str]) -> subprocess.CompletedProcess[bytes]:
         return subprocess.run(
@@ -446,6 +553,7 @@ def _compile_with(engine: str, tex_path: Path) -> tuple[Path | None, str]:
             cwd=workdir,
             capture_output=True,
             timeout=timeout,
+            env=env,
             **hidden_kwargs(),
         )
 

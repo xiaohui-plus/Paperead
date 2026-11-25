@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
 } from 'react'
 import { Document, Page, pdfjs } from 'react-pdf'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
@@ -37,6 +38,10 @@ interface Props {
    * 双栏对比用它做「放大到只显示页面一部分」的局部放大。
    */
   zoom?: number
+  /** 手型工具：开启后按住页面拖动可平移画布，划词/批注点击暂时失效 */
+  pan?: boolean
+  /** Ctrl/⌘ + 滚轮：-1 缩小、+1 放大，倍率由外层维护 */
+  onZoomWheel?: (delta: 1 | -1) => void
   /** 面板里点目录/重点/图表时滚到对应页；token 变化即触发。双栏不传，交给滚动联动 */
   jump?: { page: number; token: number } | null
   onPageChange: (page: number) => void
@@ -377,6 +382,8 @@ export function PdfPages({
   initialPage,
   width,
   zoom = 1,
+  pan = false,
+  onZoomWheel,
   jump = null,
   onPageChange,
   pageUrls,
@@ -416,6 +423,71 @@ export function PdfPages({
   const fitWidth = Math.max(320, Math.min(width, available || width))
   const pageWidth = zoom > 1 ? Math.max(320, Math.round(fitWidth * zoom)) : fitWidth
   const pagesClass = `pdf-pages${zoom > 1 ? ' is-zoomed' : ''}`
+
+  // 手型工具：拖拽起点只在 ref 里（不触发重渲染），panning 仅用于切光标
+  const panDrag = useRef<{ x: number; y: number; left: number; top: number } | null>(null)
+  const [panning, setPanning] = useState(false)
+  // 滚轮回调每次渲染都是新函数：用 ref 托管，避免反复解绑 non-passive 监听
+  const zoomWheel = useRef(onZoomWheel)
+  useEffect(() => {
+    zoomWheel.current = onZoomWheel
+  }, [onZoomWheel])
+
+  // Ctrl/⌘ + 滚轮缩放：必须 non-passive 才能 preventDefault 掉浏览器自己的页面缩放
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const onWheel = (event: WheelEvent) => {
+      const handler = zoomWheel.current
+      if (!handler || !(event.ctrlKey || event.metaKey)) return
+      event.preventDefault()
+      handler(event.deltaY > 0 ? -1 : 1)
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [])
+
+  // 手型工具：pointer capture 保证指针移出容器后仍然跟手，拖到哪儿滚到哪儿
+  const onPanPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!pan || event.button !== 0) return
+    const el = scrollRef.current
+    if (!el) return
+    // 点在竖向滚动条上仍然交给浏览器拖滚动条
+    const bounds = el.getBoundingClientRect()
+    if (
+      event.clientX - bounds.left > el.clientWidth ||
+      event.clientY - bounds.top > el.clientHeight
+    ) {
+      return
+    }
+    event.preventDefault()
+    window.getSelection()?.removeAllRanges()
+    panDrag.current = {
+      x: event.clientX,
+      y: event.clientY,
+      left: el.scrollLeft,
+      top: el.scrollTop,
+    }
+    event.currentTarget.setPointerCapture(event.pointerId)
+    setPanning(true)
+  }
+
+  const onPanPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = panDrag.current
+    const el = scrollRef.current
+    if (!drag || !el) return
+    el.scrollLeft = drag.left - (event.clientX - drag.x)
+    el.scrollTop = drag.top - (event.clientY - drag.y)
+  }
+
+  const endPan = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!panDrag.current) return
+    panDrag.current = null
+    setPanning(false)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+  }
 
   const scrollToPage = useCallback((page: number) => {
     scrollRef.current
@@ -518,6 +590,8 @@ export function PdfPages({
   }, [useTextLayer, total, pdfReady])
 
   const onFrameMouseUp = (event: ReactMouseEvent<HTMLDivElement>) => {
+    // 手型工具下是拖拽平移，不弹划词工具条
+    if (pan) return
     // 双击的第二下用于「跳到批注」，不再触发划词工具条
     if (event.detail > 1) return
     const frame = event.currentTarget
@@ -599,7 +673,7 @@ export function PdfPages({
    * 双击仍走原逻辑切到批注栏，所以这里延时后再弹，双击会被取消。
    */
   const onFrameClick = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (reviewMode || !annotationActions || event.button !== 0) return
+    if (pan || reviewMode || !annotationActions || event.button !== 0) return
     const sel = window.getSelection()
     if (sel && !sel.isCollapsed && sel.toString().trim()) return
     const hit = hitAnnotationAt(event)
@@ -619,6 +693,7 @@ export function PdfPages({
    * 图层的事件，而是用归一化坐标反查——既能双击定位，也不影响正常划词。
    */
   const onFrameDoubleClick = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (pan) return
     if (peekTimer.current) {
       window.clearTimeout(peekTimer.current)
       peekTimer.current = null
@@ -664,7 +739,16 @@ export function PdfPages({
   const pages = Array.from({ length: total }, (_, index) => index + 1)
 
   return (
-    <div className={`pdf-view ${useTextLayer ? 'pdf-view-text' : ''}`} ref={scrollRef}>
+    <div
+      className={`pdf-view ${useTextLayer ? 'pdf-view-text' : ''}${
+        pan ? ' is-pan' : ''
+      }${panning ? ' is-panning' : ''}`}
+      ref={scrollRef}
+      onPointerDown={onPanPointerDown}
+      onPointerMove={onPanPointerMove}
+      onPointerUp={endPan}
+      onPointerCancel={endPan}
+    >
       {useTextLayer ? (
         <Document
           file={pdfUrl ?? undefined}

@@ -25,6 +25,17 @@ interface ToolchainStatus {
   }
   engines: { name: string; path: string; version: string }[]
   bibtex: ToolInfo
+  /** LaTeX 引擎（MiKTeX 便携版）自动安装：下载 → 安装 → 配置 → 中文支持 */
+  texDownload?: {
+    status: 'idle' | 'running' | 'done' | 'error'
+    phase: string
+    percent: number
+    error: string
+    warning: string
+    installed: boolean
+    version: string
+    bin: string
+  }
   /** 全局翻译引擎（BabelDOC）：独立于 PDF 导出链，需单独下载 */
   engineDownload?: {
     status: 'idle' | 'running' | 'done' | 'error'
@@ -54,6 +65,15 @@ const DOWNLOADS = [
 ]
 
 const WINGET_COMMAND = 'winget install --id MiKTeX.MiKTeX -e'
+
+const TEX_PHASE: Record<string, string> = {
+  download: '下载安装程序',
+  packages: '下载 LaTeX 宏包',
+  install: '安装引擎',
+  configure: '配置自动补包',
+  extras: '安装中文支持',
+  done: '完成',
+}
 
 function StatusPill({ ok, text }: { ok: boolean; text: string }) {
   return (
@@ -98,6 +118,7 @@ export function ToolchainPanel() {
   const [startingPandoc, setStartingPandoc] = useState(false)
   const [startingNode, setStartingNode] = useState(false)
   const [startingEngine, setStartingEngine] = useState(false)
+  const [startingTex, setStartingTex] = useState(false)
 
   const load = useCallback(async (silent = false, refresh = false) => {
     if (!silent) setLoading(true)
@@ -122,13 +143,19 @@ export function ToolchainPanel() {
   const pandocState = status?.pandocDownload?.status
   const nodeState = status?.nodeDownload?.status
   const engineState = status?.engineDownload?.status
+  const texState = status?.texDownload?.status
   useEffect(() => {
-    if (pandocState !== 'running' && nodeState !== 'running' && engineState !== 'running') {
+    if (
+      pandocState !== 'running' &&
+      nodeState !== 'running' &&
+      engineState !== 'running' &&
+      texState !== 'running'
+    ) {
       return
     }
     const timer = window.setInterval(() => void load(true), 2000)
     return () => window.clearInterval(timer)
-  }, [pandocState, nodeState, engineState, load])
+  }, [pandocState, nodeState, engineState, texState, load])
 
   // 安装是后台任务：轮询到结束再重新检测一次，用户能看到引擎从“未检测到”变成“已就绪”。
   useEffect(() => {
@@ -226,6 +253,21 @@ export function ToolchainPanel() {
     }
   }
 
+  const startTex = async () => {
+    setStartingTex(true)
+    setError('')
+    try {
+      const res = await fetch('/api/toolchain/tex', { method: 'POST' })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`)
+      await load(true)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '安装 LaTeX 引擎失败')
+    } finally {
+      setStartingTex(false)
+    }
+  }
+
   const engine = status?.engines[0]
   const installing = job?.status === 'running' || starting
   const download = status?.pandocDownload
@@ -238,16 +280,20 @@ export function ToolchainPanel() {
   const engineReady = Boolean(engineDownload?.installed || engineDownload?.ready)
   const engineDownloading = engineDownload?.status === 'running'
 
+  const texDownload = status?.texDownload
+  const texDownloading = texDownload?.status === 'running'
+  const texPhaseText = TEX_PHASE[texDownload?.phase ?? ''] ?? '安装中'
+
   return (
     <div className="modal-body toolchain-panel">
       <section className="toolchain-head">
         <div>
           <h3>写作工具</h3>
           <p>
-            首次启动会自动下载 pandoc（约 24MB）、公式引擎组件（约 32MB）与
-            全局翻译引擎（约 218MB），只需一次，之后离线可用。
+            首次启动会自动补齐写作依赖：pandoc（约 24MB）、公式引擎组件（约 32MB）、
+            全局翻译引擎（约 218MB）与 LaTeX 引擎（MiKTeX 便携版，约 250MB），只需一次。
             <br />
-            导出 PDF 还需要本机的 LaTeX 引擎，可以在下面一键安装。
+            装好后完全离线可用；缺宏包（含中文 ctex）会在导出时自动下载。
           </p>
         </div>
         <button
@@ -272,7 +318,13 @@ export function ToolchainPanel() {
           name="LaTeX 引擎"
           hint="编译 PDF（xelatex / pdflatex / lualatex）"
           ok={Boolean(engine)}
-          detail={engine ? `${engine.name} · ${engine.version}`.trim() : ''}
+          detail={
+            engine
+              ? `${engine.name} · ${engine.version}`.trim()
+              : texDownloading
+                ? `${texPhaseText} ${texDownload?.percent ?? 0}%`
+                : ''
+          }
         />
         <ToolRow
           name="BibTeX"
@@ -404,11 +456,12 @@ export function ToolchainPanel() {
         </div>
       )}
 
-      {status?.ready ? (
+      {engine ? (
         <>
           <div className="toolchain-ready">
-            <IconCheck /> PDF 导出已可用。
+            <IconCheck /> LaTeX 引擎已就绪{status?.ready ? '，PDF 导出可用' : ''}，无需重启。
           </div>
+          {texDownload?.warning && <p className="hint">{texDownload.warning}</p>}
           <p className="hint">
             想重装或升级引擎？
             {DOWNLOADS.map((item) => (
@@ -422,20 +475,48 @@ export function ToolchainPanel() {
       ) : (
         <div className="toolchain-install">
           <p>
-            {job?.status === 'done'
-              ? '安装完成。如果仍显示未检测到，请重启应用让新的 PATH 生效。'
-              : job?.status === 'error'
-                ? job.error || '安装失败，可以改用官网安装包。'
-                : '没有检测到 TeX 引擎，导出 PDF 会失败。'}
+            {texDownloading
+              ? `正在安装 LaTeX 引擎：${texPhaseText}（${texDownload?.percent ?? 0}%），完成后自动可用。`
+              : texDownload?.status === 'error'
+                ? `LaTeX 引擎安装失败：${texDownload.error || '网络不可用'}`
+                : '导出 PDF 需要本机 LaTeX 引擎，点下面按钮自动安装，全程无需管理员权限。'}
           </p>
+          {texDownloading && (
+            <div className="storage-progress">
+              <div className="storage-progress-track">
+                <span
+                  className="storage-progress-fill"
+                  style={{ width: `${Math.max(2, texDownload?.percent ?? 0)}%` }}
+                />
+              </div>
+              <div className="storage-progress-meta">
+                <span>{texPhaseText}</span>
+                <span>{texDownload?.percent ?? 0}%</span>
+              </div>
+            </div>
+          )}
           <div className="toolchain-actions">
+            <button
+              className="btn primary"
+              onClick={() => void startTex()}
+              disabled={texDownloading || startingTex}
+            >
+              <IconDownload />
+              {texDownloading
+                ? `正在安装 ${texDownload?.percent ?? 0}%`
+                : startingTex
+                  ? '正在启动…'
+                  : texDownload?.status === 'error'
+                    ? '重试安装 LaTeX 引擎'
+                    : '自动安装 LaTeX 引擎'}
+            </button>
             {status?.installer.winget ? (
               <button
-                className="btn primary"
+                className="btn small ghost"
                 onClick={() => void startInstall()}
-                disabled={installing}
+                disabled={installing || texDownloading}
               >
-                <IconDownload /> {installing ? '正在安装 MiKTeX…' : '一键安装 MiKTeX'}
+                {installing ? '正在用 winget 安装…' : '用 winget 安装（备用）'}
               </button>
             ) : null}
             {DOWNLOADS.map((item) => (
@@ -450,9 +531,6 @@ export function ToolchainPanel() {
               </a>
             ))}
           </div>
-          {status && !status.installer.winget && (
-            <p className="hint">没有检测到 winget，请用上面的官网安装包。</p>
-          )}
           <div className="toolchain-command">
             <span>也可以在 PowerShell 里执行：</span>
             <code>{WINGET_COMMAND}</code>
@@ -460,11 +538,16 @@ export function ToolchainPanel() {
               {copied ? '已复制' : '复制'}
             </button>
           </div>
+          {job?.status === 'error' && job.error && (
+            <p className="hint">winget 安装失败：{job.error}</p>
+          )}
           {job && job.log.length > 0 && (
             <pre className="toolchain-log">{job.log.slice(-8).join('\n')}</pre>
           )}
           <p className="hint">
-            MiKTeX 约 250MB，首次编译时会按需下载宏包；安装完成后需要重启应用才能识别。
+            自动安装使用 MiKTeX 便携版，装在本机数据目录、不修改系统环境，装好即可用，
+            无需重启；缺宏包（含中文 ctex）会在导出时自动下载。winget 需要管理员权限，
+            被拒绝时请用自动安装。
           </p>
         </div>
       )}

@@ -166,6 +166,12 @@ export function Composer({
       Boolean(window.matchMedia?.('(pointer: coarse)').matches),
   )
 
+  /** 只显示最后一级目录名，路径末尾的分隔符忽略。 */
+  const folderLabel = (() => {
+    const raw = (workspaceName || '').replace(/[\\/]+$/, '')
+    return raw.split(/[\\/]/).filter(Boolean).pop() || raw
+  })()
+
   useEffect(() => {
     if (autoFocus) textarea.current?.focus()
   }, [autoFocus])
@@ -808,15 +814,15 @@ export function Composer({
             >
               <IconSlash />
             </button>
-            {workspaceName && (
+            {folderLabel && (
               <button
                 type="button"
                 className="rc-folder"
-                title={`当前项目文件夹：${workspaceName}（点击更换）`}
+                title={`当前工作文件夹：${workspaceName}（点击更换）`}
                 onClick={onPickWorkspace}
               >
                 <IconFolder />
-                <span className="rc-folder-name">{workspaceName}</span>
+                <span className="rc-folder-name">{folderLabel}</span>
               </button>
             )}
           </div>

@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "paperead"
-version = "0.2.33"
+version = "0.2.34"
 description = "学术论文 PDF 版面重排 + 英中逐段翻译（双栏、图表、公式）"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "AGPL-3.0-only" }
 dependencies = [
     "pymupdf>=1.26",
-    "openai>=1.0",
+    "openai>=1.50",
     # 公式矢量渲染：LaTeX → matplotlib mathtext → PDF 片段。缺失时自动
     # 回退原公式裁图，不影响正文回填。
     "matplotlib>=3.8",

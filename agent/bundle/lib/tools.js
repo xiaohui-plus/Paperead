@@ -216,7 +216,7 @@ export function apply(ctx, config = {}) {
         template: {
           type: 'string',
           description:
-            'Review template id or uploaded template file name, e.g. "default", "narrative", "systematic", "file:我的模板.md", "upload:我的模板.md", or "paper:<paperId>" (use a library paper\'s section skeleton). Omit to use the project template; if none, the template chosen in app settings; if none, the system default applies.',
+            'Review template id or uploaded template file name, e.g. "default", "paper-empirical", "paper-draft", "narrative", "systematic", "file:我的模板.md", "upload:我的模板.md", or "paper:<paperId>" (use a library paper\'s section skeleton). Omit to use the project template; if none, the template chosen in app settings; if none, the system default applies.',
         },
       },
       output: {
@@ -497,7 +497,7 @@ export function apply(ctx, config = {}) {
     defineTool({
       name: 'academic_search',
       description:
-        'Search external scholarly databases (arXiv, PubMed, OpenAlex, Europe PMC, Semantic Scholar, CORE) and return a batch of results WITH ABSTRACTS for screening. Defaults to abstractOnly=true, so records without abstracts are filtered out. Use 20-30 results per batch, judge relevance from the abstracts, and only use paper_import when the user explicitly asks to read full text.',
+        'Search external scholarly databases (arXiv, PubMed, OpenAlex, Europe PMC, preprints, Semantic Scholar, CORE) and return a batch of results WITH ABSTRACTS for screening. Defaults to abstractOnly=true, so records without abstracts are filtered out. Use 20-30 results per batch, judge relevance from the abstracts, and only use paper_import when the user explicitly asks to read full text.',
       parameters: {
         query: {
           type: 'string',
@@ -507,7 +507,7 @@ export function apply(ctx, config = {}) {
         source: {
           type: 'string',
           description:
-            'arxiv | pubmed | openalex | europepmc | semanticscholar | core. Default openalex (all disciplines). core requires a configured API key.',
+            'arxiv | pubmed | openalex | europepmc | preprints | semanticscholar | core. Default openalex (all disciplines). preprints restricts to bioRxiv/medRxiv and other preprint servers via Europe PMC. core requires a configured API key.',
         },
         yearFrom: { type: 'number', description: 'Earliest publication year.' },
         yearTo: { type: 'number', description: 'Latest publication year.' },
@@ -690,7 +690,7 @@ export function apply(ctx, config = {}) {
         reviewTemplate: {
           type: 'string',
           description:
-            'Writing template for this project: "default" (通用综述五段式), a builtin id ("paper-empirical" for IMRaD research papers, "narrative" / "systematic" for reviews), an uploaded template file name in the project files (e.g. "我的5A模板.md"), an app-level upload ("upload:我的模板.md"), or a library paper ("paper:<paperId>"). Leave empty to fall back to app settings.',
+            'Writing template for this project: "default" (通用综述五段式), a builtin id ("paper-empirical" for IMRaD research papers, "paper-draft" for a problem-driven first draft with argument and language rules, "narrative" / "systematic" for reviews), an uploaded template file name in the project files (e.g. "我的5A模板.md"), an app-level upload ("upload:我的模板.md"), or a library paper ("paper:<paperId>"). Leave empty to fall back to app settings.',
         },
       },
       output: {

@@ -78,6 +78,15 @@ fn fixed_temperature_model(model: &str) -> bool {
     name.starts_with("kimi-k3") || name.starts_with("kimi-k2.5")
 }
 
+/// OpenAI GPT-5 / GPT-6 及 o 系列推理模型：不支持自定义 temperature，
+/// 输出上限要用 max_completion_tokens（旧参数会 400）。
+fn reasoning_model(model: &str) -> bool {
+    let name = model.rsplit('/').next().unwrap_or(model).to_lowercase();
+    ["gpt-5", "gpt-6", "o1", "o3", "o4"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
+
 fn endpoint(base_url: &str) -> String {
     let base = base_url.trim().trim_end_matches('/');
     if base.ends_with("/chat/completions") {
@@ -106,11 +115,16 @@ pub async fn llm_stream(
         "messages": request.messages,
         "stream": true,
     });
-    if !fixed_temperature_model(&request.model) {
+    let is_reasoning = reasoning_model(&request.model);
+    if !is_reasoning && !fixed_temperature_model(&request.model) {
         body["temperature"] = serde_json::json!(request.temperature.unwrap_or(0.25));
     }
     if let Some(max_tokens) = request.max_tokens {
-        body["max_tokens"] = serde_json::json!(max_tokens);
+        if is_reasoning {
+            body["max_completion_tokens"] = serde_json::json!(max_tokens);
+        } else {
+            body["max_tokens"] = serde_json::json!(max_tokens);
+        }
     }
 
     let client = reqwest::Client::builder()

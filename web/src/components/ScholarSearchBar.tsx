@@ -31,7 +31,7 @@ export function ScholarSearchBar({
   disabledSources,
 }: Props) {
   const placeholder =
-    params.source === 'pubmed' || params.source === 'europepmc'
+    params.source === 'pubmed' || params.source === 'europepmc' || params.source === 'preprints'
       ? '例如：CRISPR cancer therapy'
       : '例如：large language model reasoning'
 

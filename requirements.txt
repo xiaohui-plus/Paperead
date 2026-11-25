@@ -1,6 +1,6 @@
 # 运行时依赖（pip install -r requirements.txt 等价于 pip install -e ".[server]"）
 pymupdf>=1.26
-openai>=1.0
+openai>=1.50
 httpx>=0.27
 # 上限是构建 sidecar 时验证过的范围：FastAPI 0.162 已移除 app.add_event_handler
 # 这类旧 API，未验证的新版本会让打包后的 sidecar 启动即崩。升级前先跑

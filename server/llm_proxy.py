@@ -122,6 +122,31 @@ def _join(base: str, path: str) -> str:
     return f"{base}{path}"
 
 
+# OpenAI GPT-5 / GPT-6 及 o 系列推理模型：不支持自定义采样参数，
+# 输出上限要从 max_tokens 改成 max_completion_tokens，否则上游直接 400。
+REASONING_PREFIXES = ("gpt-5", "gpt-6", "o1", "o3", "o4")
+UNSUPPORTED_REASONING_KEYS = (
+    "temperature",
+    "top_p",
+    "presence_penalty",
+    "frequency_penalty",
+    "logprobs",
+    "top_logprobs",
+)
+
+
+def _adapt_body_for_model(body: dict[str, Any], model: str) -> None:
+    """研究 agent 按 DeepSeek 习惯发的参数，转发前按模型族改写。"""
+    name = (model or "").lower().rsplit("/", 1)[-1]
+    if not name.startswith(REASONING_PREFIXES):
+        return
+    max_tokens = body.pop("max_tokens", None)
+    if max_tokens is not None and "max_completion_tokens" not in body:
+        body["max_completion_tokens"] = max_tokens
+    for key in UNSUPPORTED_REASONING_KEYS:
+        body.pop(key, None)
+
+
 def _completion_to_sse(payload: dict[str, Any], model: str) -> bytes:
     """把一次性返回的 chat.completion 重新包装成 SSE 增量流。
 
@@ -316,6 +341,7 @@ def build_llm_proxy_router(data_dir: Path, token: str) -> APIRouter:
         if not isinstance(body, dict):
             raise HTTPException(status_code=400, detail="invalid json body")
         body["model"] = state["model"]
+        _adapt_body_for_model(body, state["model"])
 
         url = _join(state["base_url"], "/chat/completions")
         headers = {

@@ -289,6 +289,14 @@ if is_frozen() and env("PAPEREAD_NODE_AUTODOWNLOAD", "1") != "0":
 
     node_setup.start_if_missing()
 
+# 本机没有 TeX 引擎时，首启在后台装 MiKTeX 便携版到数据目录：不需要管理员、
+# 不改系统 PATH，装好后立即能被探测到。延迟启动，避免与其他依赖抢带宽。
+# 设 PAPEREAD_TEX_AUTODOWNLOAD=0 可关闭。
+if is_frozen() and env("PAPEREAD_TEX_AUTODOWNLOAD", "1") != "0":
+    from server import tex_setup
+
+    tex_setup.start_if_missing()
+
 # 项目/文件/会话等具体路由必须先于下面的 /api/research/{path:path} 代理注册，
 # 否则会被通配代理拦截，误报“研究 agent 尚未启动”。
 def _schedule_parse(paper_id: str) -> None:
@@ -968,7 +976,7 @@ async def ping(req: PingReq) -> dict:
             model=req.config.model,
             temperature=0.0,
             # 新一代思考模型会先花 reasoning token；给小了会只思考不输出
-            max_tokens=512,
+            max_tokens=2048,
         )
     except Exception as e:
         log.warning("连通性测试失败：%s", e)

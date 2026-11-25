@@ -363,7 +363,9 @@ def parse_core(payload: dict[str, Any] | None) -> list[Paper]:
 # ── Europe PMC ──────────────────────────────────────────────
 
 
-def parse_europe_pmc(payload: dict[str, Any] | None) -> list[Paper]:
+def parse_europe_pmc(
+    payload: dict[str, Any] | None, source_label: str = "europepmc"
+) -> list[Paper]:
     results = ((payload or {}).get("resultList") or {}).get("result") or []
     papers: list[Paper] = []
     for record in results:
@@ -380,17 +382,23 @@ def parse_europe_pmc(payload: dict[str, Any] | None) -> list[Paper]:
         ]
         keywords = (record.get("keywordList") or {}).get("keyword") or mesh[:8]
         pub_types = (record.get("pubTypeList") or {}).get("pubType") or []
+        # 预印本记录大多没有 journalInfo，退回发布平台名，避免整列都显示 Europe PMC。
+        venue = journal.get("title") or (
+            record.get("publisher")
+            or (record.get("bookOrReportDetails") or {}).get("publisher")
+            or ("预印本" if source_label == "preprints" else "Europe PMC")
+        )
         papers.append(
             Paper(
                 id=epmc_key(src, record_id),
-                source="europepmc",
+                source=source_label,
                 title=strip_latex_pointers((record.get("title") or "").strip() or "(无标题)"),
                 authors=[
                     a.strip()
                     for a in re.split(r",\s*", record.get("authorString") or "")
                     if a.strip()
                 ],
-                venue=journal.get("title") or "Europe PMC",
+                venue=venue,
                 year=normalize_year(record.get("pubYear")),
                 category=(mesh[0] if mesh else (pub_types[0] if pub_types else "Europe PMC")),
                 keywords=[k for k in keywords if k][:8],
@@ -571,9 +579,13 @@ def europe_pmc_url(
     page: int,
     per_page: int,
     now_year: int | None = None,
+    preprint: bool = False,
 ) -> tuple[str, int]:
     term = f'"{q}"' if phrase else q
     clauses: list[str] = []
+    if preprint:
+        # Europe PMC 用 SRC:PPR 把检索范围限定在预印本（bioRxiv / medRxiv / Research Square 等）。
+        clauses.append("SRC:PPR")
     if field == "title":
         clauses.append(f"TITLE:{term}")
     elif field == "abstract":

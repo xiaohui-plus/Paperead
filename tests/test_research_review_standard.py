@@ -168,3 +168,35 @@ def test_template_options_expose_kind_outline_and_markdown(tmp_path):
     assert detail["markdown"].startswith("# 实证研究论文")
     assert detail["outline"][0]["checks"]
     assert detail["sections"][:2] == ["标题与作者", "摘要"]
+
+def test_paper_draft_builtin_uses_declared_sections_not_guide_headings(tmp_path):
+    """初稿写作模板的正文是整份写作规范，草稿骨架必须取显式 sections。"""
+    paper = BUILTIN_TEMPLATES["paper-draft"]
+    assert paper["kind"] == "paper"
+    titles = [item["title"] for item in paper["outline"]]
+    for expected in ("摘要", "引言", "研究方法", "实验设置与评估方案", "结果与讨论", "结论"):
+        assert expected in titles
+    assert all(item["words"] and item["points"] and item["checks"] for item in paper["outline"])
+
+    assert paper["sections"] == ["摘要", "引言", "研究方法", "实验设置与评估方案", "结果与讨论", "结论"]
+    assert paper["markdown"].startswith("# 论文初稿写作模板")
+    assert "论证关系表" in paper["markdown"]
+    assert "自查清单" in paper["markdown"]
+    assert paper["markdown"].count("## 一、全文的核心架构逻辑") == 1
+
+    sections, label, error = resolve_template("paper-draft", tmp_path)
+    assert error == ""
+    assert label == "论文初稿写作模板（问题导向）"
+    assert sections == paper["sections"]
+    assert "一、全文的核心架构逻辑" not in sections
+
+    from server.research import templates
+
+    by_id = {item["id"]: item for item in templates.list_options(tmp_path)}
+    assert by_id["paper-draft"]["kind"] == "paper"
+    assert by_id["paper-draft"]["sections"] == paper["sections"]
+
+    detail = templates.describe("paper-draft", tmp_path, None)
+    assert detail["source"] == "builtin"
+    assert detail["sections"] == paper["sections"]
+    assert "论证关系表" in detail["markdown"]

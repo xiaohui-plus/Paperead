@@ -7,6 +7,7 @@ export type ScholarSource =
   | 'pubmed'
   | 'openalex'
   | 'europepmc'
+  | 'preprints'
   | 'semanticscholar'
   | 'core'
 
@@ -79,6 +80,7 @@ export const SOURCE_META: { k: ScholarSource; l: string; d: string }[] = [
   { k: 'pubmed', l: 'PubMed', d: '生物医学与生命科学文献' },
   { k: 'openalex', l: 'OpenAlex', d: '全学科开放学术图谱，附带被引量' },
   { k: 'europepmc', l: 'Europe PMC', d: '生物医学全文、预印本与被引量' },
+  { k: 'preprints', l: '预印本', d: 'bioRxiv、medRxiv 等预印本，经 Europe PMC 检索' },
   {
     k: 'semanticscholar',
     l: 'Semantic Scholar',
@@ -92,6 +94,7 @@ export const SOURCE_LABELS: Record<ScholarSource, string> = {
   pubmed: 'PubMed',
   openalex: 'OpenAlex',
   europepmc: 'Europe PMC',
+  preprints: '预印本',
   semanticscholar: 'Semantic Scholar',
   core: 'CORE',
 }

@@ -10,6 +10,7 @@ import {
   IconPlus,
   IconTrash,
 } from '../components/icons'
+import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { Markdown } from '../components/Markdown'
 import { FileTypeIcon } from '../components/fileTypeIcons'
 import { SettingsDialog } from '../components/SettingsDialog'
@@ -23,6 +24,7 @@ import {
   type ProjectSummary,
   type SessionSummary,
 } from '../lib/researchApi'
+import { isDesktopApp } from '../lib/update'
 import { Composer } from './Composer'
 import { LocalFolderBrowser } from './LocalFolderBrowser'
 import { ProjectExplorer } from './ProjectExplorer'
@@ -373,6 +375,27 @@ export function ProjectPage({
     setLocalPreview(null)
     setActiveFolderId(null)
     setTab('files')
+  }
+
+  /** 桌面端用系统文件夹选择器；网页/Android 回退到内置目录浏览器。 */
+  const pickWorkspaceFolder = async () => {
+    setError(null)
+    if (!isDesktopApp()) {
+      setFolderPicker(true)
+      return
+    }
+    try {
+      const picked = await openDialog({
+        directory: true,
+        multiple: false,
+        title: '选择工作文件夹',
+      })
+      if (typeof picked === 'string' && picked) {
+        await applyRoot(picked)
+      }
+    } catch (pickError) {
+      setError(errorText(pickError))
+    }
   }
 
   const openLocalFile = (entry: FsEntry) => {
@@ -996,7 +1019,7 @@ export function ProjectPage({
                     <button
                       className="project-explorer-choose"
                       title="选择电脑上的文件夹作为项目工作目录"
-                      onClick={() => setFolderPicker(true)}
+                      onClick={() => void pickWorkspaceFolder()}
                     >
                       <IconFolder />
                       打开本地文件夹
@@ -1111,7 +1134,7 @@ export function ProjectPage({
               kind={project?.kind ?? 'research'}
               onOpenSettings={() => setSettingsOpen(true)}
               workspaceName={workspaceLabel || undefined}
-              onPickWorkspace={() => setFolderPicker(true)}
+              onPickWorkspace={() => void pickWorkspaceFolder()}
               onFilesUploaded={(uploaded) =>
                 setFiles((prev) => [...prev, ...uploaded])
               }
@@ -1137,7 +1160,7 @@ export function ProjectPage({
                 onStop={() => undefined}
                 onOpenSettings={() => setSettingsOpen(true)}
                 workspaceName={workspaceLabel || undefined}
-                onPickWorkspace={() => setFolderPicker(true)}
+                onPickWorkspace={() => void pickWorkspaceFolder()}
               />
             </div>
           )}

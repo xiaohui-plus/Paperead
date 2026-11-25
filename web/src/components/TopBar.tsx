@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { Paper, ViewMode } from '../types'
 import { downloadMarkdown } from '../lib/markdown'
 import { tourBus } from '../tour/tourBus'
-import { IconAutoHighlight, IconBack, IconCollapse, IconDownload, IconExpand, IconExternalLink, IconMinus, IconPdf, IconPlus, IconReview, IconSidebar, IconTranslate } from './icons'
+import { IconAutoHighlight, IconBack, IconCollapse, IconDownload, IconExpand, IconExternalLink, IconHand, IconMinus, IconPdf, IconPlus, IconReview, IconSidebar, IconTranslate } from './icons'
 
 interface Props {
   paper: Paper
@@ -52,6 +52,12 @@ interface Props {
   dualZoom?: number
   onDualZoom?: (delta: number) => void
   onDualZoomReset?: () => void
+  /** PDF 手型工具：开启后按住页面拖动即可平移画布 */
+  pdfPan?: boolean
+  onTogglePdfPan?: () => void
+  /** 原版 PDF 的放大倍率（1 = 适配宽度），Ctrl+滚轮调整 */
+  pdfZoom?: number
+  onPdfZoomReset?: () => void
   /** 双栏译文 PDF 下载（只在对比阅读中提供） */
   translatedPdfReady?: boolean
   translatedPdfUrl?: string
@@ -109,6 +115,10 @@ export function TopBar({
   dualZoom = 1,
   onDualZoom,
   onDualZoomReset,
+  pdfPan = false,
+  onTogglePdfPan,
+  pdfZoom = 1,
+  onPdfZoomReset,
   translatedPdfReady = false,
   translatedPdfUrl = '',
   translationLang = 'zh-Hans',
@@ -289,6 +299,29 @@ export function TopBar({
         >
           <IconPlus />
         </button>
+
+        {canShowPdf && (pdfMode || dualMode) && onTogglePdfPan && (
+          <button
+            className="icon-btn tool-toggle"
+            data-active={pdfPan}
+            aria-pressed={pdfPan}
+            title={pdfPan ? '手型工具：已开启，按住页面拖动可平移' : '手型工具：点击后拖动页面可平移'}
+            onClick={onTogglePdfPan}
+          >
+            <IconHand />
+          </button>
+        )}
+
+        {pdfMode && !dualMode && pdfZoom !== 1 && onPdfZoomReset && (
+          <button
+            type="button"
+            className="dual-source-toggle dual-zoom"
+            title={`当前放大 ${Math.round(pdfZoom * 100)}%，点击恢复适配宽度`}
+            onClick={onPdfZoomReset}
+          >
+            {Math.round(pdfZoom * 100)}%
+          </button>
+        )}
 
         {canShowPdf && (
           <button

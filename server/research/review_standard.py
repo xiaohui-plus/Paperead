@@ -17,6 +17,15 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
+from server.research.paper_draft_guide import (
+    DESCRIPTION as PAPER_DRAFT_DESCRIPTION,
+    MARKDOWN as PAPER_DRAFT_MARKDOWN,
+    NAME as PAPER_DRAFT_NAME,
+    OUTLINE as PAPER_DRAFT_OUTLINE,
+    SECTIONS as PAPER_DRAFT_SECTIONS,
+    TAGLINE as PAPER_DRAFT_TAGLINE,
+)
+
 TEMPLATE_NAMES = ("review-template.md", "综述模板.md", "综述模板.MD")
 
 # (id, 展示名, 匹配关键词)。关键词按“标题包含”匹配，忽略大小写与编号前缀。
@@ -55,13 +64,21 @@ def _section(
     }
 
 
+# 导出 Word 时实际套用的版式，写进模板正文，用户与 agent 看到同一份规范。
+FORMAT_NOTE = (
+    "> 排版：A4；正文小四仿宋、1.2 倍行距、两端对齐（末行左对齐，不强行拉伸）、"
+    "首行缩进 2 字符；一级标题三号黑体加粗，二级标题小三黑体加粗，"
+    "三级标题四号宋体加粗；西文与数字用 Times New Roman。"
+)
+
+
 def _render_markdown(name: str, tagline: str, outline: list[dict[str, Any]]) -> str:
     """把结构化约束渲染成模板 Markdown。
 
     二级标题保持为章节名，供 ``sections_from_markdown`` 抽取骨架；标题下的
     “篇幅 / 必写 / 自检”列表是给写作者和 agent 看的详细约束。
     """
-    lines = [f"# {name}", "", f"> {tagline}", ""]
+    lines = [f"# {name}", "", f"> {tagline}", "", FORMAT_NOTE, ""]
     for item in outline:
         lines.append(f"## {item['title']}")
         lines.append("")
@@ -416,13 +433,17 @@ def _template(
     description: str,
     tagline: str,
     outline: list[dict[str, Any]],
+    *,
+    markdown: str | None = None,
+    sections: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "name": name,
         "kind": kind,
         "description": description,
         "outline": outline,
-        "markdown": _render_markdown(name, tagline, outline),
+        "markdown": markdown if markdown is not None else _render_markdown(name, tagline, outline),
+        "sections": sections,
     }
 
 
@@ -434,7 +455,7 @@ DEFAULT_TEMPLATE: dict[str, Any] = _template(
     _DEFAULT_OUTLINE,
 )
 
-# 系统内置模板：论文 1 套、综述 2 套。id 保持与旧版兼容。
+# 系统内置模板：论文 2 套、综述 2 套。id 保持与旧版兼容。
 BUILTIN_TEMPLATES: dict[str, dict[str, Any]] = {
     "paper-empirical": _template(
         "实证研究论文（IMRaD）",
@@ -442,6 +463,15 @@ BUILTIN_TEMPLATES: dict[str, dict[str, Any]] = {
         "结构化摘要、引言、相关工作、方法、实验与结果、讨论、结论；面向有数据与实验的原创论文。",
         "适用：有明确研究问题、数据与实验结果的原创研究论文；章节按 IMRaD 扩展。",
         _PAPER_OUTLINE,
+    ),
+    "paper-draft": _template(
+        PAPER_DRAFT_NAME,
+        "paper",
+        PAPER_DRAFT_DESCRIPTION,
+        PAPER_DRAFT_TAGLINE,
+        PAPER_DRAFT_OUTLINE,
+        markdown=PAPER_DRAFT_MARKDOWN,
+        sections=PAPER_DRAFT_SECTIONS,
     ),
     "narrative": _template(
         "叙述性综述",
@@ -475,7 +505,7 @@ def list_templates(files_dir: Path) -> list[dict[str, Any]]:
             "kind": DEFAULT_TEMPLATE["kind"],
             "description": DEFAULT_TEMPLATE["description"],
             "outline": DEFAULT_TEMPLATE["outline"],
-            "sections": sections_from_markdown(DEFAULT_TEMPLATE["markdown"]),
+            "sections": template_sections_of(DEFAULT_TEMPLATE),
         }
     ]
     for template_id, meta in BUILTIN_TEMPLATES.items():
@@ -487,7 +517,7 @@ def list_templates(files_dir: Path) -> list[dict[str, Any]]:
                 "kind": meta["kind"],
                 "description": meta["description"],
                 "outline": meta["outline"],
-                "sections": sections_from_markdown(meta["markdown"]),
+                "sections": template_sections_of(meta),
             }
         )
     for path in _uploaded_templates(files_dir):
@@ -535,7 +565,7 @@ def resolve_template(
     if value and value not in {"default", "auto"}:
         if value in BUILTIN_TEMPLATES:
             meta = BUILTIN_TEMPLATES[value]
-            return sections_from_markdown(meta["markdown"]), meta["name"], ""
+            return template_sections_of(meta), meta["name"], ""
         if external is not None and value.split(":", 1)[0] in {"upload", "paper"}:
             return external(value)
         name = value[5:] if value.startswith("file:") else value
@@ -577,6 +607,18 @@ def sections_from_markdown(text: str) -> list[str]:
             if title and "参考文献" not in title:
                 titles.append(title)
     return titles
+
+
+def template_sections_of(meta: dict[str, Any]) -> list[str]:
+    """模板章节骨架：显式声明的优先，否则从 Markdown 二级标题提取。
+
+    内置模板的正文可能是一整份写作规范（一级/二级标题是方法论章节），
+    不能直接当作草稿骨架，因此支持在模板字典里显式给出 ``sections``。
+    """
+    explicit = meta.get("sections")
+    if explicit:
+        return list(explicit)
+    return sections_from_markdown(meta.get("markdown") or "")
 
 
 def _draft_headings(text: str) -> list[str]:

@@ -6396,6 +6396,23 @@ html[data-sidebar='collapsed'] .library {
   padding: 22px 0 64px;
 }
 
+/* 手型工具：按住页面拖动平移画布，此时禁止划词与浏览器的原生触摸滚动 */
+.pdf-view.is-pan {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.pdf-view.is-pan.is-panning {
+  cursor: grabbing;
+}
+
+/* 文本层与页面图片自带的光标会盖掉抓手，统一跟随容器 */
+.pdf-view.is-pan .pdf-pages,
+.pdf-view.is-pan .pdf-pages * {
+  cursor: inherit;
+}
+
 .pdf-pages {
   display: flex;
   flex-direction: column;
@@ -14602,6 +14619,12 @@ button.reward-tile {
 }
 
 .topbar-dual-actions .dual-zoom {
+  min-width: 46px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 原版 PDF 放大后的百分比提示（点击恢复适配宽度） */
+.topbar .dual-zoom {
   min-width: 46px;
   font-variant-numeric: tabular-nums;
 }

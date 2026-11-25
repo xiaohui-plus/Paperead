@@ -84,7 +84,7 @@ export const KIND_LABEL: Record<ModelKind, string> = {
 
 export const KIND_HINT: Record<ModelKind, string> = {
   answer:
-    '负责论文问答、翻译、导读和脉络；推荐已换到 2026 新模型。要多模态选 DeepSeek / Kimi / 豆包，偏纯文本推理选 GLM-5.3 / Qwen。',
+    '负责论文问答、翻译、导读和脉络；推荐已换到 2026 新模型。要多模态选 DeepSeek / Kimi / 豆包 / OpenAI，偏纯文本推理选 GLM-5.3 / Qwen。',
   vision:
     '负责论文里的图片理解（公式裁图 → LaTeX）；推荐用原生多模态新模型，也可以选专用视觉模型。',
 }
@@ -306,6 +306,60 @@ export const PRESETS: ProviderPreset[] = [
       },
     ],
   },
+  {
+    id: 'openai',
+    kind: 'answer',
+    label: 'OpenAI',
+    provider: 'OpenAI API',
+    baseUrl: 'https://api.openai.com/v1',
+    note: 'GPT-5.6 起；GPT-6 系列工具调用需 Responses，研究 agent 建议用 5.6',
+    keyUrl: 'https://platform.openai.com/api-keys',
+    defaultModel: 'gpt-5.6-sol',
+    models: [
+      {
+        id: 'gpt-5.6-sol',
+        label: 'GPT-5.6 Sol',
+        note: '默认；完整工具调用能力，适合研究/综述 agent',
+        recommended: true,
+        vision: true,
+      },
+      {
+        id: 'gpt-5.6-terra',
+        label: 'GPT-5.6 Terra',
+        note: '智能与成本均衡，原生多模态',
+        vision: true,
+      },
+      {
+        id: 'gpt-5.6-luna',
+        label: 'GPT-5.6 Luna',
+        note: '最轻量，适合批量翻译与问答',
+        vision: true,
+      },
+      {
+        id: 'gpt-6.2-astra',
+        label: 'GPT-6.2 Astra',
+        note: '2026-11 旗舰；Chat Completions 可用，工具调用需 Responses',
+        vision: true,
+      },
+      {
+        id: 'gpt-6.2-sol',
+        label: 'GPT-6.2 Sol',
+        note: '高性价比旗舰；工具调用需 Responses',
+        vision: true,
+      },
+      {
+        id: 'gpt-6.1-terra',
+        label: 'GPT-6.1 Terra',
+        note: '视觉推理与写作均衡；工具调用需 Responses',
+        vision: true,
+      },
+      {
+        id: 'gpt-6-luna',
+        label: 'GPT-6 Luna',
+        note: '高吞吐低成本；工具调用需 Responses',
+      },
+    ],
+  },
 
   // ── 识图模型：同样按服务商分组 ─────────────────────────
   {
@@ -458,6 +512,39 @@ export const PRESETS: ProviderPreset[] = [
         id: 'Qwen/Qwen3-VL-8B-Instruct',
         label: 'Qwen3-VL-8B-Instruct',
         note: '更便宜、更快，适合批量公式',
+      },
+    ],
+  },
+  {
+    id: 'openai-vision',
+    kind: 'vision',
+    label: 'OpenAI',
+    provider: 'OpenAI API',
+    baseUrl: 'https://api.openai.com/v1',
+    note: 'GPT-5.6 / GPT-6.1 原生视觉',
+    keyUrl: 'https://platform.openai.com/api-keys',
+    defaultModel: 'gpt-5.6-sol',
+    models: [
+      {
+        id: 'gpt-5.6-sol',
+        label: 'GPT-5.6 Sol',
+        note: '视觉能力最强，公式、图表、表格都稳',
+        recommended: true,
+      },
+      {
+        id: 'gpt-5.6-terra',
+        label: 'GPT-5.6 Terra',
+        note: '视觉与成本均衡',
+      },
+      {
+        id: 'gpt-5.6-luna',
+        label: 'GPT-5.6 Luna',
+        note: '更便宜更快，适合批量公式',
+      },
+      {
+        id: 'gpt-6.1-terra',
+        label: 'GPT-6.1 Terra',
+        note: '视觉推理更强，复杂版面更稳',
       },
     ],
   },

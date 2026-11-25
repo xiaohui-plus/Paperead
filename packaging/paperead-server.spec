@@ -73,6 +73,7 @@ a = Analysis(
         "certifi",
         "server.research.pandoc_setup",
         "server.node_setup",
+        "server.tex_setup",
     ],
     excludes=[
         "tkinter",

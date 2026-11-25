@@ -140,6 +140,11 @@ function readingLayoutWidth(): number {
   return (document.documentElement.clientWidth || window.innerWidth) / zoom
 }
 
+/** 页面放大倍率：1 = 适配宽度，上限 3，按 1% 取整，滚轮和按钮共用。 */
+function clampZoom(value: number): number {
+  return Math.min(3, Math.max(1, Math.round(value * 100) / 100))
+}
+
 export function ReaderView({ paperId, onBack }: Props) {
   const [paper, setPaper] = useState<Paper | null>(null)
   const [error, setError] = useState('')
@@ -153,6 +158,13 @@ export function ReaderView({ paperId, onBack }: Props) {
   const [translationFailures, setTranslationFailures] = useState<Record<string, number>>({})
   // 可译清单与验收报告：全文翻译的 pending / 失败 / 覆盖率都以服务端为准
   const [translationManifest, setTranslationManifest] = useState<TranslationManifest | null>(null)
+  // 服务端任务进度：段数与进度条只认它。本地 blocks 里的译文还混着阅读流
+  // 按页翻译写回的块（不可译块也可能带译文），拿它当任务进度会虚高。
+  const [jobProgress, setJobProgress] = useState<{
+    done: number
+    total: number
+    failed: number
+  } | null>(null)
   const [translationNotice, setTranslationNotice] = useState<{
     tone: 'info' | 'warn' | 'error'
     text: string
@@ -246,6 +258,9 @@ export function ReaderView({ paperId, onBack }: Props) {
   const [dualSync, setDualSync] = useState(true)
   // 双栏页面放大倍率：1 = 适配列宽；放大后可横向滚动查看页面局部，两栏视野保持同步
   const [dualZoom, setDualZoom] = useState(1)
+  // 原版 PDF 的放大倍率与手型工具：Ctrl+滚轮改倍率，手型工具下可拖动平移
+  const [pdfZoom, setPdfZoom] = useState(1)
+  const [pdfPan, setPdfPan] = useState(false)
   // 译文 PDF：P2 生成的页级回填产物，右栏直接用 pdf.js 渲染它
   const translatedPdfUrl =
     paperId !== 'demo'
@@ -458,11 +473,13 @@ export function ReaderView({ paperId, onBack }: Props) {
       setDualMode(true)
       setDualCollapsed(true)
       setPdfMode(false)
+      setJobProgress({ done: job.done, total: job.total, failed: job.failed })
 
       let jobCursor = cursor
       let report: TranslationReport | null = job.report ?? null
       let terminal: TranslationJob['status'] = job.status
       let lastError: { code: string; message: string } | null = job.error ?? null
+
 
       try {
         while (pollTokenRef.current === token) {
@@ -473,6 +490,7 @@ export function ReaderView({ paperId, onBack }: Props) {
           terminal = data.status
           lastError = data.error ?? null
           report = data.report ?? report
+          setJobProgress({ done: data.done, total: data.total, failed: data.failed })
 
           if (terminal === 'running' || terminal === 'queued') {
             setTranslationNotice({
@@ -481,6 +499,7 @@ export function ReaderView({ paperId, onBack }: Props) {
                 data.failed ? `，失败 ${data.failed}` : ''
               }`,
             })
+
             await new Promise((resolve) =>
               window.setTimeout(resolve, 1200),
             )
@@ -806,6 +825,11 @@ export function ReaderView({ paperId, onBack }: Props) {
       pollTokenRef.current += 1
       fullRunning.current = false
     }
+  }, [paperId])
+
+  // 切换论文时清掉上一轮任务的进度，避免新论文首屏显示旧数字。
+  useEffect(() => {
+    setJobProgress(null)
   }, [paperId])
 
   // URL 直接打开 ?view=dual 时，自动开始整篇翻译（只触发一次）
@@ -1814,6 +1838,12 @@ export function ReaderView({ paperId, onBack }: Props) {
     }
   }
 
+  /** Ctrl/⌘ + 滚轮：原版 PDF 改 pdfZoom，对比阅读两栏共用 dualZoom。 */
+  const zoomByWheel = (delta: number) => {
+    if (dualMode) setDualZoom((z) => clampZoom(z + delta * 0.1))
+    else setPdfZoom((z) => clampZoom(z + delta * 0.1))
+  }
+
   // 原版视图里 Reader 是卸载状态，滚动位置存在内存里，切回来补上
   useEffect(() => {
     if (pdfMode) return
@@ -1859,12 +1889,31 @@ export function ReaderView({ paperId, onBack }: Props) {
     )
   }
 
-  const translated = paper.blocks.filter((b) => (b.translated ?? '').trim()).length
+  const legacyTranslated = paper.blocks.filter((b) => (b.translated ?? '').trim()).length
   const legacyTotal = paper.blocks.filter(
     (b) => (b.translatable || b.kind === 'caption') && b.text.trim(),
   ).length
   // 分母用服务端可译清单：参考文献/图内文字不再被算成「没翻」。
-  const total = translationManifest?.eligible_total ?? legacyTotal
+  const manifestTotal = translationManifest?.eligible_total ?? legacyTotal
+  const manifestDone = translationManifest?.translated ?? legacyTranslated
+  // 运行中的任务进度优先于清单：引擎翻译的进度会由服务端逐段递增，
+  // 而清单要等任务落盘后才刷新，拿清单顶替会停在 0。
+  // 排版阶段沿用任务进度，避免进度条在结束瞬间回退。
+  const jobRunning = translating || translateStarting || pdfBuilding
+  const jobScope =
+    jobRunning && jobProgress && jobProgress.total > 0 ? jobProgress : null
+  // 骨架与顶部进度线是本次任务口径：job 的 done/total 由服务端单调递增。
+  const progressTotal = Math.max(0, jobScope ? jobScope.total : manifestTotal)
+  const progressDone = Math.min(
+    jobScope ? jobScope.done : manifestDone,
+    progressTotal,
+  )
+  // 顶栏「已翻译 x/y 段」与右栏骨架、进度线共用同一口径：
+  // 任务运行中取服务端 job 的 done/total（逐段递增），任务结束后取可译清单
+  // 的整篇统计。两者都来自服务端，不用本地 blocks 统计——那里混着阅读流
+  // 按页翻译写回的译文，会把数字算到分母之外。
+  const translated = progressDone
+  const total = progressTotal
   // 右栏骨架阶段：翻译中 → 译文 PDF 生成中 → 还没开始
   const skeletonPhase: 'translating' | 'building' | 'idle' =
     translating || translateStarting
@@ -1892,9 +1941,8 @@ export function ReaderView({ paperId, onBack }: Props) {
         scale={scale}
         onScale={(v) => {
           if (pdfMode) {
-            // 原版视图下 ± 控制页面宽度
-            const step = v > scale ? 120 : -120
-            setPdfWidth((w) => Math.min(1200, Math.max(600, w + step)))
+            // 原版视图下 ± 与 Ctrl+滚轮一致，都改页面放大倍率
+            setPdfZoom((z) => clampZoom(z + (v > scale ? 0.1 : -0.1)))
           } else {
             setScale(Math.min(1.35, Math.max(0.85, v)))
           }
@@ -1932,10 +1980,12 @@ export function ReaderView({ paperId, onBack }: Props) {
         dualSync={dualSync}
         onToggleDualSync={() => setDualSync((v) => !v)}
         dualZoom={dualZoom}
-        onDualZoom={(delta) =>
-          setDualZoom((z) => Math.min(3, Math.max(1, Math.round((z + delta) * 100) / 100)))
-        }
+        onDualZoom={(delta) => setDualZoom((z) => clampZoom(z + delta))}
         onDualZoomReset={() => setDualZoom(1)}
+        pdfPan={pdfPan}
+        onTogglePdfPan={() => setPdfPan((v) => !v)}
+        pdfZoom={pdfZoom}
+        onPdfZoomReset={() => setPdfZoom(1)}
         translatedPdfReady={translatedPdfReady}
         translatedPdfUrl={translatedPdfUrl}
         translationLang={targetLang}
@@ -2078,7 +2128,7 @@ focusAnnotation={focusAnnotation}
             progress={
               translatedPdfReady || skeletonPhase === 'idle'
                 ? null
-                : { done: translated, total, building: skeletonPhase === 'building' }
+                : { done: progressDone, total: progressTotal, building: skeletonPhase === 'building' }
             }
             pdfPane={
               <Suspense
@@ -2097,6 +2147,8 @@ focusAnnotation={focusAnnotation}
                   initialPage={visiblePage}
                   width={pdfWidth}
                   zoom={dualZoom}
+                  pan={pdfPan}
+                  onZoomWheel={zoomByWheel}
                   jump={pdfJump}
                   onPageChange={setPdfPage}
                   pageUrls={pageUrls}
@@ -2128,6 +2180,8 @@ focusAnnotation={focusAnnotation}
                     initialPage={dualStartPage}
                     width={pdfWidth}
                     zoom={dualZoom}
+                    pan={pdfPan}
+                    onZoomWheel={zoomByWheel}
                     onPageChange={() => undefined}
                     pageUrls={{}}
                     pdfUrl={translatedPdfUrl}
@@ -2141,8 +2195,8 @@ focusAnnotation={focusAnnotation}
                   pageSizes={paper.page_sizes}
                   currentPage={pdfPage}
                   phase={skeletonPhase}
-                  done={translated}
-                  total={total}
+                  done={progressDone}
+                  total={progressTotal}
                 />
               )
             }
@@ -2163,6 +2217,9 @@ focusAnnotation={focusAnnotation}
               pageSizes={paper.page_sizes}
               initialPage={visiblePage}
               width={pdfWidth}
+              zoom={pdfZoom}
+              pan={pdfPan}
+              onZoomWheel={zoomByWheel}
               jump={pdfJump}
               onPageChange={setPdfPage}
               pageUrls={pageUrls}

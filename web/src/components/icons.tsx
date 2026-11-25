@@ -11,6 +11,7 @@ import {
   Flower2,
   FolderPlus,
   Globe,
+  Hand,
   Heart,
   Languages,
   LayoutTemplate,
@@ -512,6 +513,8 @@ export const IconPin = lucideIcon(Pin)
 export const IconPinOff = lucideIcon(PinOff)
 /** 阅读：PDF 审阅模式（页面右侧批注） */
 export const IconReview = lucideIcon(MessageSquareText)
+/** 阅读：PDF 手型工具（拖动平移画布） */
+export const IconHand = lucideIcon(Hand)
 
 export function IconPlug() {
   return (

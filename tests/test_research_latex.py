@@ -9,6 +9,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
+from docx.shared import Pt
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -91,6 +95,13 @@ def test_chinese_markdown_uses_ctexart():
     assert style == "ctexart"
     assert "{ctexart}" in tex
     assert "\\title{免疫治疗综述}" in tex
+    # 与 Word 导出一致的中文论文版式。
+    assert "\\linespread{1.2}" in tex
+    assert "\\setlength{\\parindent}{2em}" in tex
+    assert "\\setCJKmainfont{FangSong}" in tex
+    assert "section/format = {\\zihao{3}\\heiti\\bfseries" in tex
+    assert "subsection/format = {\\zihao{-3}\\heiti\\bfseries" in tex
+    assert "subsubsection/format = {\\zihao{4}\\songti\\bfseries" in tex
 
 
 @pytest.mark.skipif(not HAS_PANDOC, reason="需要 pandoc")
@@ -137,6 +148,38 @@ def test_export_latex_writes_tex_file(workspace):
     saved = Path(project["workspace"]) / "files" / relative
     assert saved.is_file()
     assert "\\documentclass" in saved.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(not HAS_PANDOC, reason="需要 pandoc")
+def test_export_docx_applies_review_layout(workspace):
+    client, store, project, session = workspace
+
+    response = client.post(
+        f"/internal/research/sessions/{session['id']}/export",
+        json={
+            "format": "docx",
+            "content": "# 排版测试\n\n正文段落：用于检查导出后的中文排版。\n",
+            "title": "排版测试",
+        },
+    )
+
+    data = response.json()
+    assert not data.get("error"), data.get("error")
+    saved = Path(project["workspace"]) / "files" / data["files"][0]["path"]
+    document = Document(str(saved))
+
+    normal = document.styles["Normal"]
+    assert normal.font.size == Pt(12)
+    assert normal.element.get_or_add_rPr().get_or_add_rFonts().get(qn("w:eastAsia")) == "仿宋"
+    heading1 = next(
+        style for style in document.styles if (style.style_id or "").lower() == "heading1"
+    )
+    assert heading1.font.size == Pt(16)
+
+    body = next(p for p in document.paragraphs if p.text.startswith("正文段落"))
+    assert body.alignment == WD_ALIGN_PARAGRAPH.JUSTIFY
+    assert body.paragraph_format.line_spacing == pytest.approx(1.2)
+    assert body.paragraph_format.first_line_indent == Pt(24)
 
 
 @pytest.mark.skipif(not HAS_PANDOC, reason="需要 pandoc")

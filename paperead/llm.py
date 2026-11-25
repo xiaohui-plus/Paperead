@@ -40,6 +40,45 @@ def _fixed_temperature_model(model: str | None) -> bool:
     return name.startswith("kimi-k3") or name.startswith("kimi-k2.5")
 
 
+def _openai_reasoning_model(model: str | None) -> bool:
+    """OpenAI GPT-5 / GPT-6 及 o 系列推理模型。
+
+    这类模型不支持自定义 temperature / top_p，输出上限参数也从 ``max_tokens``
+    换成了 ``max_completion_tokens``，继续传旧参数会直接 400。
+    """
+    name = (model or "").lower().rsplit("/", 1)[-1]
+    return name.startswith(("gpt-5", "gpt-6", "o1", "o3", "o4"))
+
+
+def _completion_kwargs(
+    model: str,
+    messages: Sequence[dict],
+    *,
+    temperature: float,
+    max_tokens: int | None,
+    stream: bool | None = None,
+    tools: Sequence[dict] | None = None,
+    extra_body: dict | None = None,
+) -> dict[str, object]:
+    """按模型族组装 chat.completions 参数，兼容 OpenAI 推理模型与国产兼容接口。"""
+    kwargs: dict[str, object] = {"model": model, "messages": list(messages)}
+    if _openai_reasoning_model(model):
+        if max_tokens is not None:
+            kwargs["max_completion_tokens"] = max_tokens
+    else:
+        kwargs["max_tokens"] = max_tokens
+        if not _fixed_temperature_model(model):
+            kwargs["temperature"] = temperature
+    if stream is not None:
+        kwargs["stream"] = stream
+    if tools is not None:
+        kwargs["tools"] = list(tools)
+        kwargs["tool_choice"] = "auto"
+    if extra_body:
+        kwargs["extra_body"] = extra_body
+    return kwargs
+
+
 def _sanitize_proxy_env() -> None:
     """清洗 NO_PROXY 中 httpx 无法解析的条目。
 
@@ -154,15 +193,13 @@ class OpenAICompatBackend:
         extra_body: dict | None = None,
     ) -> str:
         actual_model = model or self.config.model
-        kwargs: dict[str, object] = {
-            "model": actual_model,
-            "messages": list(messages),
-            "max_tokens": max_tokens,
-        }
-        if not _fixed_temperature_model(actual_model):
-            kwargs["temperature"] = temperature
-        if extra_body:
-            kwargs["extra_body"] = extra_body
+        kwargs = _completion_kwargs(
+            actual_model,
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            extra_body=extra_body,
+        )
         resp = await self._client.chat.completions.create(**kwargs)
         content = (resp.choices[0].message.content or "").strip()
         if not content:
@@ -181,16 +218,14 @@ class OpenAICompatBackend:
     ) -> AsyncIterator[str]:
         """流式版本：按 delta 产出文本，调用方负责拼接。"""
         actual_model = model or self.config.model
-        kwargs: dict[str, object] = {
-            "model": actual_model,
-            "messages": list(messages),
-            "max_tokens": max_tokens,
-            "stream": True,
-        }
-        if not _fixed_temperature_model(actual_model):
-            kwargs["temperature"] = temperature
-        if extra_body:
-            kwargs["extra_body"] = extra_body
+        kwargs = _completion_kwargs(
+            actual_model,
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+            extra_body=extra_body,
+        )
         stream = await self._client.chat.completions.create(**kwargs)
         try:
             async for chunk in stream:
@@ -215,17 +250,14 @@ class OpenAICompatBackend:
     ) -> ToolReply:
         """带 tools 的一轮调用（非流式），供 agent 循环做工具决策。"""
         actual_model = model or self.config.model
-        kwargs: dict[str, object] = {
-            "model": actual_model,
-            "messages": list(messages),
-            "max_tokens": max_tokens,
-            "tools": list(tools),
-            "tool_choice": "auto",
-        }
-        if not _fixed_temperature_model(actual_model):
-            kwargs["temperature"] = temperature
-        if extra_body:
-            kwargs["extra_body"] = extra_body
+        kwargs = _completion_kwargs(
+            actual_model,
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            extra_body=extra_body,
+        )
         resp = await self._client.chat.completions.create(**kwargs)
         choice = resp.choices[0]
         msg = choice.message
@@ -261,18 +293,15 @@ class OpenAICompatBackend:
         一次完整调用，有的按 index 增量拼接），这里统一按 index 累加。
         """
         actual_model = model or self.config.model
-        kwargs: dict[str, object] = {
-            "model": actual_model,
-            "messages": list(messages),
-            "max_tokens": max_tokens,
-            "stream": True,
-            "tools": list(tools),
-            "tool_choice": "auto",
-        }
-        if not _fixed_temperature_model(actual_model):
-            kwargs["temperature"] = temperature
-        if extra_body:
-            kwargs["extra_body"] = extra_body
+        kwargs = _completion_kwargs(
+            actual_model,
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+            tools=tools,
+            extra_body=extra_body,
+        )
 
         stream = await self._client.chat.completions.create(**kwargs)
         order: list[int] = []

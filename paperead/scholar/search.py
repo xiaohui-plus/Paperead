@@ -63,7 +63,15 @@ from .sources import (
 
 log = logging.getLogger(__name__)
 
-SOURCE_KEYS = ("arxiv", "pubmed", "openalex", "europepmc", "semanticscholar", "core")
+SOURCE_KEYS = (
+    "arxiv",
+    "pubmed",
+    "openalex",
+    "europepmc",
+    "preprints",
+    "semanticscholar",
+    "core",
+)
 SORT_KEYS = ("rel", "new", "updated")
 FIELD_KEYS = ("all", "title", "abstract", "author")
 
@@ -259,6 +267,28 @@ async def _search_europe_pmc(data: SearchInput) -> SearchResult:
     return SearchResult(papers, int(payload.get("hitCount") or 0), page_limit)
 
 
+async def _search_preprints(data: SearchInput) -> SearchResult:
+    """预印本检索：Europe PMC 的 SRC:PPR 子集，覆盖 bioRxiv / medRxiv 等。"""
+    url, page_limit = europe_pmc_url(
+        data.q,
+        field=data.field,
+        phrase=data.phrase,
+        from_year=data.from_year,
+        to_year=data.to_year,
+        sort=data.sort,
+        page=data.page,
+        per_page=data.per_page,
+        preprint=True,
+    )
+    page = min(data.page, page_limit - 1)
+    offset = page * data.per_page
+    payload = json.loads(await fetch_text(url))
+    papers = parse_europe_pmc(payload, source_label="preprints")[
+        offset : offset + data.per_page
+    ]
+    return SearchResult(papers, int(payload.get("hitCount") or 0), page_limit)
+
+
 async def search(data: SearchInput) -> tuple[SearchResult, str, bool]:
     """返回 (结果, 实际检索词, 是否做过中译英)。异常为 FriendlyError。"""
     data = data.clean()
@@ -274,6 +304,7 @@ async def search(data: SearchInput) -> tuple[SearchResult, str, bool]:
         "pubmed": _search_pubmed,
         "openalex": _search_openalex,
         "europepmc": _search_europe_pmc,
+        "preprints": _search_preprints,
         "semanticscholar": _search_semantic_scholar,
         "core": _search_core,
     }[data.source]
