@@ -122,7 +122,7 @@ jobs:
 
             安装包不内置 pandoc：首次启动会在后台自动下载一次（约 24MB），
             之后离线可用；也可以在「设置 → 常规设置 → 写作工具」里手动重试。
-            PDF 与阅读数据默认保存在 `%LOCALAPPDATA%\\paperead-data`。
+            PDF 与阅读数据默认保存在安装目录下的 `data\\`（`%LOCALAPPDATA%\\Paperead\\data`）。
             模型配置、文献与设置也都存在这里，覆盖安装 / 自动更新不会清除。
 
             > 本轮仅提供 Windows x64 安装包，不发布 Android APK。

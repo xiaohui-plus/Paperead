@@ -13,6 +13,11 @@ interface Props {
   onScale: (next: number) => void
   translated: number
   total: number
+  /**
+   * 是否显示「已翻译 x/y 段」与对应进度线。
+   * PDF 阅读/对照模式的翻译由外部引擎完成，块数是映射估算值，不在这里展示。
+   */
+  showTranslationCount?: boolean
   onOpenSettings: () => void
   configured: boolean
   onBack?: () => void
@@ -85,6 +90,7 @@ export function TopBar({
   onScale,
   translated,
   total,
+  showTranslationCount = true,
   onOpenSettings,
   configured,
   onBack,
@@ -382,11 +388,20 @@ export function TopBar({
           </button>
         )}
 
-        <span className="pill" title={`已翻译 ${translated} / ${total} 段`}>
-          {page ? <>P{page} · </> : null}
-          <b>{translated}</b>/{total}
-          {translating && <i className="spin-dot" />}
-        </span>
+        {(page || showTranslationCount) && (
+          <span
+            className="pill"
+            title={showTranslationCount ? `已翻译 ${translated} / ${total} 段` : undefined}
+          >
+            {page ? <>P{page}{showTranslationCount ? ' · ' : ''}</> : null}
+            {showTranslationCount && (
+              <>
+                <b>{translated}</b>/{total}
+                {translating && <i className="spin-dot" />}
+              </>
+            )}
+          </span>
+        )}
 
 
         <details className="topbar-download" ref={downloadRef}>
@@ -470,9 +485,11 @@ export function TopBar({
 
       </div>
 
-      <div className="topbar-progress">
-        <i style={{ width: `${pct}%` }} />
-      </div>
+      {showTranslationCount && (
+        <div className="topbar-progress">
+          <i style={{ width: `${pct}%` }} />
+        </div>
+      )}
 
       {toast && (
         <div className={`toast ${toast.kind}`} onClick={() => setToast(null)}>

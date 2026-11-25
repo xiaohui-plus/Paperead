@@ -3,9 +3,10 @@
 pandoc 生成的 docx 只带默认的西文样式，中文会落到 Calibri 之类的字体上。
 这里在导出后统一改样式与段落格式：
 
-- 正文：小四（12pt）仿宋，西文与数字 Times New Roman，1.2 倍行距，首行缩进 2 字符；
+- 正文：小四（12pt）仿宋，西文与数字 Times New Roman，1.3 倍行距，首行缩进 2 字符；
 - 对齐：两端对齐（Word 的 justify 本身不会拉伸段落末行，末行保持左对齐）；
-- 标题：一级三号黑体加粗、二级小三黑体加粗、三级四号宋体加粗。
+- 标题：一级三号黑体加粗、二级小三黑体加粗、三级四号宋体加粗；
+- 颜色：标题与正文一律黑色，覆盖主题色、超链接色与继承样式色。
 
 排版只是“尽量规范”，失败时不应影响导出本身，调用方负责兜底。
 """
@@ -19,13 +20,15 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Pt
+from docx.shared import Pt, RGBColor
+from docx.text.run import Run
 
 BODY_FONT = "仿宋"
 WESTERN_FONT = "Times New Roman"
 BODY_SIZE_PT = 12.0  # 小四
-LINE_SPACING = 1.2
+LINE_SPACING = 1.3
 FIRST_LINE_INDENT_CHARS = 2
+TEXT_COLOR = RGBColor(0x00, 0x00, 0x00)
 
 # 标题层级 -> (中文字体, 字号pt)。四级及以下按三级规格兜底。
 HEADING_SPECS: dict[int, tuple[str, float]] = {
@@ -100,6 +103,11 @@ def _apply_doc_defaults(document) -> None:
         size = OxmlElement("w:sz")
         rpr.append(size)
     size.set(qn("w:val"), str(int(BODY_SIZE_PT * 2)))
+    color = rpr.find(qn("w:color"))
+    if color is None:
+        color = OxmlElement("w:color")
+        rpr.append(color)
+    color.set(qn("w:val"), "000000")
 
 
 def _normalized(value: str) -> str:
@@ -118,9 +126,20 @@ def _style(document, *names: str):
 def _format_style(style, chinese: str, size_pt: float, *, bold: bool | None = None) -> None:
     style.font.name = WESTERN_FONT
     style.font.size = Pt(size_pt)
+    style.font.color.rgb = TEXT_COLOR
     if bold is not None:
         style.font.bold = bold
     _set_rfonts(style.element, chinese)
+
+
+def _blacken_paragraph(paragraph) -> None:
+    """把段落里所有 run 的字色改成黑色，包括超链接里的 run。
+
+    ``paragraph.runs`` 不包含超链接内的 run，所以直接遍历 ``w:r``，
+    再用 python-docx 的 Run 包装，保证 w:color 按 schema 顺序插入。
+    """
+    for element in paragraph._p.iter(qn("w:r")):
+        Run(element, paragraph).font.color.rgb = TEXT_COLOR
 
 
 def _apply_body_style(style) -> None:
@@ -180,7 +199,15 @@ def apply_review_layout(path: Path | str) -> None:
         _apply_body_style(_style(document, name))
     _apply_heading_styles(document)
     for paragraph in document.paragraphs:
+        _blacken_paragraph(paragraph)
         if _heading_level(_style_name(paragraph)):
+            paragraph.paragraph_format.line_spacing = LINE_SPACING
             continue
         _apply_body_paragraph(paragraph)
+    for table in document.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    _blacken_paragraph(paragraph)
+                    paragraph.paragraph_format.line_spacing = LINE_SPACING
     document.save(str(target))

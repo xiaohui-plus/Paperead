@@ -21,6 +21,7 @@ import {
   extractHighlights,
   fetchTranslationManifest,
   getActiveTranslationJob,
+  getEngineStatus,
   getTranslationJob,
   listAnnotations,
   listHighlights,
@@ -145,6 +146,37 @@ function clampZoom(value: number): number {
   return Math.min(3, Math.max(1, Math.round(value * 100) / 100))
 }
 
+/**
+ * 外部翻译引擎的阶段文案。
+ *
+ * PDF 全文翻译由 BabelDOC 完成，它按自己的阶段和段落推进；应用侧回填的
+ * block 「已翻译段数」只是映射估算，不能当作真实计数，因此有阶段信息时
+ * 一律展示引擎自己的进度，只有拿不到阶段（离线分块翻译）才回退到块数。
+ */
+function engineStageText(
+  stage: string | undefined,
+  stageDone: number | undefined,
+  stageTotal: number | undefined,
+  fallback: string,
+): string {
+  switch (stage) {
+    case 'parse':
+      return '正在解析版面'
+    case 'translate':
+      return stageTotal
+        ? `正在翻译段落 ${stageDone ?? 0}/${stageTotal}`
+        : '正在翻译段落'
+    case 'typeset':
+      return '正在排版译文'
+    case 'save':
+      return '正在保存译文 PDF'
+    case 'done':
+      return '正在回填译文'
+    default:
+      return fallback
+  }
+}
+
 export function ReaderView({ paperId, onBack }: Props) {
   const [paper, setPaper] = useState<Paper | null>(null)
   const [error, setError] = useState('')
@@ -160,10 +192,14 @@ export function ReaderView({ paperId, onBack }: Props) {
   const [translationManifest, setTranslationManifest] = useState<TranslationManifest | null>(null)
   // 服务端任务进度：段数与进度条只认它。本地 blocks 里的译文还混着阅读流
   // 按页翻译写回的块（不可译块也可能带译文），拿它当任务进度会虚高。
+  // PDF 全文翻译走外部引擎，块数只是映射估计值；引擎自己上报的 stage 才是准确口径。
   const [jobProgress, setJobProgress] = useState<{
     done: number
     total: number
     failed: number
+    stage?: string
+    stageDone?: number
+    stageTotal?: number
   } | null>(null)
   const [translationNotice, setTranslationNotice] = useState<{
     tone: 'info' | 'warn' | 'error'
@@ -407,6 +443,13 @@ export function ReaderView({ paperId, onBack }: Props) {
         detail?: string
       }
       if (!res.ok) {
+        // 依赖（翻译引擎）还没下载好：这不是翻译失败，打开带进度的下载弹窗，
+        // 装好后会自动继续，避免只给一行「译文 PDF 生成失败」。
+        if (res.headers.get('X-Translation-Code') === 'engine_missing') {
+          setTranslationNotice(null)
+          setEngineDialogOpen(true)
+          return
+        }
         setTranslationNotice({
           tone: 'error',
           text: data.detail || `译文 PDF 生成失败（HTTP ${res.status}）`,
@@ -473,7 +516,14 @@ export function ReaderView({ paperId, onBack }: Props) {
       setDualMode(true)
       setDualCollapsed(true)
       setPdfMode(false)
-      setJobProgress({ done: job.done, total: job.total, failed: job.failed })
+      setJobProgress({
+        done: job.done,
+        total: job.total,
+        failed: job.failed,
+        stage: job.stage,
+        stageDone: job.stage_done,
+        stageTotal: job.stage_total,
+      })
 
       let jobCursor = cursor
       let report: TranslationReport | null = job.report ?? null
@@ -490,14 +540,19 @@ export function ReaderView({ paperId, onBack }: Props) {
           terminal = data.status
           lastError = data.error ?? null
           report = data.report ?? report
-          setJobProgress({ done: data.done, total: data.total, failed: data.failed })
+          setJobProgress({
+            done: data.done,
+            total: data.total,
+            failed: data.failed,
+            stage: data.stage,
+            stageDone: data.stage_done,
+            stageTotal: data.stage_total,
+          })
 
           if (terminal === 'running' || terminal === 'queued') {
             setTranslationNotice({
               tone: 'info',
-              text: `全文翻译中：${data.done}/${data.total}${
-                data.failed ? `，失败 ${data.failed}` : ''
-              }`,
+              text: engineStageText(data.stage, data.stage_done, data.stage_total, '正在准备翻译任务…'),
             })
 
             await new Promise((resolve) =>
@@ -529,14 +584,20 @@ export function ReaderView({ paperId, onBack }: Props) {
               action: 'resume',
             })
           } else if (terminal === 'failed') {
-            setTranslationNotice({
-              tone: 'error',
-              text: `${lastError?.message || '翻译失败'}（${lastError?.code || 'unknown'}）`,
-              action:
-                lastError?.code === 'auth' || lastError?.code === 'quota'
-                  ? 'settings'
-                  : 'retry',
-            })
+            // 引擎依赖没装好不是翻译失败：弹下载进度窗，装好后自动接着翻译。
+            if (lastError?.code === 'engine_missing') {
+              setTranslationNotice(null)
+              setEngineDialogOpen(true)
+            } else {
+              setTranslationNotice({
+                tone: 'error',
+                text: `${lastError?.message || '翻译失败'}（${lastError?.code || 'unknown'}）`,
+                action:
+                  lastError?.code === 'auth' || lastError?.code === 'quota'
+                    ? 'settings'
+                    : 'retry',
+              })
+            }
           } else if (terminal === 'cancelled') {
             setTranslationNotice({
               tone: 'warn',
@@ -611,6 +672,21 @@ export function ReaderView({ paperId, onBack }: Props) {
     setPdfMode(false)
     setTranslateStarting(true)
     const online = await serverReachable()
+
+    // 依赖预检：引擎还没下载好时先弹下载进度窗，不要等任务跑起来再报翻译失败。
+    if (online) {
+      try {
+        const engine = await getEngineStatus()
+        if (!engine.installed) {
+          setTranslateStarting(false)
+          setTranslationNotice(null)
+          setEngineDialogOpen(true)
+          return
+        }
+      } catch {
+        // 状态接口不可用时不阻断，任务接口仍会返回 engine_missing
+      }
+    }
 
     // 服务端清单是唯一口径：参考文献/图内文字/公式碎片不再算「还差几块」。
     let manifest: TranslationManifest | null = null
@@ -1896,24 +1972,28 @@ export function ReaderView({ paperId, onBack }: Props) {
   // 分母用服务端可译清单：参考文献/图内文字不再被算成「没翻」。
   const manifestTotal = translationManifest?.eligible_total ?? legacyTotal
   const manifestDone = translationManifest?.translated ?? legacyTranslated
-  // 运行中的任务进度优先于清单：引擎翻译的进度会由服务端逐段递增，
+  // 运行中的任务进度优先于清单：分块任务（离线/按页）的进度会由服务端逐段递增，
   // 而清单要等任务落盘后才刷新，拿清单顶替会停在 0。
-  // 排版阶段沿用任务进度，避免进度条在结束瞬间回退。
   const jobRunning = translating || translateStarting || pdfBuilding
   const jobScope =
-    jobRunning && jobProgress && jobProgress.total > 0 ? jobProgress : null
-  // 骨架与顶部进度线是本次任务口径：job 的 done/total 由服务端单调递增。
+    jobRunning && jobProgress && (jobProgress.total > 0 || jobProgress.stage)
+      ? jobProgress
+      : null
+  // 离线/分块翻译的兜底计数：只有拿不到引擎阶段时才展示块数。
   const progressTotal = Math.max(0, jobScope ? jobScope.total : manifestTotal)
   const progressDone = Math.min(
     jobScope ? jobScope.done : manifestDone,
     progressTotal,
   )
-  // 顶栏「已翻译 x/y 段」与右栏骨架、进度线共用同一口径：
-  // 任务运行中取服务端 job 的 done/total（逐段递增），任务结束后取可译清单
-  // 的整篇统计。两者都来自服务端，不用本地 blocks 统计——那里混着阅读流
-  // 按页翻译写回的译文，会把数字算到分母之外。
-  const translated = progressDone
-  const total = progressTotal
+  // PDF 全文翻译由外部引擎完成，它按自己的阶段与段落推进。
+  const engineStage = jobScope?.stage
+  const engineStageDone = jobScope?.stageDone ?? 0
+  const engineStageTotal = jobScope?.stageTotal ?? 0
+  // 顶栏「已翻译 x/y 段」只用于流式阅读，统一取可译清单口径；
+  // PDF 阅读/对照模式不显示块数（引擎的块数是映射估算，不能当真实计数）。
+  const translated = manifestDone
+  const total = manifestTotal
+  const showTranslationCount = !pdfMode && !dualMode
   // 右栏骨架阶段：翻译中 → 译文 PDF 生成中 → 还没开始
   const skeletonPhase: 'translating' | 'building' | 'idle' =
     translating || translateStarting
@@ -1949,6 +2029,7 @@ export function ReaderView({ paperId, onBack }: Props) {
         }}
         translated={translated}
         total={total}
+        showTranslationCount={showTranslationCount}
         onOpenSettings={() => {
           setSettingsKind('answer')
           setSettingsOpen(true)
@@ -2128,7 +2209,14 @@ focusAnnotation={focusAnnotation}
             progress={
               translatedPdfReady || skeletonPhase === 'idle'
                 ? null
-                : { done: progressDone, total: progressTotal, building: skeletonPhase === 'building' }
+                : {
+                    done: progressDone,
+                    total: progressTotal,
+                    building: skeletonPhase === 'building',
+                    stage: engineStage,
+                    stageDone: engineStageDone,
+                    stageTotal: engineStageTotal,
+                  }
             }
             pdfPane={
               <Suspense
@@ -2197,6 +2285,16 @@ focusAnnotation={focusAnnotation}
                   phase={skeletonPhase}
                   done={progressDone}
                   total={progressTotal}
+                  stageText={
+                    engineStage
+                      ? engineStageText(
+                          engineStage,
+                          engineStageDone,
+                          engineStageTotal,
+                          '正在翻译全文',
+                        )
+                      : ''
+                  }
                 />
               )
             }

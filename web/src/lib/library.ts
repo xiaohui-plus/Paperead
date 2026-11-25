@@ -347,6 +347,12 @@ export interface TranslationJob {
   pending: number
   eligible: number
   current_page: number
+  /** 外部翻译引擎的阶段（parse / translate / typeset / save / done） */
+  stage?: string
+  /** 引擎阶段内已完成的数量（如已翻译段落数） */
+  stage_done?: number
+  /** 引擎阶段内的总数；translate 阶段即整篇段落数 */
+  stage_total?: number
   coverage: number
   created_at: number
   updated_at: number

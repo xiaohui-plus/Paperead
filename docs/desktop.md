@@ -16,9 +16,9 @@ Python 或 Node。
 - 系统：Windows 10/11 x64
 - 国内镜像：`https://ghproxy.net/https://github.com/xiaohui-plus/Paperead/releases/latest`
 - 安装方式：per-user（安装目录 `%LOCALAPPDATA%\Paperead`），不弹 UAC
-- 安装版数据目录：`%LOCALAPPDATA%\paperead-data`（与安装目录分开，卸载/升级不影响文献库）
+- 安装版数据目录：`%LOCALAPPDATA%\Paperead\data`（与程序同一目录树，覆盖升级只替换程序文件，不影响文献库）
 - 便携版：解压后双击 `启动.cmd`，数据在同级 `data\`；更新时下载新 ZIP，保留 `data\`
-- 卸载：默认保留数据；可在应用内打开数据目录手动删除
+- 卸载：卸载前会把 `data\` 移回 `%LOCALAPPDATA%\paperead-data`，默认保留数据；可在应用内打开数据目录手动删除
 
 首次启动会说明本地数据与模型请求范围，然后打开“模型与密钥”设置：回答模型负责问答/翻译，
 识图模型负责论文里的图片识别，两者可以分别配置，推荐模型旁有直达官网的「获取 API Key」按钮。

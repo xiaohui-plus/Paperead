@@ -22,10 +22,12 @@ import {
   AnnotationPopover,
   RichText,
   SelectionToolbar,
+  TranslateCard,
   hasCitation,
   layoutRect,
   uiZoom,
   type AnnotationActions,
+  type PinnedTranslate,
 } from './Annotations'
 import { matchMarkers, markerMatches } from '../lib/citationMark'
 import { Katex } from './Katex'
@@ -89,6 +91,8 @@ export function BlockView({
   const [prov, setProv] = useState<ProvenanceResult | null>(null)
   const [provBusy, setProvBusy] = useState(false)
   const [selection, setSelection] = useState<SelectionState | null>(null)
+  // 已固定的划词翻译卡片可多张并存；固定后脱离选区，继续选下一段不会把它收掉
+  const [pinnedTranslations, setPinnedTranslations] = useState<PinnedTranslate[]>([])
   const [editing, setEditing] = useState<{ annotation: Annotation; rect: DOMRect } | null>(null)
   const [citePopup, setCitePopup] = useState<{
     marker: string
@@ -432,6 +436,12 @@ export function BlockView({
           text={selection.quote}
           onPick={(color) => void applyHighlight(color, 'highlight')}
           onComment={(color) => void applyHighlight(color, 'comment')}
+          onPinCard={(card) =>
+            setPinnedTranslations((prev) => [
+              ...prev,
+              { ...card, id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}` },
+            ])
+          }
           onAsk={
             onAskQuote
               ? () => {
@@ -453,6 +463,21 @@ export function BlockView({
           }}
         />
       )}
+
+      {pinnedTranslations.map((card) => (
+        <TranslateCard
+          key={card.id}
+          anchor={{ left: card.left, top: card.top, width: card.width }}
+          fixedPosition={{ left: card.left, top: card.top, width: card.width }}
+          state={{ status: 'done', value: card.value }}
+          target={card.target}
+          resetKey={card.id}
+          pinned
+          onClose={() =>
+            setPinnedTranslations((prev) => prev.filter((item) => item.id !== card.id))
+          }
+        />
+      ))}
 
       {editing && annotationActions && (
         <AnnotationPopover

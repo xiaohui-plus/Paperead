@@ -51,9 +51,9 @@ whenToUse: 用户要求以 LaTeX 交付综述、论文或章节时。
 \usepackage{graphicx}
 \usepackage{booktabs,longtable,array,multirow}
 \usepackage{natbib}
-% 与 Word 导出一致的中文论文版式：正文小四仿宋、西文 Times New Roman、
-% 1.2 倍行距、首行缩进 2 字符；标题三号/小三黑体、四号宋体加粗。
-\linespread{1.2}\selectfont
+% 与 Word 导出一致的中文论文版式：标题与正文一律黑色；正文小四仿宋、
+% 西文 Times New Roman、1.3 倍行距、首行缩进 2 字符；标题三号/小三黑体、四号宋体加粗。
+\linespread{1.3}\selectfont
 \setlength{\parindent}{2em}
 \setlength{\parskip}{0pt}
 \usepackage{iftex}

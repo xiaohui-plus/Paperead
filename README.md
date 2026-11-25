@@ -188,7 +188,7 @@ Paperead 是一个本地论文工作台：重排双栏 PDF、按页流式翻译�
 
 ### Windows 桌面版
 
-- Windows 10/11 x64，安装版 per-user 安装，不弹 UAC；数据在 `%LOCALAPPDATA%\paperead-data`，升级 / 卸载不影响文献库。
+- Windows 10/11 x64，安装版 per-user 安装，不弹 UAC；数据在安装目录下的 `data\`（默认 `%LOCALAPPDATA%\Paperead\data`），覆盖升级只替换程序文件；卸载时数据会移回 `%LOCALAPPDATA%\paperead-data`。
 - 便携版解压后双击 `启动.cmd`，数据在同级 `data\`。
 - 自带运行环境，使用者不需要单独安装 Python。
 - 安装版首次启动会在后台下载 pandoc（约 24MB，只需一次），用于 DOCX / LaTeX 导出；便携版已自带，完全离线。

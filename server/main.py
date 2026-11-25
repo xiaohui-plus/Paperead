@@ -4540,6 +4540,10 @@ def _finish_job(
     job["report"] = report
     job["failed"] = int(report.get("failed") or 0)
     job["skipped"] = int(report.get("skipped") or 0)
+    # 引擎阶段进度只在任务运行期间有意义，收尾时清空，避免前端读到过期阶段。
+    job["stage"] = ""
+    job["stage_done"] = 0
+    job["stage_total"] = 0
 
     if job.get("cancel_requested"):
         # 显式取消 / 切换语种优先；任务被 cancel 时携带的 interrupted
@@ -4592,19 +4596,21 @@ async def _try_engine_translation(
     if not pdf:
         return False
 
-    total = int(job.get("total") or len(targets))
     base_done = int(job.get("done") or 0)
-    progress_state = {"done": base_done, "at": 0.0}
+    progress_state = {"at": 0.0, "stage": ""}
 
-    def on_progress(ratio: float, _stage: str) -> None:
-        # rich 的进度行刷新很快，写任务文件按「进度变化 + 1 秒」节流
-        estimate = min(total, base_done + int(round((total - base_done) * ratio)))
+    def on_progress(stage: str, stage_done: int, stage_total: int) -> None:
+        # 引擎按自己的阶段推进：这里只上报它真实的阶段与阶段内计数，
+        # 不再把比例换算成「已翻译块数」——两套计数没有一一对应关系。
         now = time.time()
-        if estimate <= progress_state["done"] and now - progress_state["at"] < 1.0:
+        changed = stage != progress_state["stage"]
+        if not changed and now - progress_state["at"] < 1.0:
             return
-        progress_state["done"] = max(progress_state["done"], estimate)
         progress_state["at"] = now
-        job["done"] = progress_state["done"]
+        progress_state["stage"] = stage
+        job["stage"] = stage
+        job["stage_done"] = int(stage_done)
+        job["stage_total"] = int(stage_total)
         try:
             write_translation_job(DATA_DIR, job)
         except Exception:
@@ -4615,6 +4621,15 @@ async def _try_engine_translation(
         # 只留单语成品：阅读页的「对照」是左原文 PDF + 右译文 PDF 两栏，
         # 不需要引擎把双语并排印在同一份 PDF 里。
         engine_pdf = engine_dir / "babeldoc.mono.pdf"
+        # 引擎启动到第一条进度行之间有一段空白：先标成解析阶段，
+        # 前端就不用在这段时间显示不准的块数。
+        job["stage"] = "parse"
+        job["stage_done"] = 0
+        job["stage_total"] = 0
+        try:
+            write_translation_job(DATA_DIR, job)
+        except Exception:
+            pass
         il, engine_stats = await babeldoc_engine.run(
             pdf,
             {

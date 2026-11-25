@@ -48,6 +48,19 @@ fn library_has_data(dir: &Path) -> bool {
 }
 
 fn default_data_dir_path(app: &AppHandle) -> PathBuf {
+    // 安装版把文献库放进安装目录下的 data：程序与数据在同一目录树，
+    // 覆盖升级只会替换程序文件，不会动 data 子目录。
+    #[cfg(all(desktop, not(debug_assertions)))]
+    {
+        if let Some(dir) = install_data_dir() {
+            return dir;
+        }
+    }
+    legacy_default_data_dir(app)
+}
+
+/// 历史默认目录：`%LOCALAPPDATA%\paperead-data`（旧版本安装版使用）。
+fn legacy_default_data_dir(app: &AppHandle) -> PathBuf {
     if let Some(value) = std::env::var_os("LOCALAPPDATA") {
         return PathBuf::from(value).join(DATA_DIR_NAME);
     }
@@ -55,6 +68,93 @@ fn default_data_dir_path(app: &AppHandle) -> PathBuf {
         .app_local_data_dir()
         .map(|path| path.join(DATA_DIR_NAME))
         .unwrap_or_else(|_| PathBuf::from(DATA_DIR_NAME))
+}
+
+/// 安装目录下的 data 子目录；开发态不启用，避免把数据写进 target。
+#[cfg(all(desktop, not(debug_assertions)))]
+fn install_data_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    exe.parent().map(|dir| dir.join("data"))
+}
+
+/// 目录里是否有真实内容（忽略日志/临时目录和空骨架）。
+#[cfg(all(desktop, not(debug_assertions)))]
+fn dir_has_payload(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if matches!(name.as_ref(), "logs" | "tmp" | "backups") {
+            continue;
+        }
+        if entry.path().is_dir() {
+            if dir_has_payload(&entry.path()) {
+                return true;
+            }
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+/// 安装版首次启动：把历史默认库迁到安装目录 data。
+/// 同盘直接改名，失败就继续用旧目录，保证数据与配置都不丢。
+fn adopt_install_data(app: &AppHandle, target: PathBuf) -> PathBuf {
+    #[cfg(all(desktop, not(debug_assertions)))]
+    {
+        let Some(install_data) = install_data_dir() else {
+            return target;
+        };
+        if target != install_data {
+            return target;
+        }
+        if dir_has_payload(&target) {
+            return target;
+        }
+        let mut legacy = legacy_default_data_dir(app);
+        if !dir_has_payload(&legacy) {
+            let older = legacy.with_file_name(LEGACY_DATA_DIR_NAME);
+            if dir_has_payload(&older) {
+                legacy = older;
+            }
+        }
+        if legacy == target || !dir_has_payload(&legacy) {
+            return target;
+        }
+        // 目标只可能是上次启动留下的空骨架，清掉后再改名
+        if target.exists() {
+            let _ = std::fs::remove_dir_all(&target);
+        }
+        if let Some(parent) = target.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::rename(&legacy, &target) {
+            Ok(()) => {
+                eprintln!(
+                    "[Paperead] migrated data dir {} -> {}",
+                    legacy.display(),
+                    target.display()
+                );
+                target
+            }
+            Err(error) => {
+                eprintln!(
+                    "[Paperead] migrate {} -> {} failed: {error}; keeping legacy dir",
+                    legacy.display(),
+                    target.display()
+                );
+                legacy
+            }
+        }
+    }
+    #[cfg(not(all(desktop, not(debug_assertions))))]
+    {
+        let _ = app;
+        target
+    }
 }
 
 pub fn data_dir(app: &AppHandle) -> PathBuf {
@@ -130,11 +230,12 @@ pub fn ensure_data_dir(app: &AppHandle) -> PathBuf {
     let explicit = var_os("PAPEREAD_DATA").is_some() || using_configured;
     if !explicit {
         dir = adopt_legacy(dir);
+        dir = adopt_install_data(app, dir);
     }
     // A stale directory created by another Windows account can be read-only
     // for the current user. Prefer a sibling fallback over failing every write.
     if !explicit && !prepare(&dir) {
-        let fallback = dir.with_file_name("paperead-data-user");
+        let fallback = unwritable_fallback(app, &dir);
         if prepare(&fallback) {
             eprintln!(
                 "[Paperead] data dir {} is not writable; using {}",
@@ -153,6 +254,19 @@ pub fn ensure_data_dir(app: &AppHandle) -> PathBuf {
         }
     }
     dir
+}
+
+/// 默认数据目录不可写时的备选：安装版回退到历史系统目录，开发态用同级目录。
+fn unwritable_fallback(app: &AppHandle, dir: &Path) -> PathBuf {
+    #[cfg(all(desktop, not(debug_assertions)))]
+    {
+        let legacy = legacy_default_data_dir(app);
+        if legacy != dir {
+            return legacy;
+        }
+    }
+    let _ = app;
+    dir.with_file_name("paperead-data-user")
 }
 
 pub fn sidecar_path(app: &AppHandle) -> Result<PathBuf, String> {

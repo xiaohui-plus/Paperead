@@ -763,10 +763,24 @@ export function apply(ctx, config = {}) {
           required: true,
           description: 'Relative path or file name shown by project_read.',
         },
+        offset: {
+          type: 'number',
+          description:
+            'Character offset for continuing a long file. Omit on the first read; if the result says truncated, read again with nextOffset.',
+        },
       },
       output: {
         schema: { type: 'object', additionalProperties: true },
-        render: (_args, value) => [{ type: 'text', text: asText(value) }],
+        render: (_args, value) => {
+          const file = value?.file || {}
+          const content = value?.content || '（二进制文件，无法直接预览）'
+          const next = value?.nextOffset
+          const tail =
+            next != null
+              ? `\n\n…（已截断：全文 ${value.total} 字，本次读到 ${value.offset + String(value.content || '').length} 字；继续读取请再调用 file_read，offset=${next}）`
+              : ''
+          return [{ type: 'text', text: `文件：${file.name || ''}\n\n${content}${tail}` }]
+        },
         presentationMeta: (_args, value) => ({
           kind: 'file_read',
           name: value?.file?.name || '',
@@ -776,7 +790,7 @@ export function apply(ctx, config = {}) {
         const sessionId = sessionIdOf(exec)
         return call(
           `/internal/research/sessions/${encodeURIComponent(sessionId)}/files`,
-          { path: args.path },
+          { path: args.path, offset: args.offset },
         )
       },
       presentCall(args) {

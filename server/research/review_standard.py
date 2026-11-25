@@ -66,7 +66,7 @@ def _section(
 
 # 导出 Word 时实际套用的版式，写进模板正文，用户与 agent 看到同一份规范。
 FORMAT_NOTE = (
-    "> 排版：A4；正文小四仿宋、1.2 倍行距、两端对齐（末行左对齐，不强行拉伸）、"
+    "> 排版：A4；标题与正文一律黑色；正文小四仿宋、1.3 倍行距、两端对齐（末行左对齐，不强行拉伸）、"
     "首行缩进 2 字符；一级标题三号黑体加粗，二级标题小三黑体加粗，"
     "三级标题四号宋体加粗；西文与数字用 Times New Roman。"
 )
@@ -137,10 +137,16 @@ _DEFAULT_OUTLINE = [
         [
             "每节只回答一个主题问题，标题直接写主题而不是“研究进展”。",
             "每节至少 2 篇不同来源互证；先给结论，再给证据与机制。",
+            "以连续段落论证：一段说清一个判断，证据、比较、评价写进同一段，不要“一句结论配一张大表”。",
             "区分“一致结论 / 存在争议 / 证据不足”三种状态。",
-            "有图表时在正文先引用，再解释图表回答了什么。",
+            "确需表格时全文不超过 2–3 个，单表不超过 5 列、8 行；表后要有解读段。",
         ],
-        ["每节来源不少于 2 篇", "没有证据的论断标【待补证据】或删除"],
+        [
+            "每节来源不少于 2 篇",
+            "正文以段落为主，没有“结论一句 + 证据大表”的结构",
+            "表格不含 evidence_status、paperId、页码等内部字段",
+            "没有证据的论断标【待补证据】或删除",
+        ],
     ),
     _section(
         "讨论与局限",
@@ -302,13 +308,14 @@ _NARRATIVE_OUTLINE = [
     ),
     _section(
         "概念框架与分类",
-        "1–2 段 + 框架图/表",
+        "1–2 段（必要时配一张框架图或表）",
         [
             "给出分析框架：按机制、场景、证据类型或时间阶段分类。",
             "说明分类维度为什么合理，避免“为了分类而分类”。",
-            "图表要能独立读懂，正文先引用后解释。",
+            "框架优先用文字讲清；只有维度多且需要横向对照时才配图或表。",
+            "图表要能独立读懂，正文先引用后解释，表后补一句解读。",
         ],
-        ["分类维度互斥且覆盖主要文献", "图表有来源说明"],
+        ["分类维度互斥且覆盖主要文献", "图表有来源说明", "不是每节都配表"],
     ),
     _section(
         "机制与证据",
@@ -316,10 +323,11 @@ _NARRATIVE_OUTLINE = [
         [
             "先解释机制或理论路径，再给支持与反对证据。",
             "每节至少 2 篇不同来源；动物/体外/人群证据分开表述。",
+            "用段落把机制、证据与分歧讲清楚，不要用证据卡表格代替论证。",
             "给出证据强度：一致、部分支持、争议、证据不足。",
             "避免把相关性写成因果。",
         ],
-        ["每节来源 ≥ 2 篇", "不混用不同证据等级"],
+        ["每节来源 ≥ 2 篇", "不混用不同证据等级", "全文表格不超过 3 个"],
     ),
     _section(
         "争议与局限",
@@ -635,6 +643,131 @@ def _contains(heading: str, keywords: tuple[str, ...]) -> bool:
     return any(_clean_title(keyword) in cleaned for keyword in keywords)
 
 
+# 正文体例：综述要像一篇文章，而不是证据台账。这里只做低成本、可解释的检查。
+_TABLE_LINE = re.compile(r"^\s*\|.*\|\s*$")
+_TABLE_SEP = re.compile(r"^\s*\|[\s:|\-]+\|\s*$")
+_BULLET_LINE = re.compile(r"^\s*(?:[-*+]|\d+[.)、])\s+")
+_AUDIT_WORD = re.compile(r"证据状态|已核对|未核实|来源级别")
+_INTERNAL_ID = re.compile(r"p_[0-9a-f]{8,}")
+MAX_REVIEW_TABLES = 3
+MAX_TABLE_COLS = 5
+MAX_TABLE_ROWS = 8
+MAX_TABLE_CELL = 60
+MAX_BULLET_RUN = 8
+
+
+def _table_stats(text: str) -> list[dict[str, Any]]:
+    """统计正文里的 Markdown 表格：数量、宽高与最长单元格。"""
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in text.splitlines():
+        if _TABLE_LINE.match(line):
+            current.append(line)
+        elif current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+
+    tables: list[dict[str, Any]] = []
+    for block in blocks:
+        if not any(_TABLE_SEP.match(row) for row in block):
+            continue
+        rows = [row for row in block if not _TABLE_SEP.match(row)]
+        if len(rows) < 2:
+            continue
+        cells = [
+            cell.strip()
+            for row in rows
+            for cell in row.strip().strip("|").split("|")
+        ]
+        tables.append(
+            {
+                "rows": len(rows) - 1,
+                "cols": max(len(row.strip().strip("|").split("|")) for row in rows),
+                "maxCell": max((len(cell) for cell in cells), default=0),
+                "text": "\n".join(block),
+            }
+        )
+    return tables
+
+
+def _style_checks(text: str, template_label: str) -> list[dict[str, Any]]:
+    """检查“像不像综述”：表格规模、内部审计字段与清单化写作。
+
+    系统综述本来就需要 PRISMA 流程图和多张证据表，只查内部字段泄漏。
+    """
+    systematic = "系统综述" in template_label or "PRISMA" in template_label.upper()
+    tables = _table_stats(text)
+    checks: list[dict[str, Any]] = []
+
+    if not systematic:
+        widest = max((table["cols"] for table in tables), default=0)
+        longest_cell = max((table["maxCell"] for table in tables), default=0)
+        oversized = [
+            table
+            for table in tables
+            if table["cols"] > MAX_TABLE_COLS
+            or table["rows"] > MAX_TABLE_ROWS
+            or table["maxCell"] > MAX_TABLE_CELL
+        ]
+        checks.append(
+            {
+                "id": "table-shape",
+                "label": "表格规模",
+                "current": f"{len(tables)} 个表；最宽 {widest} 列，单元格最长 {longest_cell} 字",
+                "target": (
+                    f"≤ {MAX_REVIEW_TABLES} 个，单表 ≤ {MAX_TABLE_COLS} 列 / "
+                    f"{MAX_TABLE_ROWS} 行，单元格写短语"
+                ),
+                "passed": len(tables) <= MAX_REVIEW_TABLES and not oversized,
+                "hint": (
+                    "综述以段落论证为主：把证据表改写成“判断—证据—比较—评价”的段落，"
+                    "确需对照时保留 1–2 个窄表，明细移到附录。"
+                ),
+            }
+        )
+
+    leaked = sorted({match.group(0) for match in _AUDIT_WORD.finditer(text)})
+    if any(_INTERNAL_ID.search(table["text"]) for table in tables):
+        leaked.append("paperId")
+    checks.append(
+        {
+            "id": "audit-fields",
+            "label": "正文审计字段",
+            "current": "、".join(leaked) if leaked else "无",
+            "target": "0",
+            "passed": not leaked,
+            "hint": (
+                "证据状态、已核对、来源级别、paperId 等只留在 evidence-notes.md 与 "
+                "citation-report.md；正文表格改用读者需要的事实列。"
+            ),
+        }
+    )
+
+    bullets = 0
+    longest_run = 0
+    run = 0
+    for line in text.splitlines():
+        if _BULLET_LINE.match(line):
+            bullets += 1
+            run += 1
+            longest_run = max(longest_run, run)
+        elif line.strip():
+            run = 0
+    checks.append(
+        {
+            "id": "bullet-runs",
+            "label": "清单化写作",
+            "current": f"{bullets} 条列表；最长连续 {longest_run} 条",
+            "target": f"列表只用于枚举；连续 ≤ {MAX_BULLET_RUN} 条",
+            "passed": longest_run <= MAX_BULLET_RUN,
+            "hint": "列表只留给检索式、纳排标准、参数等天然枚举的内容；把成串条目改写成有比较关系的段落。",
+        }
+    )
+    return checks
+
+
 def evaluate(
     text: str,
     audit: dict[str, Any],
@@ -780,6 +913,9 @@ def evaluate(
         uncited == 0,
         "给这些论断补引用；确实无证据的改写成【待补证据】。",
     )
+
+    if not is_paper:
+        checks.extend(_style_checks(text, template_label))
 
     passed_checks = sum(1 for check in checks if check["passed"])
     score = round(passed_checks / len(checks) * 100) if checks else 0

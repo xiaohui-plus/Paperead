@@ -20,7 +20,12 @@ import type {
   PdfRect,
 } from '../lib/library'
 import type { AnnotationActions } from './Annotations'
-import { AnnotationPopover, SelectionToolbar } from './Annotations'
+import {
+  AnnotationPopover,
+  SelectionToolbar,
+  TranslateCard,
+  type PinnedTranslate,
+} from './Annotations'
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl
 
@@ -407,6 +412,8 @@ export function PdfPages({
     () => new Set([initialPage - 1, initialPage, initialPage + 1]),
   )
   const [selection, setSelection] = useState<PdfSelection | null>(null)
+  // 已固定的划词翻译卡片可多张并存：固定后脱离选区，滚动时随页面内容上移
+  const [pinnedTranslations, setPinnedTranslations] = useState<PinnedTranslate[]>([])
   const [editing, setEditing] = useState<{
     annotation: Annotation
     rect: DOMRect
@@ -876,6 +883,12 @@ export function PdfPages({
           text={selection.quote}
           onPick={(color) => void applyAnnotation(color, 'highlight')}
           onComment={(color) => void applyAnnotation(color, 'comment')}
+          onPinCard={(card) =>
+            setPinnedTranslations((prev) => [
+              ...prev,
+              { ...card, id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}` },
+            ])
+          }
           onAsk={
             onAskQuote
               ? () => {
@@ -896,6 +909,21 @@ export function PdfPages({
           }}
         />
       )}
+
+      {pinnedTranslations.map((card) => (
+        <TranslateCard
+          key={card.id}
+          anchor={{ left: card.left, top: card.top, width: card.width }}
+          fixedPosition={{ left: card.left, top: card.top, width: card.width }}
+          state={{ status: 'done', value: card.value }}
+          target={card.target}
+          resetKey={card.id}
+          pinned
+          onClose={() =>
+            setPinnedTranslations((prev) => prev.filter((item) => item.id !== card.id))
+          }
+        />
+      ))}
 
       {editing && annotationActions && (
         <AnnotationPopover

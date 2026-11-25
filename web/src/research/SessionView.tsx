@@ -46,10 +46,16 @@ interface Props {
 }
 
 const FLUSH_MS = 40
-/** 旧版后端没有 replay.end 时的兜底：按历史快照渲染当前已收到的部分。 */
-const REPLAY_FALLBACK_MS = 15_000
-/** 有本地快照时只需补齐增量，短兜底即可，绝不能等满 15 秒。 */
-const SNAPSHOT_REPLAY_MS = 900
+/**
+ * 历史回放期间要静默多久才算“历史到此为止”。
+ *
+ * 切页/切会话期间 agent 仍在跑，积压的历史可能有上万条事件；按固定超时截断
+ * 会把还没读完的轮次误判成“已中断”。改成静默判定：只要事件还在源源不断
+ * 到达就继续回放。
+ */
+const REPLAY_IDLE_MS = 1_200
+/** 上限兜底：后端始终不发 replay.end 时也要把历史渲染出来。 */
+const REPLAY_MAX_MS = 20_000
 
 export function SessionView({
   session,
@@ -84,6 +90,7 @@ export function SessionView({
   const replaying = useRef(true)
   const replayEvents = useRef<AgentEvent[]>([])
   const replayTimer = useRef<number | undefined>(undefined)
+  const replayStartedAt = useRef(0)
 
   const clearReplayTimer = useCallback(() => {
     if (replayTimer.current !== undefined) {
@@ -93,12 +100,15 @@ export function SessionView({
   }, [])
 
   const finishReplay = useCallback(
-    (running: boolean, lastSeq?: number) => {
+    (running: boolean | undefined, lastSeq?: number) => {
       if (!replaying.current) {
-        onMeta({ running })
+        // 回放结束后才到的 replay.end（例如断线重连）：正文与运行状态都按实时事件
+        // 收敛，这里只同步左侧会话指示，避免用可能滞后的状态覆盖正在进行的轮次。
+        if (running === true) onMeta({ running: true })
         return
       }
       replaying.current = false
+      replayStartedAt.current = 0
       clearReplayTimer()
       const events = replayEvents.current
       replayEvents.current = []
@@ -110,13 +120,33 @@ export function SessionView({
         if (event.seq > seq) seq = event.seq
       }
       cursor.current = seq
-      setChat((prev) => finalizeHistory(applyHistoryEvents(prev, events), running))
+      // 兜底超时拿不到 agent 侧状态时，以事件本身为准：最后一个轮次没有 turn.end
+      // 就保持运行态，不能把还在跑的轮次误判成“已中断”。
+      const base = applyHistoryEvents(chatRef.current, events)
+      const last = base.turns[base.turns.length - 1]
+      const active =
+        typeof running === 'boolean'
+          ? running
+          : Boolean(last && last.endedAt === null)
+      setChat((prev) => finalizeHistory(applyHistoryEvents(prev, events), active))
       setHistoryLoading(false)
       if (title) onMeta({ title })
-      onMeta({ running })
+      onMeta({ running: active })
     },
     [clearReplayTimer, onMeta],
   )
+
+  /** 回放兜底：事件持续到达就一直顺延，静默或超上限后才结束。 */
+  const armReplayTimer = useCallback(() => {
+    if (replayStartedAt.current === 0) replayStartedAt.current = Date.now()
+    if (replayTimer.current !== undefined) window.clearTimeout(replayTimer.current)
+    const elapsed = Date.now() - replayStartedAt.current
+    const wait = Math.max(0, Math.min(REPLAY_IDLE_MS, REPLAY_MAX_MS - elapsed))
+    replayTimer.current = window.setTimeout(() => {
+      replayTimer.current = undefined
+      finishReplay(undefined)
+    }, wait)
+  }, [finishReplay])
 
   const flush = useCallback(() => {
     flushTimer.current = undefined
@@ -148,12 +178,7 @@ export function SessionView({
       }
       if (replaying.current) {
         replayEvents.current.push(event)
-        if (replayTimer.current === undefined) {
-          replayTimer.current = window.setTimeout(
-            () => finishReplay(false),
-            snapshot ? SNAPSHOT_REPLAY_MS : REPLAY_FALLBACK_MS,
-          )
-        }
+        armReplayTimer()
         return
       }
       pending.current.push(event)
@@ -161,7 +186,7 @@ export function SessionView({
         flushTimer.current = window.setTimeout(flush, FLUSH_MS)
       }
     },
-    [finishReplay, flush, snapshot],
+    [armReplayTimer, finishReplay, flush],
   )
 
   useEffect(() => {

@@ -80,6 +80,25 @@ async def ensure_session(session_id: str, cwd: str) -> None:
     await post_json("/v1/sessions", {"sessionId": session_id, "cwd": cwd}, timeout=30)
 
 
+async def session_running(session_id: str, *, timeout: float = 8) -> bool | None:
+    """agent 侧该会话是否还在执行。
+
+    agent 不认识这个会话时返回 False（说明进程重启过，此前的轮次确实断了）；
+    拿不到状态时返回 None，由调用方自行兜底。
+    """
+    try:
+        data = await get_json("/v1/sessions", timeout=timeout)
+    except AgentUnavailable:
+        return None
+    sessions = data.get("sessions")
+    if not isinstance(sessions, list):
+        return None
+    for item in sessions:
+        if isinstance(item, dict) and item.get("sessionId") == session_id:
+            return str(item.get("status") or "") == "running"
+    return False
+
+
 async def send_message(session_id: str, text: str, cwd: str) -> None:
     await post_json(
         f"/v1/sessions/{session_id}/messages",

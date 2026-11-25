@@ -108,9 +108,9 @@ export function EngineDownloadDialog({
           </span>
           <div className="engine-dialog-title">
             <h2 id="engine-dialog-title">
-              {state.ready ? '翻译引擎已就绪' : '正在准备翻译引擎'}
+              {state.ready ? '翻译引擎已就绪' : '正在下载翻译依赖'}
             </h2>
-            <p>首次使用整篇翻译需要联网下载，之后离线可用。</p>
+            <p>首次使用整篇翻译需要联网下载引擎依赖，之后离线可用。</p>
           </div>
           <button className="icon-btn" onClick={onClose} aria-label="关闭">
             <IconClose />
@@ -126,7 +126,7 @@ export function EngineDownloadDialog({
               />
             </div>
             <div className="storage-progress-meta">
-              <span>{state.ready ? '已安装' : running ? '正在下载' : '等待重试'}</span>
+              <span>{state.ready ? '已安装' : running ? '正在下载依赖' : '等待重试'}</span>
               <span>{state.ready ? 100 : percent}%</span>
             </div>
           </div>

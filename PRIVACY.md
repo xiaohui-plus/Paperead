@@ -8,7 +8,7 @@ Paperead 是一个本地优先的桌面应用。
 
 ## 数据存在哪里
 
-- 桌面版：`%LOCALAPPDATA%\paperead-data`（PDF、解析结果、导读/问答缓存、日志）。
+- 桌面版：安装目录下的 `data\`（默认 `%LOCALAPPDATA%\Paperead\data`，PDF、解析结果、导读/问答缓存、日志）。
 - 源码运行：项目下的 `data/` 目录。
 - 卸载默认保留数据目录，可在应用内“打开数据目录”查看或手动删除。
 

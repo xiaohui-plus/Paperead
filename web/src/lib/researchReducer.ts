@@ -65,6 +65,29 @@ function patchTurn(
   return { ...state, turns }
 }
 
+/**
+ * 轮次内的增量事件。
+ *
+ * 历史回放可能有积压：回放到一半就判定“已中断”的轮次，只要之后又收到这一轮
+ * 的思考/正文/工具事件，就说明 agent 其实还在跑，这里把误判的结束状态撤回。
+ */
+function patchActiveTurn(
+  state: ChatState,
+  index: number,
+  patch: (turn: ChatTurn) => ChatTurn,
+): ChatState {
+  const turn = state.turns[index]
+  const revived = turn.endedAt !== null && turn.reason === 'interrupted'
+  const next = patchTurn(state, index, (item) =>
+    patch(
+      revived
+        ? { ...item, endedAt: null, reason: null, errorText: undefined }
+        : item,
+    ),
+  )
+  return revived ? { ...next, running: true } : next
+}
+
 function lastTurnIndex(state: ChatState): number {
   return state.turns.length - 1
 }
@@ -178,7 +201,7 @@ export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
 
     case 'text.delta': {
       const [next, index] = withTurn(base, event.turn ?? 1, at)
-      return patchTurn(next, index, (turn) => ({
+      return patchActiveTurn(next, index, (turn) => ({
         ...turn,
         text: turn.text + asText(event.text),
       }))
@@ -186,7 +209,7 @@ export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
 
     case 'reasoning.delta': {
       const [next, index] = withTurn(base, event.turn ?? 1, at)
-      return patchTurn(next, index, (turn) => ({
+      return patchActiveTurn(next, index, (turn) => ({
         ...turn,
         reasoning: turn.reasoning + asText(event.text),
       }))
@@ -194,7 +217,7 @@ export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
 
     case 'tool.draft': {
       const [next, index] = withTurn(base, event.turn ?? 1, at)
-      return patchTurn(next, index, (turn) =>
+      return patchActiveTurn(next, index, (turn) =>
         upsertTool(turn, event.callId, at, (tool) => ({
           ...tool,
           name: asText(event.name) || tool.name,
@@ -206,7 +229,7 @@ export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
 
     case 'tool.start': {
       const [next, index] = withTurn(base, event.turn ?? 1, at)
-      return patchTurn(next, index, (turn) =>
+      return patchActiveTurn(next, index, (turn) =>
         upsertTool(turn, event.callId, at, (tool) => ({
           ...tool,
           name: asText(event.name) || tool.name,
@@ -220,7 +243,7 @@ export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
 
     case 'tool.end': {
       const [next, index] = withTurn(base, event.turn ?? 1, at)
-      return patchTurn(next, index, (turn) =>
+      return patchActiveTurn(next, index, (turn) =>
         upsertTool(turn, event.callId, at, (tool) => ({
           ...tool,
           name: asText(event.name) || tool.name,
@@ -388,8 +411,16 @@ export function finalizeHistory(state: ChatState, active: boolean): ChatState {
   }
   const lastIndex = state.turns.length - 1
   const last = state.turns[lastIndex]
-  const stillRunning = active && last.endedAt === null
-  const turns = state.turns.map((turn, index) => {
+  // 上一轮曾被判成“已中断”，但会话仍在运行：说明只是历史没读完，撤回结束标记。
+  const revived = active && last.endedAt !== null && last.reason === 'interrupted'
+  const baseTurns = revived
+    ? [
+        ...state.turns.slice(0, lastIndex),
+        { ...last, endedAt: null, reason: null, errorText: undefined },
+      ]
+    : state.turns
+  const stillRunning = active && baseTurns[lastIndex].endedAt === null
+  const turns = baseTurns.map((turn, index) => {
     const current = stillRunning && index === lastIndex
     let keepTool = -1
     if (current) {

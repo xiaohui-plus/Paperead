@@ -100,7 +100,7 @@ Error: EISDIR: illegal operation on a directory, lstat 'C:'
 **原因**：Tauri 的 `resource_dir()` 在 Windows 返回长路径前缀 `\\?\`，Node 解析 `bin.mjs` 时把 `C:` 当成目录。
 **解法**：在 [agent_sidecar.rs](../src-tauri/src/agent_sidecar.rs) 里用 `plain_path()` 去掉前缀（`\\?\UNC\` 要还原成 `\\`）。
 
-**自查口诀**：装完先看 `%LOCALAPPDATA%\paperead-data\logs\agent.log` 有没有 `ready`。
+**自查口诀**：装完先看 `%LOCALAPPDATA%\Paperead\data\logs\agent.log` 有没有 `ready`。
 
 ---
 
@@ -163,7 +163,7 @@ Error: EISDIR: illegal operation on a directory, lstat 'C:'
 
 最后一条可以照搬这次的临时脚本思路（`.tmp/verify-research.ps1`）：
 
-1. 先确认 `%LOCALAPPDATA%\paperead-data\tools\pandoc\pandoc.exe` 已由应用自动下载（或调 `POST /api/toolchain/pandoc` 触发）
+1. 先确认 `%LOCALAPPDATA%\Paperead\data\tools\pandoc\pandoc.exe` 已由应用自动下载（或调 `POST /api/toolchain/pandoc` 触发）
 2. 用 `PAPEREAD_PORT/PAPEREAD_DATA/PAPEREAD_TOKEN/PAPEREAD_INTERNAL_TOKEN` 启动已安装的 sidecar
 3. 把 `PATH` 砍到只剩 `C:\Windows\System32`，确保找不到本机 pandoc
 4. `POST /api/research/projects` → `POST .../sessions` → `POST /internal/research/sessions/{id}/export`

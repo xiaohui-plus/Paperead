@@ -13,3 +13,9 @@
   ; 避免桌面/开始菜单快捷方式仍显示安装前的旧图标（如系统默认文件图标）。
   ExecWait '"$SYSDIR\ie4uinit.exe" -show'
 !macroend
+
+; 文献库位于安装目录 data 下；卸载前尽量移回系统默认目录，
+; 避免用户数据随安装目录一起被删除。目标已存在时 Rename 会失败，数据保持原位。
+!macro NSIS_HOOK_PREUNINSTALL
+  Rename "$INSTDIR\data" "$LOCALAPPDATA\paperead-data"
+!macroend

@@ -470,8 +470,12 @@ def _build_command(
     ]
 
 
-def _parse_progress(line: str) -> tuple[float, str] | None:
-    """从 rich 进度行里取出大致阶段进度，供任务状态展示。"""
+def _parse_progress(line: str) -> tuple[str, int, int] | None:
+    """从 rich 进度行里取出阶段与阶段内计数。
+
+    引擎的段落数是它自己真实处理的数量，应用侧的回填块数与之一一对应关系并不
+    成立，所以任务进度展示只使用阶段与 ``stage_done / stage_total``。
+    """
     plain = _ANSI_RE.sub("", line).replace("\r", "\n").strip()
     matches = list(_PROGRESS_RE.finditer(plain))
     if not matches:
@@ -479,16 +483,15 @@ def _parse_progress(line: str) -> tuple[float, str] | None:
     match = matches[-1]
     stage = match.group(1).strip()
     done, total = int(match.group(2)), max(1, int(match.group(3)))
-    ratio = min(1.0, done / total)
     lowered = stage.lower()
     if "translate paragraph" in lowered:
-        return 0.12 + 0.76 * ratio, stage
+        return "translate", done, total
     if "typesetting" in lowered:
-        return 0.9 + 0.04 * ratio, stage
+        return "typeset", done, total
     if "save pdf" in lowered:
-        return 0.96, stage
+        return "save", done, total
     if "parse" in lowered or "extract" in lowered or "layout" in lowered:
-        return 0.02 + 0.08 * ratio, stage
+        return "parse", done, total
     return None
 
 
@@ -633,7 +636,7 @@ async def run(
     pdf: Path,
     cfg: dict,
     *,
-    on_progress: Callable[[float, str], None] | None = None,
+    on_progress: Callable[[str, int, int], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
     timeout: float = 1800.0,
     qps: float = 8,
@@ -643,7 +646,7 @@ async def run(
 
     Args:
         cfg: ``{"api_key", "base_url", "model", "lang"}``。
-        on_progress: ``(0~1, 阶段名)`` 回调，用于刷新任务进度。
+        on_progress: ``(阶段, 阶段内已完成, 阶段内总数)`` 回调，用于刷新任务进度。
         should_cancel: 轮询取消标记；返回 True 时立刻杀掉子进程。
         save_pdf: 把引擎自己排好版的单语 PDF 另存到该路径（译文 PDF 直接用它）。
     """
@@ -769,7 +772,7 @@ async def run(
             if mono is not None:
                 saved["mono_pdf"] = mono
         if on_progress is not None:
-            on_progress(1.0, "完成")
+            on_progress("done", 1, 1)
         stats: dict[str, Any] = {"elapsed_ms": int((time.time() - started) * 1000)}
         for name, path in saved.items():
             stats[name] = str(path)

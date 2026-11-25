@@ -96,7 +96,7 @@ def test_chinese_markdown_uses_ctexart():
     assert "{ctexart}" in tex
     assert "\\title{免疫治疗综述}" in tex
     # 与 Word 导出一致的中文论文版式。
-    assert "\\linespread{1.2}" in tex
+    assert "\\linespread{1.3}" in tex
     assert "\\setlength{\\parindent}{2em}" in tex
     assert "\\setCJKmainfont{FangSong}" in tex
     assert "section/format = {\\zihao{3}\\heiti\\bfseries" in tex
@@ -178,7 +178,7 @@ def test_export_docx_applies_review_layout(workspace):
 
     body = next(p for p in document.paragraphs if p.text.startswith("正文段落"))
     assert body.alignment == WD_ALIGN_PARAGRAPH.JUSTIFY
-    assert body.paragraph_format.line_spacing == pytest.approx(1.2)
+    assert body.paragraph_format.line_spacing == pytest.approx(1.3)
     assert body.paragraph_format.first_line_indent == Pt(24)
 
 

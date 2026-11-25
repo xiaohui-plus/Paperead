@@ -18,7 +18,15 @@ interface Props {
   /** 两栏滚动是否联动（默认开） */
   syncEnabled?: boolean
   /** 右栏译文还在生成：显示顶部进度线条 */
-  progress?: { done: number; total: number; building?: boolean } | null
+  progress?: {
+    done: number
+    total: number
+    building?: boolean
+    /** 外部引擎阶段（translate / typeset / save …）；有值时按引擎段落数计 */
+    stage?: string
+    stageDone?: number
+    stageTotal?: number
+  } | null
   /** 右栏译文 PDF 是否已就绪；从骨架切到 PDF 后需要重新绑定滚动联动 */
   translationReady?: boolean
   /** 两栏共同使用的页面放大倍率（1 = 适配宽度）；缩放后两栏锚点保持一致 */
@@ -277,23 +285,35 @@ function DualProgress({
   done,
   total,
   building = false,
+  stage,
+  stageDone = 0,
+  stageTotal = 0,
 }: {
   done: number
   total: number
   building?: boolean
+  stage?: string
+  stageDone?: number
+  stageTotal?: number
 }) {
-  // 只按「已知段数」判定百分比：排版阶段也已经有完整段数，
-  // 不能让进度条跳回 0 区间的流动动画（看起来像进度丢失）。
-  const known = total > 0
-  const percent = known ? Math.min(100, Math.round((done / total) * 100)) : 0
+  // PDF 全文翻译的 block 数是回填映射的估算值，不能当进度：
+  // 引擎「翻译段落」阶段用真实的段落完成数，其余阶段用不确定动画。
+  const paragraphPhase = stage === 'translate' && stageTotal > 0
+  const fallbackPhase = !stage && total > 0
+  const known = paragraphPhase || fallbackPhase
+  const percent = paragraphPhase
+    ? Math.min(100, Math.round((stageDone / stageTotal) * 100))
+    : fallbackPhase
+      ? Math.min(100, Math.round((done / total) * 100))
+      : 0
   return (
     <div
       className={`dual-progress${known ? '' : ' is-indeterminate'}${building ? ' is-building' : ''}`}
       role="progressbar"
       aria-label="译文生成进度"
       aria-valuemin={0}
-      aria-valuemax={known ? total : undefined}
-      aria-valuenow={known ? done : undefined}
+      aria-valuemax={known ? (paragraphPhase ? stageTotal : total) : undefined}
+      aria-valuenow={known ? (paragraphPhase ? stageDone : done) : undefined}
     >
       <i style={known ? { width: `${percent}%` } : undefined} />
     </div>

@@ -1314,6 +1314,14 @@ def build_router(
                     yield _sse(event)
                 await asyncio.sleep(0)
 
+            current = store.get_session(session_id) or session
+            available = agent_client.available()
+            running = pump.running(session_id)
+            if not running and str(current.get("status") or "") == "running":
+                # 泵没在跑但落库状态还停在运行中：以 agent 侧的实际状态为准，既避免
+                # 把仍在执行的这一轮误判成“已中断”，也避免进程重启后一直显示运行中。
+                # 拿不到状态时按未运行处理，之后若有实时事件到达会自愈。
+                running = await agent_client.session_running(session_id) is True
             # 历史回放与实时事件的边界（不落库）：前端据此把历史一次性
             # 渲染成最终状态，不要把旧思考过程当成新一轮输出重放。
             yield _sse(
@@ -1322,11 +1330,11 @@ def build_router(
                     "at": int(time.time() * 1000),
                     "type": "replay.end",
                     "lastSeq": cursor,
-                    "running": pump.running(session_id),
+                    "running": running and available,
                 }
             )
 
-            if not agent_client.available():
+            if not available:
                 yield await replay_notice(OFFLINE_NOTICE["text"])
                 return
 

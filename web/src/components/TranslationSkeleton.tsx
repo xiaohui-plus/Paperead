@@ -5,6 +5,8 @@ interface Props {
   phase: 'translating' | 'building' | 'idle'
   done: number
   total: number
+  /** 外部引擎阶段文案（如「正在翻译段落 24/120」）；为空时回退到块数 */
+  stageText?: string
 }
 
 const MAX_SHEETS = 3
@@ -23,6 +25,7 @@ export function TranslationSkeleton({
   phase,
   done,
   total,
+  stageText = '',
 }: Props) {
   const count = Math.max(1, pageCount)
   const current = Math.max(1, Math.min(currentPage, count))
@@ -36,9 +39,8 @@ export function TranslationSkeleton({
   }
   const meta =
     phase === 'translating'
-      ? total > 0
-        ? `${done} / ${total} 段`
-        : '正在准备翻译任务…'
+      ? stageText ||
+        (total > 0 ? `${done} / ${total} 段` : '正在准备翻译任务…')
       : phase === 'building'
         ? '正在排版每一页，完成后自动显示'
         : done > 0

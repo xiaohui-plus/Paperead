@@ -46,6 +46,9 @@ def new_job(
         "failed": 0,
         "skipped": 0,
         "current_page": 0,
+        "stage": "",
+        "stage_done": 0,
+        "stage_total": 0,
         "created_at": int(now),
         "updated_at": int(now),
         "started_at": 0,
@@ -105,6 +108,11 @@ def public_job(job: dict, *, blocks: list[dict] | None = None, since: int = 0) -
         "failed": int(job.get("failed") or 0),
         "skipped": int(job.get("skipped") or 0),
         "current_page": int(job.get("current_page") or 0),
+        # 外部引擎（BabelDOC）自己的阶段进度：block 数与引擎段落数没有一一对应，
+        # 所以 PDF 全文翻译的进度展示只用这组字段。
+        "stage": job.get("stage") or "",
+        "stage_done": int(job.get("stage_done") or 0),
+        "stage_total": int(job.get("stage_total") or 0),
         "created_at": job.get("created_at") or 0,
         "updated_at": job.get("updated_at") or 0,
         "started_at": job.get("started_at") or 0,

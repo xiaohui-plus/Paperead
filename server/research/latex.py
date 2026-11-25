@@ -42,12 +42,12 @@ AUX_SUFFIXES = {
 }
 STYLES = {"ctexart", "article"}
 
-# 中文稿统一版式：正文小四仿宋、西文 Times New Roman、1.2 倍行距、首行缩进 2 字符；
+# 中文稿统一版式：正文小四仿宋、西文 Times New Roman、1.3 倍行距、首行缩进 2 字符；
 # 一级/二级/三级标题分别为三号黑体、小三黑体、四号宋体（加粗）。
 # 字体用 \IfFontExistsTF 兜底：非 Windows 或精简 TeX 环境缺字体时保持 ctex 默认，
 # 不会因为找不到仿宋/Times 而编译失败（pdfLaTeX 走 ctex 的 CJK 字体集）。
 CTEX_LAYOUT = [
-    r"\linespread{1.2}\selectfont",
+    r"\linespread{1.3}\selectfont",
     r"\setlength{\parindent}{2em}",
     r"\setlength{\parskip}{0pt}",
     r"\usepackage{iftex}",

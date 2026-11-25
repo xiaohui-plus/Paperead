@@ -71,6 +71,40 @@ def test_passing_draft_has_no_gaps():
     assert report["template"] == "default-5-section"
 
 
+def test_evidence_ledger_table_is_flagged():
+    """把证据卡做成大表、并带上内部字段，是最常见的“不像综述”。"""
+    draft = DRAFT + """
+## 表示方式
+
+| 表示 | 保留的信息 | 丢失的信息 | 代表工作 | 证据状态 |
+| --- | --- | --- | --- | --- |
+| 描述符 | 全局统计量 | 原子级拓扑与局部化学环境 | Wang 2020（p_f9388b2e5dc3, p8） | 已核对 |
+| SMILES | 完整结构 | 显式图拓扑与对称性 | Wang 2025（p_b0933ae2142c, p2） | 已核对 |
+"""
+    report = evaluate(draft, _audit())
+
+    assert any("正文审计字段" in gap for gap in report["gaps"])
+
+
+def test_oversized_table_is_flagged():
+    wide = """
+| 列1 | 列2 | 列3 | 列4 | 列5 | 列6 |
+| --- | --- | --- | --- | --- | --- |
+| a | b | c | d | e | f |
+"""
+    report = evaluate(DRAFT + "\n## 对比\n" + wide, _audit())
+
+    assert any("表格规模" in gap for gap in report["gaps"])
+
+
+def test_prose_draft_passes_style_checks():
+    report = evaluate(DRAFT, _audit())
+
+    style = {check["id"]: check for check in report["checks"] if check["id"] in {"table-shape", "audit-fields", "bullet-runs"}}
+    assert style
+    assert all(check["passed"] for check in style.values())
+
+
 def test_missing_sections_and_weak_evidence_are_reported():
     draft = "# 综述\n\n## 一、单药失败\n\n正文。\n"
     report = evaluate(

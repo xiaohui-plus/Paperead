@@ -62,6 +62,8 @@ from server.research.terminal import run_command
 from server.scholar_api import import_paper
 
 MAX_READ_CHARS = 20000
+# 导出要读完整正文，不能和“读回草稿”共用 20k 截断，否则长综述会被切尾。
+MAX_EXPORT_CHARS = 2_000_000
 TEXT_SUFFIXES = {".md", ".txt", ".json", ".csv", ".bib", ".tex", ".yaml", ".yml"}
 SOURCES = set(SOURCE_KEYS)
 CITATION_REPORT_NAME = "citation-report.md"
@@ -321,6 +323,25 @@ def _read_text(path: Path, limit: int = MAX_READ_CHARS) -> str:
     return text if len(text) <= limit else text[:limit] + "\n…（已截断）"
 
 
+def _read_full_text(path: Path) -> str:
+    """导出/定位正文时读全文，避免长综述被 MAX_READ_CHARS 截断。"""
+    return _read_text(path, limit=MAX_EXPORT_CHARS)
+
+
+def _read_text_window(
+    path: Path, offset: int = 0, limit: int = MAX_READ_CHARS
+) -> tuple[str, int]:
+    """按窗口读文本，返回 (本次内容, 总字数)；不插入截断标记，由调用方提示续读。"""
+    if path.suffix.lower() not in TEXT_SUFFIXES:
+        return "", 0
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "", 0
+    start = max(0, offset)
+    return text[start : start + limit], len(text)
+
+
 def _export_source(
     research: ResearchStore, project_id: str, source: str | None
 ) -> tuple[str, str]:
@@ -337,7 +358,7 @@ def _export_source(
     artifacts = research.list_artifacts(project_id)
 
     def _item_text(item: dict[str, Any]) -> tuple[str, str]:
-        text = _read_text(research.item_path(project_id, item))
+        text = _read_full_text(research.item_path(project_id, item))
         return str(item.get("title") or ""), text
 
     def _artifact_text(row: dict[str, Any]) -> tuple[str, str]:
@@ -346,7 +367,7 @@ def _export_source(
         if not path.is_file():
             # 旧版产物仍可能留在内部项目目录
             path = legacy_dir / rel
-        return str(row.get("title") or ""), _read_text(path)
+        return str(row.get("title") or ""), _read_full_text(path)
 
     if source:
         name = safe_name(source)
@@ -365,9 +386,9 @@ def _export_source(
                 if text:
                     return title, text
         direct = (
-            _read_text(root / name)
-            or _read_text(artifact_dir / name)
-            or _read_text(legacy_dir / name)
+            _read_full_text(root / name)
+            or _read_full_text(artifact_dir / name)
+            or _read_full_text(legacy_dir / name)
         )
         if direct:
             return Path(name).stem, direct
@@ -1181,14 +1202,38 @@ def build_router(
     def read_file(
         session_id: str,
         path: str = Query(..., description="project_read 返回的相对路径或文件名"),
+        offset: int = Query(0, ge=0, description="从第几个字符开始读，用于续读长文件"),
+        limit: int = Query(
+            MAX_READ_CHARS,
+            ge=500,
+            le=MAX_READ_CHARS,
+            description="本次最多返回多少字符",
+        ),
         x_internal_token: str | None = Header(default=None, alias="x-internal-token"),
     ) -> dict[str, Any]:
-        """读取当前项目里的文本文件，供 agent 在后续轮次检查/修订草稿。"""
+        """读取当前项目里的文本文件，供 agent 在后续轮次检查/修订草稿。
+
+        长草稿按窗口返回：``nextOffset`` 不为空时，带上它继续读，避免把
+        截断后的半篇正文当成全文写回或导出。
+        """
         _check(x_internal_token)
         _session, project = _session_project(session_id)
         project_id = str(project["id"])
         wanted = path.strip()
         root = Path(research.workspace_root(project_id))
+
+        def payload(file_path: Path, name: str, rel: str, kind: str, size: int) -> dict[str, Any]:
+            text, total = _read_text_window(file_path, offset, limit)
+            read_to = offset + len(text)
+            return {
+                "file": {"name": name, "path": rel, "kind": kind, "size": size},
+                "content": text,
+                "binary": not text and file_path.suffix.lower() not in TEXT_SUFFIXES,
+                "total": total,
+                "offset": offset,
+                "nextOffset": read_to if read_to < total else None,
+                "truncated": read_to < total,
+            }
         if str(project.get("root_path") or "").strip():
             name = safe_name(wanted)
             entries = explorer.project_files(root)
@@ -1206,19 +1251,13 @@ def build_router(
             if match is not None:
                 file_path = root / str(match["path"])
                 if file_path.is_file():
-                    text = _read_text(file_path)
-                    return {
-                        "file": {
-                            "name": match["name"],
-                            "path": match["path"],
-                            "kind": match["kind"],
-                            "size": int(match["size"]),
-                        },
-                        "content": text,
-                        "binary": not text
-                        and file_path.suffix.lower() not in TEXT_SUFFIXES,
-                        "truncated": "…（已截断）" in text,
-                    }
+                    return payload(
+                        file_path,
+                        match["name"],
+                        str(match["path"]),
+                        str(match["kind"]),
+                        int(match["size"]),
+                    )
         items = research.list_items(project_id)
         item = next(
             (
@@ -1243,18 +1282,13 @@ def build_router(
         file_path = research.item_path(project_id, item)
         if not file_path.is_file():
             raise HTTPException(status_code=404, detail="file not found")
-        text = _read_text(file_path)
-        return {
-            "file": {
-                "name": item["title"],
-                "path": item.get("path") or "",
-                "kind": item["kind"],
-                "size": int(item.get("size") or 0),
-            },
-            "content": text,
-            "binary": not text and file_path.suffix.lower() not in TEXT_SUFFIXES,
-            "truncated": "…（已截断）" in text,
-        }
+        return payload(
+            file_path,
+            str(item["title"]),
+            str(item.get("path") or ""),
+            str(item["kind"]),
+            int(item.get("size") or 0),
+        )
 
     @router.get("/sessions/{session_id}/review/templates")
     def review_templates(
@@ -1738,6 +1772,10 @@ def build_router(
             body.source or title or "综述草稿",
             session_id,
         )
+        # 交付稿里不能出现内部主键：把 p_xxx 换成“作者 年份”，页码保留在括号内。
+        if library is not None:
+            for paper_id, label in _citation_labels(text, library).items():
+                text = text.replace(paper_id, label)
         exe = find_pandoc()
         if not exe:
             from server.toolchain_api import invalidate_cache

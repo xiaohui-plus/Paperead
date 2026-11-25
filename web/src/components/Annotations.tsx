@@ -34,7 +34,6 @@ import {
   IconComment,
   IconHighlighter,
   IconPin,
-  IconPinOff,
   IconTranslate,
 } from './icons'
 import { MathText } from './MathText'
@@ -641,9 +640,44 @@ interface TranslateState {
   message?: string
 }
 
+/** 固定后的划词翻译卡片：由阅读视图持有，脱离选区/工具条生命周期，可多张并存。 */
+export interface PinnedTranslate {
+  id: string
+  value: string
+  target: string
+  /** 固定时的卡片位置与宽度（布局坐标，视口基准） */
+  left: number
+  top: number
+  width: number
+}
+
 const TOOLBAR_HEIGHT = 38
 const FLOAT_GAP = 10
 const VIEWPORT_PAD = 12
+
+/** 阅读页的真实滚动容器：PDF 模式是 `.pdf-view`，重排视图是 `.main-scroll`。
+ *  划词浮层与它们在 DOM 上不同层，只向上找 parentElement 会漏掉。 */
+function findScrollContainer(node: HTMLElement | null): HTMLElement | null {
+  for (const selector of ['.pdf-view', '.main-scroll']) {
+    const candidate = document.querySelector<HTMLElement>(selector)
+    if (
+      candidate &&
+      /(auto|scroll)/.test(window.getComputedStyle(candidate).overflowY) &&
+      candidate.scrollHeight > candidate.clientHeight
+    ) {
+      return candidate
+    }
+  }
+  let current = node?.parentElement ?? null
+  while (current) {
+    const style = window.getComputedStyle(current)
+    if (/(auto|scroll)/.test(style.overflowY) && current.scrollHeight > current.clientHeight) {
+      return current
+    }
+    current = current.parentElement
+  }
+  return null
+}
 
 /** 划词后浮在选区上方的工具条：荧光笔 / 批注 / 翻译，有提问入口时再多一个「提问」。 */
 export function SelectionToolbar({
@@ -652,6 +686,7 @@ export function SelectionToolbar({
   onPick,
   onComment,
   onAsk,
+  onPinCard,
   onClose,
 }: {
   rect: DOMRect
@@ -661,21 +696,19 @@ export function SelectionToolbar({
   onComment: (color: AnnotationColor) => void
   /** 把选中的文字作为引用带到左侧问答面板 */
   onAsk?: () => void
+  /** 固定翻译卡片：卡片交给视图层保存，工具条随即收起，可继续选下一段 */
+  onPinCard?: (card: Omit<PinnedTranslate, 'id'>) => void
   onClose: () => void
 }) {
-  const [pinned, setPinned] = useState(false)
-
   useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {
-      // 固定到 PDF 内容后不能再被点的别处顺手关掉；只允许卡片上的关闭按钮结束。
-      if (pinned) return
       const target = event.target as HTMLElement
       // 翻译卡片属于同一个浮层，点它内部不关闭
       if (!target.closest('.hl-toolbar, .hl-translate')) onClose()
     }
     document.addEventListener('pointerdown', onPointerDown)
     return () => document.removeEventListener('pointerdown', onPointerDown)
-  }, [onClose, pinned])
+  }, [onClose])
 
   const [hlColor, setHlColor] = useState(() => lastAnnotationColor('highlight'))
   const [cmColor, setCmColor] = useState(() => lastAnnotationColor('comment'))
@@ -685,12 +718,14 @@ export function SelectionToolbar({
   useEffect(() => {
     if (translation.status === 'idle') return
     const onKey = (event: KeyboardEvent) => {
-      // 固定后只有主动关闭；ESC 不再自动消失
-      if (event.key === 'Escape' && !pinned) setTranslation({ status: 'idle' })
+      if (event.key === 'Escape') {
+        setTranslation({ status: 'idle' })
+        onClose()
+      }
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [translation.status, pinned])
+  }, [translation.status, onClose])
 
   const apply = (kind: 'highlight' | 'comment', color: AnnotationColor) => {
     rememberAnnotationColor(kind, color)
@@ -807,7 +842,24 @@ export function SelectionToolbar({
   useEffect(() => {
     setDragPos(null)
     setDragging(false)
-  }, [rectKey])
+    // 同一实例复用到新选区时，旧译文不能跟着新选区继续显示
+    setTranslation({ status: 'idle' })
+  }, [rectKey, text])
+
+  // 选区浮层只属于当前视口：页面一开始滚动就收起工具条，
+  // 已固定的卡片由视图层单独保留，不随这一下消失。
+  const closeRef = useRef(onClose)
+  closeRef.current = onClose
+  useEffect(() => {
+    const scroller = findScrollContainer(toolbarRef.current)
+    if (!scroller) return
+    const start = scroller.scrollTop
+    const onScroll = () => {
+      if (Math.abs(scroller.scrollTop - start) > 24) closeRef.current()
+    }
+    scroller.addEventListener('scroll', onScroll, { passive: true })
+    return () => scroller.removeEventListener('scroll', onScroll)
+  }, [])
   const dragRef = useRef<{
     pointerId: number
     startX: number
@@ -940,11 +992,26 @@ export function SelectionToolbar({
           state={translation}
           target={targetName}
           resetKey={rectKey}
-          pinned={pinned}
-          onTogglePin={setPinned}
+          pinned={false}
+          onPin={
+            onPinCard
+              ? (pos) => {
+                  onPinCard({
+                    value: translation.value ?? '',
+                    target: targetName,
+                    left: pos.left,
+                    top: pos.top,
+                    width: pos.width,
+                  })
+                  // 固定即把卡片交给视图层：当前工具条收起，可直接划下一段
+                  setTranslation({ status: 'idle' })
+                  onClose()
+                }
+              : undefined
+          }
           onClose={() => {
             setTranslation({ status: 'idle' })
-            setPinned(false)
+            onClose()
           }}
           onRetry={() => void translate()}
         />
@@ -954,31 +1021,40 @@ export function SelectionToolbar({
 }
 
 /** 划词翻译结果卡片：刻意用统一浅底 + 细线，颜色只落在语言标签与操作文字上。 */
-function TranslateCard({
+export function TranslateCard({
   anchor,
+  fixedPosition,
   state,
   target,
   resetKey,
   pinned,
+  onPin,
   onTogglePin,
   onClose,
   onRetry,
 }: {
   /** 工具条当前所在位置：卡片默认贴在工具条下方，工具条拖动后跟随 */
   anchor: { left: number; top: number; width: number }
+  /** 已固定卡片由视图层指定位置（固定瞬间的卡片坐标） */
+  fixedPosition?: { left: number; top: number; width: number }
   state: TranslateState
   target: string
   /** 选区变化时丢弃手动拖到的位置 */
   resetKey?: string
   /** 固定到 PDF 内容：卡片停在此处，随页面滚动上移；不再自动消失 */
   pinned: boolean
-  onTogglePin: (next: boolean) => void
+  /** 非固定卡片：点击图钉交给视图层保存 */
+  onPin?: (pos: { left: number; top: number; width: number }) => void
+  /** 已固定卡片取消固定 */
+  onTogglePin?: (next: boolean) => void
   onClose: () => void
-  onRetry: () => void
+  onRetry?: () => void
 }) {
   const [copied, setCopied] = useState(false)
   const zoom = uiZoom()
-  const width = Math.min(328, window.innerWidth / zoom - (VIEWPORT_PAD * 2) / zoom)
+  const width =
+    fixedPosition?.width ??
+    Math.min(328, window.innerWidth / zoom - (VIEWPORT_PAD * 2) / zoom)
   const pad = VIEWPORT_PAD / zoom
   const left = clampPosition(
     anchor.left + (anchor.width - width) / 2,
@@ -998,8 +1074,12 @@ function TranslateCard({
   const [scrollShift, setScrollShift] = useState(0)
   const pinRef = useRef<{ top: number; scroll: number; scroller: HTMLElement | null } | null>(null)
 
-  const base = pinned && pinBase ? { ...pinBase, width } : { left, top, width }
-  const drag = useFloatDrag(base, pinned ? 'pinned' : resetKey, {
+  const base = fixedPosition
+    ? { ...fixedPosition }
+    : pinned && pinBase
+      ? { ...pinBase, width }
+      : { left, top, width }
+  const drag = useFloatDrag(base, pinned ? `pinned:${resetKey ?? ''}` : resetKey, {
     onDragEnd: (pos) => {
       if (!pinned) return
       setPinBase({ left: pos.left, top: pos.top })
@@ -1009,30 +1089,6 @@ function TranslateCard({
     },
   })
 
-  const findScroller = (node: HTMLElement | null): HTMLElement | null => {
-    // PDF 模式的滚动容器 `.pdf-view` 与划词浮层不在同一棵子树里（浮层是
-    // 页面级浮层），只向上找 parentElement 会漏掉它；先按已知容器找。
-    for (const selector of ['.pdf-view', '.main-scroll']) {
-      const candidate = document.querySelector<HTMLElement>(selector)
-      if (
-        candidate &&
-        /(auto|scroll)/.test(window.getComputedStyle(candidate).overflowY) &&
-        candidate.scrollHeight > candidate.clientHeight
-      ) {
-        return candidate
-      }
-    }
-    let current = node?.parentElement ?? null
-    while (current) {
-      const style = window.getComputedStyle(current)
-      if (/(auto|scroll)/.test(style.overflowY) && current.scrollHeight > current.clientHeight) {
-        return current
-      }
-      current = current.parentElement
-    }
-    return null
-  }
-
   // 阅读页的滚动发生在 `.main-scroll` 内部，不是 window。固定后监听真实
   // 滚动容器，按滚动量把卡片往上推，视觉上就与 PDF 正文一起滑动。
   useEffect(() => {
@@ -1040,7 +1096,7 @@ function TranslateCard({
       setScrollShift(0)
       return
     }
-    const scroller = pinRef.current?.scroller ?? findScroller(drag.ref.current)
+    const scroller = pinRef.current?.scroller ?? findScrollContainer(drag.ref.current)
     if (!scroller) return
     if (!pinRef.current) {
       pinRef.current = { top: drag.top, scroll: scroller.scrollTop, scroller }
@@ -1060,16 +1116,12 @@ function TranslateCard({
       setPinBase(null)
       pinRef.current = null
       setScrollShift(0)
-      onTogglePin(false)
+      onTogglePin?.(false)
       return
     }
-    const scroller = findScroller(drag.ref.current)
-    pinRef.current = scroller
-      ? { top: drag.top, scroll: scroller.scrollTop, scroller }
-      : null
-    setScrollShift(0)
-    setPinBase({ left: drag.left, top: drag.top })
-    onTogglePin(true)
+    // 未固定卡片：把当前位置交给视图层，由那边重新挂载固定卡片，
+    // 当前工具条随即收起，新选区可以继续翻译。
+    onPin?.({ left: drag.left, top: drag.top, width })
   }
 
   const copy = async () => {
@@ -1108,16 +1160,18 @@ function TranslateCard({
       <div className="hl-translate-head">
         <span className="hl-translate-lang">EN → {target}</span>
         <span className="hl-translate-head-actions">
-          <button
-            type="button"
-            className={`icon-btn hl-translate-pin${pinned ? ' is-active' : ''}`}
-            title={pinned ? '取消固定' : '固定到 PDF 内容（随页面滚动）'}
-            aria-label={pinned ? '取消固定' : '固定翻译卡片'}
-            aria-pressed={pinned}
-            onClick={togglePin}
-          >
-            {pinned ? <IconPinOff /> : <IconPin />}
-          </button>
+          {!pinned && onPin && state.status === 'done' && (
+            <button
+              type="button"
+              className="icon-btn hl-translate-pin"
+              title="固定到 PDF 内容（随页面滚动）"
+              aria-label="固定翻译卡片"
+              aria-pressed={false}
+              onClick={togglePin}
+            >
+              <IconPin />
+            </button>
+          )}
           <button type="button" className="icon-btn" title="关闭翻译" onClick={onClose}>
             ×
           </button>

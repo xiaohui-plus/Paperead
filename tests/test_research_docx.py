@@ -7,7 +7,7 @@ import pytest
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
-from docx.shared import Pt
+from docx.shared import Pt, RGBColor
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -251,8 +251,11 @@ def test_apply_review_layout_sets_chinese_typesetting(tmp_path: Path):
 
     body = saved.paragraphs[-1]
     assert body.alignment == WD_ALIGN_PARAGRAPH.JUSTIFY
-    assert body.paragraph_format.line_spacing == pytest.approx(1.2)
+    assert body.paragraph_format.line_spacing == pytest.approx(1.3)
     assert body.paragraph_format.first_line_indent == Pt(24)
+    assert all(run.font.color.rgb == RGBColor(0, 0, 0) for run in body.runs)
+    assert saved.paragraphs[0].paragraph_format.line_spacing == pytest.approx(1.3)
+    assert all(run.font.color.rgb == RGBColor(0, 0, 0) for run in saved.paragraphs[0].runs)
 
     expected = {
         "Heading 1": (16, "黑体"),
