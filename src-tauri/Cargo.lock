@@ -2670,7 +2670,7 @@ dependencies = [
 
 [[package]]
 name = "paperead-desktop"
-version = "0.2.34"
+version = "0.2.35"
 dependencies = [
  "aes-gcm",
  "futures-util",

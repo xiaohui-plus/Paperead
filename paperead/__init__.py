@@ -28,7 +28,7 @@ from .translate import (
     translate_block,
 )
 
-__version__ = "0.2.34"
+__version__ = "0.2.35"
 
 __all__ = [
     # 解析

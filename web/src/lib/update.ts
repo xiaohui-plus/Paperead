@@ -70,6 +70,26 @@ export function normalizeCheckedAt(value: unknown): number {
   return n > 0 && n < 1e12 ? Math.round(n * 1000) : n
 }
 
+/** 版本号比较：仅当 latest 严格高于 current 时才算可更新。 */
+export function isNewerVersion(latest: string, current: string): boolean {
+  if (!latest) return false
+  if (!current) return true
+  const key = (value: string) =>
+    value
+      .replace(/^v/i, '')
+      .split(/[.\-+]/)
+      .map((part) => Number.parseInt(part, 10) || 0)
+  const next = key(latest)
+  const base = key(current)
+  const length = Math.max(next.length, base.length)
+  for (let i = 0; i < length; i += 1) {
+    const a = next[i] ?? 0
+    const b = base[i] ?? 0
+    if (a !== b) return a > b
+  }
+  return false
+}
+
 export function loadUpdateCache(): UpdateCache | null {
   try {
     const raw = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null')
@@ -176,6 +196,8 @@ export async function checkUpdate(force = false): Promise<UpdateInfo> {
     if (data.error) throw new Error(String(data.error))
     info = data as UpdateInfo
   }
+  // 只向上更新：清单里的版本不比当前版本高时，不能显示为「可更新」。
+  info = { ...info, has_update: info.has_update && isNewerVersion(info.latest, info.current) }
   const checkedAt = Number(info.checked_at) || Date.now()
   const cached: UpdateCache = { checkedAt, data: info }
   localStorage.setItem(CACHE_KEY, JSON.stringify(cached))

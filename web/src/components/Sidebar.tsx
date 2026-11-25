@@ -159,13 +159,12 @@ export function Sidebar({
       {updateVisible && (
         <button
           className="library-update"
-          title={update.message || `安装新版本 v${update.version}`}
-          aria-label={`安装新版本 v${update.version}`}
+          title={updateBusy ? '正在安装更新…' : `安装新版本 v${update.version}`}
+          aria-label={updateBusy ? '正在安装更新' : `安装新版本 v${update.version}`}
           disabled={updateBusy}
           onClick={installPrepared}
         >
           <IconUpdate />
-          <span>{updateBusy ? '正在安装…' : `更新到 v${update.version}`}</span>
         </button>
       )}
 

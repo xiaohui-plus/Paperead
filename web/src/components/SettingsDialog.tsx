@@ -7,6 +7,7 @@ import {
   getCurrentVersion,
   installUpdateInApp,
   isAndroidApp,
+  isNewerVersion,
   loadUpdateCache,
   parseUpdateNotes,
   UPDATE_RECHECK_MS,
@@ -400,7 +401,13 @@ export function SettingsDialog({
       const sameVersion =
         Boolean(cached) && (!version || !cached?.data.current || cached.data.current === version)
       if (cached && sameVersion) {
-        setUpdateInfo(cached.data)
+        // 旧缓存可能写着「可更新至旧版本」，按真实版本重新判定一次。
+        setUpdateInfo({
+          ...cached.data,
+          has_update:
+            cached.data.has_update &&
+            isNewerVersion(cached.data.latest, version || cached.data.current),
+        })
         setUpdateCheckedAt(cached.checkedAt)
       } else {
         setUpdateInfo(null)

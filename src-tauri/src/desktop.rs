@@ -852,6 +852,16 @@ async fn install_prepared_update(app: AppHandle) -> Result<String, String> {
         return Err("not-ready".into());
     };
 
+    // 只允许向上更新：状态里残留的旧版本安装包不能拿来覆盖当前程序。
+    let current = app.package_info().version.to_string();
+    if !version_is_newer(&version, &current) {
+        paths::log_line(
+            &app,
+            &format!("ignore prepared update {version} (current {current})"),
+        );
+        return Err("not-ready".into());
+    }
+
     paths::log_line(&app, &format!("install prepared update: {version}"));
     emit_update_progress(&app, "installing", &version, 0, 0, "正在启动安装程序…");
     set_update_status(&app, "installing", &version, 100, "正在启动安装程序…");
@@ -885,10 +895,9 @@ async fn prepare_update_once(app: &AppHandle) {
     let update = match updater.check().await {
         Ok(Some(update)) => update,
         Ok(None) => {
-            // 当前已是最新：清掉旧版本安装包，避免侧栏残留「可安装」入口。
-            if let Some((_, path, _)) = scan_prepared_installer(app) {
-                let _ = std::fs::remove_file(&path);
-            }
+            // 当前已是最新：清掉遗留安装包（含比当前版本旧的），
+            // 避免侧栏残留「更新到旧版本」的入口。
+            clear_prepared_installers(app);
             set_update_status(app, "up-to-date", "", 100, "当前已是最新版本");
             emit_update_progress(app, "up-to-date", "", 0, 0, "当前已是最新版本");
             return;
@@ -983,6 +992,27 @@ fn restore_prepared_status(app: &AppHandle) {
     match scan_prepared_installer(app) {
         Some((_, _, version)) => mark_update_ready(app, &version),
         None => set_update_status(app, "idle", "", 0, ""),
+    }
+}
+
+/// 清掉更新目录里所有遗留安装包；只在确认已是最新版本时调用。
+#[cfg(windows)]
+fn clear_prepared_installers(app: &AppHandle) {
+    const PREFIX: &str = "paperead-";
+    const SUFFIX: &str = "-setup.exe";
+    for dir in update_temp_dirs(app) {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.starts_with(PREFIX) && name.ends_with(SUFFIX) {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
     }
 }
 
@@ -1388,6 +1418,11 @@ fn version_key(value: &str) -> Vec<u64> {
         .collect()
 }
 
+/// 只把比当前安装版本更高的版本视为更新，旧版本安装包一律忽略。
+fn version_is_newer(candidate: &str, current: &str) -> bool {
+    !candidate.is_empty() && version_key(candidate) > version_key(current)
+}
+
 /// 指定版本的安装包是否已经完整落在本机（后台下载完成后在这里命中）。
 #[cfg(windows)]
 fn existing_installer(
@@ -1421,6 +1456,7 @@ fn scan_prepared_installer(
 ) -> Option<(std::path::PathBuf, std::path::PathBuf, String)> {
     const PREFIX: &str = "paperead-";
     const SUFFIX: &str = "-setup.exe";
+    let current = app.package_info().version.to_string();
     let mut best: Option<(std::path::PathBuf, std::path::PathBuf, String)> = None;
 
     for dir in update_temp_dirs(app) {
@@ -1437,7 +1473,8 @@ fn scan_prepared_installer(
                 continue;
             }
             let version = name[PREFIX.len()..name.len() - SUFFIX.len()].to_string();
-            if version.is_empty() {
+            if !version_is_newer(&version, &current) {
+                // 旧安装包（或当前版本自身的包）不能当成「可更新」推给用户。
                 continue;
             }
             let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
