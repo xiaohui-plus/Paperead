@@ -200,6 +200,18 @@ npm run release:publish -- -Version 0.1.7
 
 常用参数：`-SkipGithub` / `-SkipGitee` 只发一边（收尾补漏时用）、`-Notes "说明"` 覆盖更新描述。
 
+### 代码签名（SignPath Foundation）
+
+免费签名只在 CI 里做，本地 `build:installer` 出来的包永远不带签名。
+
+- 启用条件：仓库配置了 `SIGNPATH_API_TOKEN`（Secret）和 `SIGNPATH_ORGANIZATION_ID`（Variable）。没配置时 `release.yml` 里整段签名步骤自动跳过，发布链路与以前完全一致。
+- 只签 `Paperead_x.y.z_x64-setup.exe`：NSIS 是先把内部 exe 打包再产出安装包，事后无法回填，而用户下载的正是安装包本身。
+- **顺序不能改**：构建 → SignPath 签名 → `tauri signer sign` 重签 `.sig` → 重算 `SHA256SUMS.txt` → 重建 `latest.json` → `gh release upload --clobber`。签名会改变文件字节，跳过任何一步都会让自动更新在用户端校验失败。
+- `release-publish.ps1` 会检查本地安装包是否带有效签名；未签名且 GitHub 上有签名版时，先拉签名版覆盖 `release\` 再传 Gitee，保证两个平台分发的是同一份文件。
+- 证书是新的就还没有 SmartScreen 信誉，头一批下载仍可能提示，属于正常现象，不是配置错误。
+
+申请材料、签名范围和验证方式见仓库根目录的 `CODE_SIGNING.md`。
+
 下面的手动流程保留作参考（脚本报错时按此排查）：
 
 ### GitHub（自动构建 + 手动转正）
@@ -295,6 +307,7 @@ Invoke-RestMethod -Method Delete `
       模型配置等设置就像「升级后丢了」，虽然会自动从数据目录恢复，但主题等其它偏好会重置）
 - [ ] tag 指向**最终** commit
 - [ ] GitHub draft 已转为正式 release 并设为 latest
+- [ ] 安装包签名状态已确认（`Get-AuthenticodeSignature` 为 `Valid`，或在更新说明中提示未签名）
 - [ ] Gitee 发行版已创建，附件齐全、下载链接返回 200
 - [ ] Gitee `latest` 固定发行版的 `latest.json` 已替换为本次版本（更新检查第一位端点）
 - [ ] **两个平台版本号、更新说明、安装包完全一致**

@@ -18,12 +18,24 @@ We apply for free code signing for open-source projects through
 approved, release artifacts are unsigned and Windows may show an unknown
 publisher warning.
 
-Once approved, only the following artifacts are signed:
+Once approved, the following artifact is Authenticode-signed by the release
+pipeline, with an RFC 3161 timestamp:
 
 - `Paperead_<version>_x64-setup.exe` (NSIS installer)
-- `paperead-desktop.exe` and `paperead-server.exe`
-  (when the release pipeline can sign binaries before packaging)
-- optionally the portable ZIP, if it is repackaged by SignPath
+
+Scope and limits:
+
+- Only the installer executable is signed. The binaries bundled inside it (the
+  Tauri application, the Python sidecar, and the bundled Node runtime) are not
+  individually Authenticode-signed.
+- The portable ZIP is not signed. It is assembled locally and is not produced
+  by the signed workflow.
+- The Android APK is not Authenticode-signed; it carries the project's own
+  Android release key, which is required for installation and upgrades and is
+  independent of Windows code signing.
+- Signing happens after packaging, so the Tauri updater signature (`.sig`),
+  `SHA256SUMS.txt`, and `latest.json` are regenerated from the signed
+  installer. The published `.sig` therefore always matches the published bytes.
 
 Artifacts are signed only when they are built by the GitHub Actions workflow
 from a `v*` tag in this repository. We do not sign binaries built from

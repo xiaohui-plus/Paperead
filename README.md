@@ -212,6 +212,8 @@ Paperead 是一个本地论文工作台：重排双栏 PDF、按页流式翻译�
 
 从 [GitHub Releases](https://github.com/xiaohui-plus/Paperead/releases/latest) 或 [Gitee Releases](https://gitee.com/deng_xiaohui/paperead/releases) 下载，两边内容一致。
 
+Windows 安装包的代码签名由 [SignPath Foundation](https://signpath.org/) 提供（面向开源项目的免费签名计划）。审核通过前发布的是未签名版本，Windows 可能提示未知发布者；签名范围与校验方式见 [CODE_SIGNING.md](CODE_SIGNING.md)。
+
 ---
 
 ## 已知限制

@@ -68,6 +68,14 @@ if (-not (Test-Path "src-tauri\resources\browser-extension\firefox-mv2\manifest.
 if (Test-Path $installer) {
     $actual = (Get-Item $installer).VersionInfo.FileVersion
     if ($actual -ne $version) { $errors += "安装包版本 $actual != $version" }
+
+    # 签名只做提示不做拦截：SignPath 获批前本地包必然是未签名的
+    $auth = Get-AuthenticodeSignature -LiteralPath $installer
+    if ($auth.Status -eq "Valid") {
+        Write-Host "安装包签名有效：$($auth.SignerCertificate.Subject)"
+    } else {
+        Write-Host "提示：安装包未做 Authenticode 签名（$($auth.Status)），用户下载时可能出现未知发布者提示" -ForegroundColor Yellow
+    }
 }
 
 if (Test-Path $sums) {
