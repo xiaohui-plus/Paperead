@@ -52,7 +52,9 @@ release\Paperead_0.1.0_source.zip        # AGPL 对应源码
 1. 构建 `web/dist`；
 2. 用 PyInstaller 产出 `dist-sidecar\paperead-server`（onedir，约 80MB）；
 3. 复制到 `src-tauri\resources\paperead-server`；
-4. 把 `agent/`（含 `node_modules` 和内置 `node.exe`）打包到 `src-tauri\resources\agent`；
+4. 把 `agent/`（含 `node_modules`）打包到 `src-tauri\resources\agent`；
+   node 运行时不再内置（约 86MB），首次启动由 Python 侧后台下载到
+   `<数据目录>/engines/node/`，Rust 等它就绪后再拉起研究 agent；
 5. 编译 Tauri release 并生成 NSIS 安装包。
 
 只改前端时也要重新打包 sidecar，因为 sidecar 托管的是打包时的 `web/dist`。

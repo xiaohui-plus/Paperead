@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ErrorBoundary } from '../components/ErrorBoundary'
+import { IconBot } from '../components/icons'
 import {
   researchApi,
   type ProjectFile,
@@ -20,12 +21,25 @@ import { streamSessionEvents, type StreamState } from '../lib/researchStream'
 import { ApprovalPanel } from './ApprovalPanel'
 import { Composer } from './Composer'
 import { splitLeadHeading } from './leadHeading'
+import { SubagentPanel } from './SubagentPanel'
 import { Transcript } from './Transcript'
 import {
   readSessionCache,
   writeSessionCache,
   type SessionSnapshot,
 } from './researchCache'
+
+const GOAL_PHASE_TEXT: Record<string, string> = {
+  active: '进行中',
+  paused: '已暂停',
+  blocked: '受阻',
+  complete: '已完成',
+  completed: '已完成',
+}
+
+function goalPhaseText(phase: string): string {
+  return GOAL_PHASE_TEXT[phase] || '进行中'
+}
 
 interface Props {
   session: SessionSummary
@@ -80,6 +94,7 @@ export function SessionView({
   const [streamKey, setStreamKey] = useState(0)
   const [now, setNow] = useState(() => Date.now())
   const [historyLoading, setHistoryLoading] = useState(!snapshot)
+  const [subagentsOpen, setSubagentsOpen] = useState(false)
 
   const cursor = useRef(snapshot?.cursor ?? 0)
   const pending = useRef<AgentEvent[]>([])
@@ -327,6 +342,45 @@ export function SessionView({
 
   return (
     <div className="project-session-view">
+      <button
+        type="button"
+        className="session-subagent-toggle"
+        aria-label="查看子代理"
+        aria-pressed={subagentsOpen}
+        onClick={() => setSubagentsOpen(true)}
+      >
+        <IconBot />
+        <span>子代理</span>
+      </button>
+      <SubagentPanel
+        parentSessionId={session.id}
+        open={subagentsOpen}
+        onClose={() => setSubagentsOpen(false)}
+      />
+      {chat.goal && (
+        <p className="session-banner" data-level="info">
+          <span>
+            长程目标 · {goalPhaseText(chat.goal.phase)} ·{' '}
+            {chat.goal.phase === 'complete' || chat.goal.phase === 'completed'
+              ? `共 ${chat.goal.roundsStarted} 轮`
+              : `已推进 ${chat.goal.roundsStarted}/${chat.goal.maxGoalRounds} 轮`}
+          </span>
+          <span className="session-goal-objective" title={chat.goal.objective}>
+            {chat.goal.objective}
+          </span>
+        </p>
+      )}
+      {chat.retry && chat.running && (
+        <p className="session-banner" data-level="warn">
+          <span>
+            连接中断（{chat.retry.failure?.code || 'TRANSPORT'}）·
+            {chat.retry.started
+              ? `正在重新发送（第 ${chat.retry.retry} 次）`
+              : `${Math.max(1, Math.round(chat.retry.delayMs / 1000))} 秒后第 ${chat.retry.retry} 次重试`}
+            {chat.retry.maxRetries ? ` · 最多 ${chat.retry.maxRetries} 次` : ''}
+          </span>
+        </p>
+      )}
       {streamError && streamState === 'error' && (
         <p className="session-banner">
           <span>{streamError}</span>

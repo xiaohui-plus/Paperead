@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from 'react'
 import {
   DEMO_PAPER,
   createFolder,
@@ -49,7 +49,48 @@ import { importSyncPackage } from '../lib/deviceSync'
 import { SCHOLAREAD_SYNCED } from '../lib/scholareadSync'
 
 type Filter = 'all' | 'ready' | 'reading' | 'unread' | 'finished' | 'untranslated' | 'failed'
-type Sort = 'recent' | 'read' | 'title' | 'pages'
+type Sort = 'recent' | 'read' | 'title' | 'pages' | 'manual'
+
+const LIBRARY_ORDER_KEY = 'paperead.libraryOrder.v1'
+const LIBRARY_SORT_KEY = 'paperead.librarySort'
+const SORT_VALUES: Sort[] = ['recent', 'read', 'title', 'pages', 'manual']
+
+/** 自定义顺序按视图作用域保存：全部文献用 all，各文件夹用自己的 id。 */
+function loadManualOrder(): Record<string, string[]> {
+  try {
+    const raw = localStorage.getItem(LIBRARY_ORDER_KEY)
+    if (!raw) return {}
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return {}
+    const result: Record<string, string[]> = {}
+    for (const [scope, ids] of Object.entries(parsed as Record<string, unknown>)) {
+      if (Array.isArray(ids)) {
+        result[scope] = ids.filter((id): id is string => typeof id === 'string')
+      }
+    }
+    return result
+  } catch {
+    return {}
+  }
+}
+
+function saveManualOrder(value: Record<string, string[]>) {
+  try {
+    localStorage.setItem(LIBRARY_ORDER_KEY, JSON.stringify(value))
+  } catch {
+    // 隐私模式等不可写环境：本次会话仍生效
+  }
+}
+
+function loadSortPreference(): Sort {
+  try {
+    const raw = localStorage.getItem(LIBRARY_SORT_KEY)
+    if (raw && SORT_VALUES.includes(raw as Sort)) return raw as Sort
+  } catch {
+    // 读不到就用默认排序
+  }
+  return 'recent'
+}
 
 /** File System Access API 的保存对话框（Chrome/Edge 支持，手机 WebView 不支持）。 */
 type SaveFilePickerHandle = {
@@ -75,8 +116,15 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
   const [demoMode, setDemoMode] = useState(false)
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
-  const [sort, setSort] = useState<Sort>('recent')
+  const [sort, setSort] = useState<Sort>(() => loadSortPreference())
   const [view, setView] = useState<'grid' | 'list'>('grid')
+  const [manualOrder, setManualOrder] = useState<Record<string, string[]>>(() =>
+    loadManualOrder(),
+  )
+  const [insertTarget, setInsertTarget] = useState<{
+    id: string
+    position: 'before' | 'after'
+  } | null>(null)
   const [dragOver, setDragOver] = useState(false)
 
   const [toast, setToast] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null)
@@ -91,14 +139,22 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
   const [gridAnimating, setGridAnimating] = useState(false)
   const [dragPaper, setDragPaper] = useState<PaperRow | null>(null)
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null)
+  const [springOpenFolderId, setSpringOpenFolderId] = useState<string | null>(null)
+  const [mainDropActive, setMainDropActive] = useState(false)
   const [dwellActive, setDwellActive] = useState(false)
   const [dragOutDone, setDragOutDone] = useState(false)
   const [dragFolderName, setDragFolderName] = useState('')
   const dwellTimer = useRef<number | undefined>(undefined)
   const dragDepth = useRef(0)
   const movingOut = useRef(false)
-  const postDragFolder = useRef<string | null | undefined>(undefined)
   const suppressClick = useRef(false)
+  /** 拖拽开始时所处的视图；未成功落定时用它还原 */
+  const dragOriginFolder = useRef<string | null>(null)
+  /** 因悬停而自动打开、尚未落定的文件夹 */
+  const springOpenedFolder = useRef<string | null>(null)
+  /** 本次拖拽是否已经通过 drop 完成落定（区分取消拖拽） */
+  const dropHandled = useRef(false)
+  const activeFolderRef = useRef<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const storyInputRef = useRef<HTMLInputElement>(null)
   const mobile = isMobileShell()
@@ -575,6 +631,18 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
   }, [folders, activeFolderId])
 
   useEffect(() => {
+    activeFolderRef.current = activeFolderId
+  }, [activeFolderId])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LIBRARY_SORT_KEY, sort)
+    } catch {
+      // 不可写环境忽略，不影响本次会话
+    }
+  }, [sort])
+
+  useEffect(() => {
     setGridAnimating(true)
     const timer = window.setTimeout(() => setGridAnimating(false), 180)
     return () => window.clearTimeout(timer)
@@ -692,10 +760,9 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
       return
     }
     setDragPaper((prev) => (prev ? { ...prev, folder_id: null } : prev))
-    if (activeFolderId) postDragFolder.current = null
     setDragOutDone(true)
     window.setTimeout(() => setDragOutDone(false), 350)
-  }, [dragPaper, activeFolderId, movePaper])
+  }, [dragPaper, movePaper])
 
   const startDwell = useCallback(() => {
     if (
@@ -715,10 +782,15 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
 
   const handlePaperDragStart = (paper: PaperRow) => {
     suppressClick.current = true
+    dragOriginFolder.current = activeFolderRef.current
+    springOpenedFolder.current = null
+    dropHandled.current = false
     setDragPaper(paper)
     setDragOverFolderId(null)
+    setSpringOpenFolderId(null)
+    setInsertTarget(null)
+    setMainDropActive(false)
     setDragOutDone(false)
-    postDragFolder.current = undefined
     setDragFolderName(
       folders.find((folder) => folder.id === paper.folder_id)?.name ?? '',
     )
@@ -726,34 +798,156 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
 
   const handlePaperDragEnd = () => {
     cancelDwell()
+    setMainDropActive(false)
     setDragPaper(null)
     setDragOverFolderId(null)
     setDragOutDone(false)
-    const target = postDragFolder.current
-    postDragFolder.current = undefined
-    if (target !== undefined) setActiveFolderId(target)
+    setInsertTarget(null)
+    const opened = springOpenedFolder.current
+    const handled = dropHandled.current
+    springOpenedFolder.current = null
+    dropHandled.current = false
+    setSpringOpenFolderId(null)
+    // 悬停打开过文件夹、但最终没有落到任何位置（取消/拖到空白）时回到起点
+    if (!handled && opened !== null) setActiveFolderId(dragOriginFolder.current)
     window.setTimeout(() => {
       suppressClick.current = false
     }, 180)
   }
 
+  /** 拖拽悬停足够久：在右侧打开该文件夹，方便继续把文献拖进去。 */
+  const handleSpringOpenFolder = useCallback((folderId: string) => {
+    if (activeFolderRef.current === folderId) return
+    springOpenedFolder.current = folderId
+    setSpringOpenFolderId(folderId)
+    setActiveFolderId(folderId)
+  }, [])
+
   const handleDropOnFolder = (folderId: string) => {
     const paper = dragPaper
+    dropHandled.current = true
     setDragOverFolderId(null)
+    setSpringOpenFolderId(null)
     if (!paper) return
-    if ((paper.folder_id ?? null) === folderId) return
-    const previousActive = activeFolderId
-    if (activeFolderId && activeFolderId !== folderId) {
-      postDragFolder.current = folderId
+    const origin = dragOriginFolder.current
+    if ((paper.folder_id ?? null) === folderId) {
+      setActiveFolderId(folderId)
+      return
     }
+    // 先切到目标文件夹，让用户立刻看到文献落进去；失败再退回原视图
+    setActiveFolderId(folderId)
     void movePaper(paper.id, folderId).then((moved) => {
-      if (!moved && previousActive) setActiveFolderId(previousActive)
+      if (!moved) setActiveFolderId(origin)
+    })
+  }
+
+  const handleDropAll = () => {
+    const paper = dragPaper
+    dropHandled.current = true
+    setDragOverFolderId(null)
+    setSpringOpenFolderId(null)
+    if (!paper) return
+    const origin = dragOriginFolder.current
+    if (!paper.folder_id) {
+      setActiveFolderId(null)
+      return
+    }
+    setActiveFolderId(null)
+    void movePaper(paper.id, null).then((moved) => {
+      if (!moved) setActiveFolderId(origin)
+    })
+  }
+
+  const mainDropFolderId =
+    dragPaper && activeFolderId && (dragPaper.folder_id ?? null) !== activeFolderId
+      ? activeFolderId
+      : null
+
+  /** 松开在右侧主区：若该区域当前就是悬停打开的目标文件夹，就把它移进去。 */
+  const handleMainDrop = () => {
+    const paper = dragPaper
+    const target = activeFolderRef.current
+    setMainDropActive(false)
+    if (!paper || !target || (paper.folder_id ?? null) === target) return
+    dropHandled.current = true
+    void movePaper(paper.id, target).then((moved) => {
+      if (!moved) setActiveFolderId(dragOriginFolder.current)
     })
   }
 
   const openPaper = (id: string) => {
     if (suppressClick.current) return
     onOpenPaper(id)
+  }
+
+  /** 库内重排只在同一视图、且没有搜索/筛选时生效，避免打乱未显示的论文顺序。 */
+  const canReorderHere =
+    Boolean(dragPaper) &&
+    dragOriginFolder.current === activeFolderId &&
+    filter === 'all' &&
+    !query.trim()
+  const reorderScope = activeFolderId ?? 'all'
+
+  const handleGridDragOver = (event: ReactDragEvent<HTMLDivElement>) => {
+    if (!canReorderHere || !dragPaper) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
+    const target = (event.target as Element | null)?.closest?.('.paper-card')
+    if (!target || target.classList.contains('add-card')) {
+      setInsertTarget(null)
+      return
+    }
+    const id = target.getAttribute('data-paper-id')
+    if (!id || id === dragPaper.id) {
+      setInsertTarget(null)
+      return
+    }
+    const rect = target.getBoundingClientRect()
+    const position: 'before' | 'after' =
+      view === 'list'
+        ? event.clientY < rect.top + rect.height / 2
+          ? 'before'
+          : 'after'
+        : event.clientX < rect.left + rect.width / 2
+          ? 'before'
+          : 'after'
+    setInsertTarget((prev) =>
+      prev && prev.id === id && prev.position === position
+        ? prev
+        : { id, position },
+    )
+  }
+
+  const handleGridDragLeave = (event: ReactDragEvent<HTMLDivElement>) => {
+    if (!canReorderHere) return
+    const rect = event.currentTarget.getBoundingClientRect()
+    const inside =
+      event.clientX > rect.left &&
+      event.clientX < rect.right &&
+      event.clientY > rect.top &&
+      event.clientY < rect.bottom
+    if (!inside) setInsertTarget(null)
+  }
+
+  const handleGridDrop = (event: ReactDragEvent<HTMLDivElement>) => {
+    if (!canReorderHere || !dragPaper) return
+    event.preventDefault()
+    event.stopPropagation()
+    const paperId = dragPaper.id
+    const target = insertTarget
+    setInsertTarget(null)
+    dropHandled.current = true
+    const ids = visible.map((paper) => paper.id).filter((id) => id !== paperId)
+    if (target && ids.includes(target.id)) {
+      const at = ids.indexOf(target.id)
+      ids.splice(target.position === 'after' ? at + 1 : at, 0, paperId)
+    } else {
+      ids.push(paperId)
+    }
+    const next = { ...manualOrder, [reorderScope]: ids }
+    setManualOrder(next)
+    saveManualOrder(next)
+    setSort('manual')
   }
 
   const visible = useMemo(() => {
@@ -782,13 +976,23 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
       return true
     })
     rows = [...rows].sort((a, b) => {
+      if (sort === 'manual') {
+        const order = manualOrder[activeFolderId ?? 'all'] ?? []
+        const rank = new Map(order.map((id, index) => [id, index]))
+        const ra = rank.get(a.id)
+        const rb = rank.get(b.id)
+        if (ra === undefined && rb !== undefined) return 1
+        if (ra !== undefined && rb === undefined) return -1
+        if (ra !== undefined && rb !== undefined && ra !== rb) return ra - rb
+        return b.created_at - a.created_at
+      }
       if (sort === 'title') return a.title.localeCompare(b.title, 'zh')
       if (sort === 'pages') return b.pages - a.pages
       if (sort === 'read') return (b.read_at ?? 0) - (a.read_at ?? 0)
       return b.created_at - a.created_at
     })
     return rows
-  }, [allPapers, query, filter, sort, activeFolderId, dragPaper?.id])
+  }, [allPapers, query, filter, sort, activeFolderId, dragPaper?.id, manualOrder])
 
   return (
     <div className="library">
@@ -805,7 +1009,9 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
             loading={foldersLoading}
             error={folderError}
             dragPaperId={dragPaper?.id ?? null}
+            dragPaperInFolder={Boolean(dragPaper?.folder_id)}
             dragOverFolderId={dragOverFolderId}
+            springOpenFolderId={springOpenFolderId}
             onSelect={setActiveFolderId}
             onCreate={handleCreateFolder}
             onRename={handleRenameFolder}
@@ -815,11 +1021,37 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
               setDragOverFolderId((prev) => (prev === folderId ? null : prev))
             }
             onDropFolder={handleDropOnFolder}
+            onDropAll={handleDropAll}
+            onSpringOpen={handleSpringOpenFolder}
           />
         }
       />
 
-      <main className="library-main">
+      <main
+        className="library-main"
+        data-drop={Boolean(mainDropActive && mainDropFolderId)}
+        onDragOver={(event) => {
+          if (!dragPaper) return
+          event.preventDefault()
+          event.dataTransfer.dropEffect = 'move'
+          if (mainDropFolderId) setMainDropActive(true)
+        }}
+        onDragLeave={(event) => {
+          if (!dragPaper) return
+          const rect = event.currentTarget.getBoundingClientRect()
+          const inside =
+            event.clientX > rect.left &&
+            event.clientX < rect.right &&
+            event.clientY > rect.top &&
+            event.clientY < rect.bottom
+          if (!inside) setMainDropActive(false)
+        }}
+        onDrop={(event) => {
+          if (!dragPaper) return
+          event.preventDefault()
+          handleMainDrop()
+        }}
+      >
         <header className="library-head">
           <div className="library-title">
             {selectedFolder && (
@@ -960,6 +1192,7 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
               <option value="read">最近阅读</option>
               <option value="title">标题</option>
               <option value="pages">页数</option>
+              <option value="manual">自定义</option>
             </select>
           </label>
           <div className="tool view-toggle" role="group" aria-label="视图">
@@ -1020,6 +1253,9 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
             className={`paper-grid ${view === 'list' ? 'is-list' : ''} ${
               gridAnimating ? 'is-switching' : ''
             }`}
+            onDragOver={handleGridDragOver}
+            onDragLeave={handleGridDragLeave}
+            onDrop={handleGridDrop}
           >
             {visible.map((p) => (
               <PaperCard
@@ -1031,6 +1267,7 @@ export function LibraryPage({ onOpenPaper, onNav }: Props) {
                 onReparse={onReparse}
                 draggable={!demoMode && !offlineMode && !p.offline}
                 dragging={dragPaper?.id === p.id}
+                insertPosition={insertTarget?.id === p.id ? insertTarget.position : null}
                 onDragStart={handlePaperDragStart}
                 onDragEnd={handlePaperDragEnd}
 

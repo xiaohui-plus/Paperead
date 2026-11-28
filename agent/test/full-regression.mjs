@@ -2,7 +2,7 @@
  * P1: full-composition regression against a stub LLM.
  *
  * Covers the parts of the production shape that A0 never exercised:
- *   - the real dsh-base tool inventory (todo_write present, shell/fs/subagent absent)
+ *   - the real dsh-base tool inventory (research tools + files/search/terminal/jobs/subagents)
  *   - reasoning / tool draft / tool start / tool end / text / turn end ordering
  *   - todo/write -> plan.update
  *   - tool/result.meta survives the projection (echo presentationMeta)
@@ -245,6 +245,15 @@ try {
   const sessions = await fetchJson(`${base}/v1/sessions`, { headers: { 'x-agent-token': token } })
   check(sessions.sessions?.[0]?.title === title?.title, 'GET /v1/sessions returns last title', JSON.stringify(sessions.sessions))
 
+  const subagentList = await fetchJson(`${base}/v1/sessions/${sessionId}/subagents`, {
+    headers: { 'x-agent-token': token },
+  })
+  check(
+    Array.isArray(subagentList.subagents),
+    'GET /v1/sessions/:id/subagents returns a list',
+    JSON.stringify(subagentList),
+  )
+
   // ---- tool inventory from the stub's request log ---------------------
   const records = JSON.parse(await readFile(recordPath, 'utf8'))
   const mainRequests = records.filter((entry) => entry.kind === 'main')
@@ -255,10 +264,42 @@ try {
     'built-in write-latex skill reaches the model request',
     JSON.stringify(mainRequests.map((entry) => entry.mentionsLatexSkill)),
   )
-  const banned = inventory.filter((name) =>
-    /^(bash|pwsh|str_replace_editor|job_|subagent|workflow_|ralph|goal_|exit_plan_mode|read|write|edit|glob|grep|ls)/.test(name),
+  const required = [
+    'todo_write',
+    'echo',
+    'read',
+    'write',
+    'edit',
+    'glob',
+    'grep',
+    'job_output',
+    'job_list',
+    'job_kill',
+    'subagent',
+    'subagent_fork',
+    'send_message',
+    'list_agents',
+    'project_update',
+    'artifact_write',
+    'library_search',
+    'paper_read',
+    'export_document',
+    'notes_search',
+    'notes_read',
+    'web_search',
+    'web_fetch',
+    'get_goal',
+    'create_goal',
+    'update_goal',
+  ]
+  const missing = required.filter((name) => !inventory.includes(name))
+  check(missing.length === 0, 'full tool inventory reaches the model', missing.join(','))
+  const retired = ['file_read', 'project_write', 'run_command'].filter((name) =>
+    inventory.includes(name),
   )
-  check(banned.length === 0, 'shell/fs/subagent tools stay disabled', banned.join(','))
+  check(retired.length === 0, 'retired research wrappers are gone', retired.join(','))
+  const shells = ['pwsh', 'bash'].filter((name) => inventory.includes(name))
+  check(shells.length >= 1, 'platform shell tool is visible', inventory.join(','))
   check(records.some((entry) => entry.kind === 'title'), 'title request reached the provider', String(records.length))
 
   // ---- restart + resume ------------------------------------------------

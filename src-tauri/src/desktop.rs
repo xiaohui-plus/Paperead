@@ -633,10 +633,15 @@ struct UpdateProgress {
     total: u64,
     percent: u8,
     message: String,
+    /// 事件来源：manual（设置页主动更新）、menu（帮助菜单）、background（后台预下载）。
+    ///
+    /// 设置页只消费 manual，避免后台预下载的进度与阶段覆盖用户正在看的这次更新。
+    source: String,
 }
 
 fn emit_update_progress(
     app: &AppHandle,
+    source: &str,
     stage: &str,
     version: &str,
     downloaded: u64,
@@ -657,8 +662,30 @@ fn emit_update_progress(
             total,
             percent,
             message: message.into(),
+            source: source.into(),
         },
     );
+}
+
+/// 同一时刻只允许一条安装包下载链路：手动更新与后台预下载共用这把锁。
+///
+/// 仅靠阶段字符串判断会留下竞态窗口（两边都刚检查完、都还没写阶段），
+/// 一旦真的并发下载，两路进度事件交替上报就会让进度条来回跳。
+static UPDATE_DOWNLOAD_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+struct UpdateDownloadGuard;
+
+impl Drop for UpdateDownloadGuard {
+    fn drop(&mut self) {
+        UPDATE_DOWNLOAD_ACTIVE.store(false, Ordering::SeqCst);
+    }
+}
+
+fn acquire_update_download() -> Option<UpdateDownloadGuard> {
+    UPDATE_DOWNLOAD_ACTIVE
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .ok()
+        .map(|_| UpdateDownloadGuard)
 }
 
 /// 后台已下载的更新状态：idle → checking → downloading → ready → installing → launching。
@@ -700,6 +727,12 @@ fn update_stage(app: &AppHandle) -> String {
     app.try_state::<UpdateCenter>()
         .and_then(|center| center.inner.lock().ok().map(|guard| guard.stage.clone()))
         .unwrap_or_default()
+}
+
+fn update_percent(app: &AppHandle) -> u8 {
+    app.try_state::<UpdateCenter>()
+        .and_then(|center| center.inner.lock().ok().map(|guard| guard.percent))
+        .unwrap_or(0)
 }
 
 #[tauri::command]
@@ -757,21 +790,24 @@ async fn check_desktop_update(app: AppHandle) -> Result<UpdateInfoPayload, Strin
 }
 
 /// 设置页「立即更新」：检查 → 下载（上报进度）→ 交给安装器，随后应用退出。
+///
+/// 与后台预下载严格互斥：同一时刻只允许一条下载链路，否则两路进度事件
+/// 交替上报会让设置页的进度条来回跳动。
 #[tauri::command]
 async fn install_update(app: AppHandle) -> Result<String, String> {
     let updater = updater_for(&app)?;
-    emit_update_progress(&app, "checking", "", 0, 0, "正在检查更新…");
+    emit_update_progress(&app, "manual", "checking", "", 0, 0, "正在检查更新…");
     let update = match updater.check().await {
         Ok(Some(update)) => update,
         Ok(None) => {
             let message = "当前已是最新版本".to_string();
-            emit_update_progress(&app, "up-to-date", "", 0, 0, &message);
+            emit_update_progress(&app, "manual", "up-to-date", "", 0, 0, &message);
             return Err(message);
         }
         Err(error) => {
             let message = format!("检查更新失败：{error}");
             paths::log_line(&app, &format!("manual update check failed: {error}"));
-            emit_update_progress(&app, "failed", "", 0, 0, &message);
+            emit_update_progress(&app, "manual", "failed", "", 0, 0, &message);
             return Err(message);
         }
     };
@@ -781,14 +817,50 @@ async fn install_update(app: AppHandle) -> Result<String, String> {
     // 后台已经下好这个版本：直接启动安装器，不再重复下载约 90MB。
     if let Some((temp_dir, installer, _)) = existing_installer(&app, &version) {
         paths::log_line(&app, &format!("reuse prepared update: {version}"));
-        emit_update_progress(&app, "installing", &version, 0, 0, "正在启动安装程序…");
+        emit_update_progress(&app, "manual", "installing", &version, 0, 0, "正在启动安装程序…");
         set_update_status(&app, "installing", &version, 100, "正在启动安装程序…");
-        launch_update_installer(&app, &version, &temp_dir, &installer)?;
+        launch_update_installer(&app, "manual", &version, &temp_dir, &installer)?;
         return Ok(version);
     }
 
+    // 抢下载权：抢不到说明后台/菜单正在下载同一版本，等它下完直接复用，
+    // 不另起一条下载，否则两路进度会交替上报。
+    let _download_guard = match acquire_update_download() {
+        Some(guard) => guard,
+        None => {
+            paths::log_line(&app, &format!("manual update waits running download: {version}"));
+            if let Some((temp_dir, installer, prepared)) =
+                wait_for_prepared_update(&app, &version, "manual").await
+            {
+                emit_update_progress(
+                    &app,
+                    "manual",
+                    "installing",
+                    &prepared,
+                    0,
+                    0,
+                    "正在启动安装程序…",
+                );
+                set_update_status(&app, "installing", &prepared, 100, "正在启动安装程序…");
+                launch_update_installer(&app, "manual", &prepared, &temp_dir, &installer)?;
+                return Ok(prepared);
+            }
+            // 另一条链路已结束但没产出安装包：再抢一次，失败才如实报错。
+            match acquire_update_download() {
+                Some(guard) => guard,
+                None => {
+                    let message = "另一个更新下载正在进行，请稍后再试".to_string();
+                    emit_update_progress(&app, "manual", "failed", &version, 0, 0, &message);
+                    return Err(message);
+                }
+            }
+        }
+    };
+
     paths::log_line(&app, &format!("manual update download started: {version}"));
-    emit_update_progress(&app, "downloading", &version, 0, 0, "正在下载安装包…");
+    // 先占用状态，阻止后台定时任务在本轮下载期间再起一条下载链路。
+    set_update_status(&app, "downloading", &version, 0, "正在下载安装包…");
+    emit_update_progress(&app, "manual", "downloading", &version, 0, 0, "正在下载安装包…");
 
     let progress_app = app.clone();
     let progress_version = version.clone();
@@ -801,12 +873,26 @@ async fn install_update(app: AppHandle) -> Result<String, String> {
                 // 每 ~120ms 上报一次，避免大包下载时把 WebView 事件队列塞满。
                 if last_emit.elapsed().as_millis() >= 120 {
                     last_emit = std::time::Instant::now();
-                    emit_update_progress(
+                    let total = total.unwrap_or(0);
+                    let percent = if total > 0 {
+                        (downloaded.saturating_mul(100) / total).min(100) as u8
+                    } else {
+                        0
+                    };
+                    set_update_status(
                         &progress_app,
                         "downloading",
                         &progress_version,
+                        percent,
+                        "正在下载安装包…",
+                    );
+                    emit_update_progress(
+                        &progress_app,
+                        "manual",
+                        "downloading",
+                        &progress_version,
                         downloaded,
-                        total.unwrap_or(0),
+                        total,
                         "正在下载安装包…",
                     );
                 }
@@ -819,14 +905,18 @@ async fn install_update(app: AppHandle) -> Result<String, String> {
         Err(error) => {
             let message = format!("下载更新失败：{error}");
             paths::log_line(&app, &format!("manual update download failed: {error}"));
-            emit_update_progress(&app, "failed", &version, 0, 0, &message);
+            // 释放状态，否则后台定时器会一直认为有下载在跑而不再重试。
+            restore_prepared_status(&app);
+            emit_update_progress(&app, "manual", "failed", &version, 0, 0, &message);
             return Err(message);
         }
     };
 
-    emit_update_progress(&app, "installing", &version, 0, 0, "正在校验安装包…");
-    if let Err(error) = install_downloaded_update(&app, &version, &bytes) {
-        emit_update_progress(&app, "failed", &version, 0, 0, &error);
+    emit_update_progress(&app, "manual", "installing", &version, 0, 0, "正在校验安装包…");
+    set_update_status(&app, "installing", &version, 100, "正在启动安装程序…");
+    if let Err(error) = install_downloaded_update(&app, "manual", &version, &bytes) {
+        restore_prepared_status(&app);
+        emit_update_progress(&app, "manual", "failed", &version, 0, 0, &error);
         return Err(error);
     }
     Ok(version)
@@ -863,9 +953,9 @@ async fn install_prepared_update(app: AppHandle) -> Result<String, String> {
     }
 
     paths::log_line(&app, &format!("install prepared update: {version}"));
-    emit_update_progress(&app, "installing", &version, 0, 0, "正在启动安装程序…");
+    emit_update_progress(&app, "manual", "installing", &version, 0, 0, "正在启动安装程序…");
     set_update_status(&app, "installing", &version, 100, "正在启动安装程序…");
-    launch_update_installer(&app, &version, &temp_dir, &installer)?;
+    launch_update_installer(&app, "manual", &version, &temp_dir, &installer)?;
     Ok(version)
 }
 
@@ -899,7 +989,7 @@ async fn prepare_update_once(app: &AppHandle) {
             // 避免侧栏残留「更新到旧版本」的入口。
             clear_prepared_installers(app);
             set_update_status(app, "up-to-date", "", 100, "当前已是最新版本");
-            emit_update_progress(app, "up-to-date", "", 0, 0, "当前已是最新版本");
+            emit_update_progress(app, "background", "up-to-date", "", 0, 0, "当前已是最新版本");
             return;
         }
         Err(error) => {
@@ -912,13 +1002,21 @@ async fn prepare_update_once(app: &AppHandle) {
     let version = update.version.clone();
     if existing_installer(app, &version).is_some() {
         paths::log_line(app, &format!("prepared update already on disk: {version}"));
-        mark_update_ready(app, &version);
+        mark_update_ready(app, "background", &version);
         return;
     }
 
+    // 已有下载在跑（手动更新先抢到了锁）：本轮直接让出，避免两条进度交替。
+    let Some(_download_guard) = acquire_update_download() else {
+        paths::log_line(app, "background update download skipped: another download in progress");
+        // 把阶段交回「下载中」，否则会卡在 checking 让后台定时任务再也不重试。
+        set_update_status(app, "downloading", &version, 0, "正在下载安装包…");
+        return;
+    };
+
     paths::log_line(app, &format!("background update download started: {version}"));
     set_update_status(app, "downloading", &version, 0, "正在下载安装包…");
-    emit_update_progress(app, "downloading", &version, 0, 0, "正在下载安装包…");
+    emit_update_progress(app, "background", "downloading", &version, 0, 0, "正在下载安装包…");
 
     let progress_app = app.clone();
     let progress_version = version.clone();
@@ -946,6 +1044,7 @@ async fn prepare_update_once(app: &AppHandle) {
                     );
                     emit_update_progress(
                         &progress_app,
+                        "background",
                         "downloading",
                         &progress_version,
                         downloaded,
@@ -969,7 +1068,7 @@ async fn prepare_update_once(app: &AppHandle) {
 
     match write_update_files(app, &version, &bytes) {
         Ok(_) => {
-            mark_update_ready(app, &version);
+            mark_update_ready(app, "background", &version);
             paths::log_line(app, &format!("background update prepared: {version}"));
         }
         Err(error) => {
@@ -982,15 +1081,15 @@ async fn prepare_update_once(app: &AppHandle) {
 #[cfg(not(windows))]
 async fn prepare_update_once(_app: &AppHandle) {}
 
-fn mark_update_ready(app: &AppHandle, version: &str) {
+fn mark_update_ready(app: &AppHandle, source: &str, version: &str) {
     set_update_status(app, "ready", version, 100, "新版本已下载，点击安装");
-    emit_update_progress(app, "ready", version, 0, 0, "新版本已下载，点击安装");
+    emit_update_progress(app, source, "ready", version, 0, 0, "新版本已下载，点击安装");
 }
 
 /// 失败/取消后回到「已有安装包就仍是 ready，否则 idle」。
 fn restore_prepared_status(app: &AppHandle) {
     match scan_prepared_installer(app) {
-        Some((_, _, version)) => mark_update_ready(app, &version),
+        Some((_, _, version)) => mark_update_ready(app, "background", &version),
         None => set_update_status(app, "idle", "", 0, ""),
     }
 }
@@ -1133,37 +1232,41 @@ async fn check_updates(app: AppHandle, interactive: bool) {
                 return;
             }
 
-            // 后台正在下载：等它下完再装，避免重复下载约 90MB。
-            if matches!(update_stage(&app).as_str(), "downloading" | "checking") {
-                notify_download_in_progress(&app, &version);
-                match wait_for_prepared_update(&app, &version).await {
-                    Some((temp_dir, installer, prepared_version)) => {
-                        prompt_install_after_ready(
-                            &app,
-                            &prepared_version,
-                            &temp_dir,
-                            &installer,
-                        );
+            // 已有下载在跑（后台预下载或设置页主动更新）：等它下完再装，
+            // 不重复下载约 90MB，也不让两路进度互相覆盖。
+            let _download_guard = match acquire_update_download() {
+                Some(guard) => guard,
+                None => {
+                    notify_download_in_progress(&app, &version);
+                    match wait_for_prepared_update(&app, &version, "menu").await {
+                        Some((temp_dir, installer, prepared_version)) => {
+                            prompt_install_after_ready(
+                                &app,
+                                &prepared_version,
+                                &temp_dir,
+                                &installer,
+                            );
+                        }
+                        None => {
+                            app.dialog()
+                                .message(format!(
+                                    "新版本 {version} 下载未完成，可稍后重新检查更新，或在左下角点击更新图标重试。"
+                                ))
+                                .title("检查更新")
+                                .kind(MessageDialogKind::Info)
+                                .show(|_| {});
+                        }
                     }
-                    None => {
-                        app.dialog()
-                            .message(format!(
-                                "新版本 {version} 下载未完成，可稍后重新检查更新，或在左下角点击更新图标重试。"
-                            ))
-                            .title("检查更新")
-                            .kind(MessageDialogKind::Info)
-                            .show(|_| {});
-                    }
+                    return;
                 }
-                return;
-            }
+            };
 
             // 没下好就现场下：只提示预计耗时，下载完自动安装，不需要用户再操作。
             notify_download_in_progress(&app, &version);
             paths::log_line(&app, &format!("check-updates: downloading {version}"));
 
             set_update_status(&app, "downloading", &version, 0, "正在下载安装包…");
-            emit_update_progress(&app, "downloading", &version, 0, 0, "正在下载安装包…");
+            emit_update_progress(&app, "menu", "downloading", &version, 0, 0, "正在下载安装包…");
 
             let progress_app = app.clone();
             let progress_version = version.clone();
@@ -1190,6 +1293,7 @@ async fn check_updates(app: AppHandle, interactive: bool) {
                             );
                             emit_update_progress(
                                 &progress_app,
+                                "menu",
                                 "downloading",
                                 &progress_version,
                                 downloaded,
@@ -1206,7 +1310,7 @@ async fn check_updates(app: AppHandle, interactive: bool) {
                 Err(error) => {
                     paths::log_line(&app, &format!("check-updates download failed: {error}"));
                     set_update_status(&app, "idle", "", 0, "");
-                    emit_update_progress(&app, "failed", &version, 0, 0, "下载更新失败");
+                    emit_update_progress(&app, "menu", "failed", &version, 0, 0, "下载更新失败");
                     app.dialog()
                         .message(format!("下载新版本失败：{error}"))
                         .title("检查更新")
@@ -1218,7 +1322,7 @@ async fn check_updates(app: AppHandle, interactive: bool) {
 
             match save_update_package(&app, &version, &bytes) {
                 Ok((temp_dir, installer)) => {
-                    mark_update_ready(&app, &version);
+                    mark_update_ready(&app, "menu", &version);
                     paths::log_line(
                         &app,
                         &format!("check-updates: prepared {version}, asking to install"),
@@ -1227,7 +1331,7 @@ async fn check_updates(app: AppHandle, interactive: bool) {
                 }
                 Err(error) => {
                     set_update_status(&app, "idle", "", 0, "");
-                    emit_update_progress(&app, "failed", &version, 0, 0, "保存安装包失败");
+                    emit_update_progress(&app, "menu", "failed", &version, 0, 0, "保存安装包失败");
                     app.dialog()
                         .message(format!("更新失败：{error}"))
                         .title("更新失败")
@@ -1308,9 +1412,9 @@ fn begin_update_install(
     temp_dir: &std::path::Path,
     installer: &std::path::Path,
 ) {
-    emit_update_progress(app, "installing", version, 0, 0, "正在启动安装程序…");
+    emit_update_progress(app, "menu", "installing", version, 0, 0, "正在启动安装程序…");
     set_update_status(app, "installing", version, 100, "正在启动安装程序…");
-    if let Err(error) = launch_update_installer(app, version, temp_dir, installer) {
+    if let Err(error) = launch_update_installer(app, "menu", version, temp_dir, installer) {
         set_update_status(app, "ready", version, 100, "安装失败，点击重试");
         app.dialog()
             .message(format!("启动安装程序失败：{error}"))
@@ -1325,19 +1429,40 @@ fn begin_update_install(
 async fn wait_for_prepared_update(
     app: &AppHandle,
     version: &str,
+    source: &str,
 ) -> Option<(std::path::PathBuf, std::path::PathBuf, String)> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
+    let mut last_percent: Option<u8> = None;
     loop {
         if let Some(found) = existing_installer(app, version) {
             return Some(found);
         }
         let stage = update_stage(app);
         // 后台下载已结束却没产出安装包：失败或已是最新，直接返回让调用方提示。
-        if stage != "downloading" && stage != "checking" {
+        // 下载锁仍被占用时继续等——阶段字符串可能还没写上。
+        if !UPDATE_DOWNLOAD_ACTIVE.load(Ordering::SeqCst)
+            && stage != "downloading"
+            && stage != "checking"
+        {
             return None;
         }
         if std::time::Instant::now() >= deadline {
             return None;
+        }
+        // 把后台的下载百分比转发成本次更新自己的进度，避免设置页只能
+        // 依赖另一条链路的事件而在两个百分比之间来回跳。
+        let percent = update_percent(app);
+        if last_percent != Some(percent) {
+            last_percent = Some(percent);
+            emit_update_progress(
+                app,
+                source,
+                "downloading",
+                version,
+                percent as u64,
+                100,
+                "正在下载安装包…",
+            );
         }
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
     }
@@ -1347,6 +1472,7 @@ async fn wait_for_prepared_update(
 async fn wait_for_prepared_update(
     _app: &AppHandle,
     _version: &str,
+    _source: &str,
 ) -> Option<(std::path::PathBuf, std::path::PathBuf, String)> {
     None
 }
@@ -1503,19 +1629,22 @@ fn scan_prepared_installer(
 #[cfg(windows)]
 fn install_downloaded_update(
     app: &AppHandle,
+    source: &str,
     version: &str,
     bytes: &[u8],
 ) -> Result<(), String> {
     let (temp_dir, installer) = write_update_files(app, version, bytes)?;
-    launch_update_installer(app, version, &temp_dir, &installer)
+    launch_update_installer(app, source, version, &temp_dir, &installer)
 }
 
-/// 启动已经写盘的安装器：批处理延迟拉起 NSIS，随后应用退出。
+/// 安装器已写盘后启动：批处理延迟拉起 NSIS，随后应用退出。
 ///
-/// 后台预下载与「立即更新」共用这一段，避免两条链路各自维护启动脚本。
+/// 后台预下载与「立即更新」共用这一段，避免两条链路各自维护启动脚本；
+/// `source` 用于让设置页区分本次安装是否由自己发起。
 #[cfg(windows)]
 fn launch_update_installer(
     app: &AppHandle,
+    source: &str,
     version: &str,
     temp_dir: &std::path::Path,
     installer: &std::path::Path,
@@ -1562,6 +1691,7 @@ fn launch_update_installer(
     // invoke 的 Promise 随 WebView 销毁被拒绝，被前端误判成「更新失败」。
     emit_update_progress(
         app,
+        source,
         "launching",
         version,
         0,
@@ -1579,6 +1709,7 @@ fn launch_update_installer(
 #[cfg(not(windows))]
 fn launch_update_installer(
     _app: &AppHandle,
+    _source: &str,
     _version: &str,
     _temp_dir: &std::path::Path,
     _installer: &std::path::Path,
@@ -1589,6 +1720,7 @@ fn launch_update_installer(
 #[cfg(not(windows))]
 fn install_downloaded_update(
     _app: &AppHandle,
+    _source: &str,
     _version: &str,
     _bytes: &[u8],
 ) -> Result<(), String> {

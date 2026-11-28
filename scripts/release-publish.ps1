@@ -145,51 +145,6 @@ if (-not $SkipGithub) {
     $ghBody = $rel.body   # Gitee 描述直接复用，保证两边更新说明一字不差
 }
 
-# ---------- 签名版优先 ----------
-# SignPath 只给 CI 构建的产物签名，本地 build:installer 出来的安装包没有 Authenticode 签名。
-# 本地包未签名而 GitHub 发行版上有签名版时，用它覆盖本地物料，保证 Gitee 分发的
-# 也是同一份签名安装包。此时 .sig / SHA256SUMS / latest.json 必须成组替换，不能只换 exe。
-function Test-AuthenticodeSigned([string]$Path) {
-    if (-not (Test-Path $Path)) { return $false }
-    try { return (Get-AuthenticodeSignature -LiteralPath $Path).Status -eq "Valid" } catch { return $false }
-}
-
-if (-not $SkipGithub -and -not (Test-AuthenticodeSigned $installer)) {
-    Write-Host "本地安装包未做 Authenticode 签名，检查 GitHub 发行版是否有签名版"
-    $installerName = Split-Path -Leaf $installer
-    $assetNames = @($installerName, "$installerName.sig", "SHA256SUMS.txt", "latest.json")
-    $signedDir = Join-Path $root ".tmp\signed"
-    Remove-Item $signedDir -Recurse -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force $signedDir | Out-Null
-    foreach ($asset in @($rel.assets)) {
-        if ($assetNames -notcontains $asset.name) { continue }
-        try {
-            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile (Join-Path $signedDir $asset.name) -UseBasicParsing
-        } catch {
-            Write-Host "下载 $($asset.name) 失败：$($_.Exception.Message)" -ForegroundColor Yellow
-        }
-    }
-    $downloadedInstaller = Join-Path $signedDir $installerName
-    $signedOk = (Test-AuthenticodeSigned $downloadedInstaller) -and
-        ((Get-Item $downloadedInstaller).VersionInfo.FileVersion -eq $Version)
-    if ($signedOk) {
-        Copy-Item $downloadedInstaller (Join-Path $root "release\$installerName") -Force
-        Copy-Item "$downloadedInstaller.sig" (Join-Path $root "release\$installerName.sig") -Force
-        if (Test-Path (Join-Path $signedDir "SHA256SUMS.txt")) {
-            Copy-Item (Join-Path $signedDir "SHA256SUMS.txt") $sums -Force
-        }
-        # 清单版本必须与本次发版一致，否则宁可保留本地那份
-        $signedManifest = Join-Path $signedDir "latest.json"
-        if ((Test-Path $signedManifest) -and
-            ((Get-Content $signedManifest -Raw | ConvertFrom-Json).version -eq $Version)) {
-            Copy-Item $signedManifest $latestJson -Force
-        }
-        Write-Host "已改用 GitHub 上的签名安装包" -ForegroundColor Green
-    } else {
-        Write-Host "GitHub 发行版同样没有签名版（或版本不符），继续用本地安装包（用户会看到未知发布者提示）" -ForegroundColor Yellow
-    }
-}
-
 # ---------- Gitee：版本发行版 + latest 固定发行版 ----------
 if (-not $SkipGitee) {
     if (-not $GiteeToken) { throw "缺 GITEE_TOKEN（Gitee 私人令牌，需要 releases 权限）" }

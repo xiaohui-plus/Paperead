@@ -92,6 +92,16 @@ export interface SessionSummary {
   running: boolean
 }
 
+/** 父会话派生的子代理；id 就是子代理子会话 id，可直接订阅其事件。 */
+export interface SessionSubagent {
+  id: string
+  mode: 'one-shot' | 'continuable' | string
+  label: string
+  activity: 'active' | 'inactive' | string
+  hasChildren: boolean
+  status: string
+}
+
 export type ReviewTemplateSource = 'default' | 'builtin' | 'upload' | 'paper'
 
 export interface ReviewTemplateFigure {
@@ -553,6 +563,13 @@ export const researchApi = {
       `/api/research/sessions/${sessionId}/commands`,
     )
     return data.items
+  },
+
+  async listSubagents(sessionId: string): Promise<SessionSubagent[]> {
+    const data = await jsonFetch<{ subagents: SessionSubagent[] }>(
+      `/api/research/sessions/${sessionId}/subagents`,
+    )
+    return Array.isArray(data.subagents) ? data.subagents : []
   },
 
   runCommand(

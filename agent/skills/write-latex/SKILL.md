@@ -20,7 +20,7 @@ whenToUse: 用户要求以 LaTeX 交付综述、论文或章节时。
    - 中文稿：`ctexart`（默认，XeLaTeX 编译）；
    - 英文稿：`article`；
    - 用户给了期刊或学校模板：按模板的 documentclass 与字段来，不要覆盖。
-3. 写文件（`project_write`，`target=file`）：
+3. 写文件（`write`，参数 `file_path` + `content`；修改已有 `main.tex` 用 `edit`）：
    - 主文件 `main.tex`，必须包含完整 `\documentclass`、导言区、`\begin{document}...\end{document}`；
    - 不要把整篇 Markdown 塞进 tex；用 `\section`、`\subsection` 组织；
    - 图用项目文件树里已有的图片，`\includegraphics[width=0.9\linewidth]{文件名}`（相对 `main.tex` 所在目录）；不要引用不存在的图片；

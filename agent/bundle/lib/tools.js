@@ -1,49 +1,10 @@
-import { relative, resolve, sep } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 export const name = 'research-tools'
-export const inject = ['tools', 'shell', 'sandboxPolicy', 'approval']
+export const inject = ['tools', 'sandboxPolicy']
 
 const DEFAULT_BASE = 'http://127.0.0.1:8010'
 const MAX_TEXT = 9000
-
-// dsh 的提权阶梯：一次审批只允许向更宽的档位走一层。
-const WIDER_MODES = {
-  'read-only': ['workspace-write', 'danger-full-access'],
-  'workspace-write': ['danger-full-access'],
-}
-
-function withinRoot(root, target) {
-  const base = resolve(root)
-  const next = resolve(target)
-  if (next === base) return true
-  return next.startsWith(base.endsWith(sep) ? base : base + sep)
-}
-
-function sandboxUnavailable(error) {
-  return Boolean(error && typeof error === 'object' && error.code === 'SANDBOX_UNAVAILABLE')
-}
-
-// dsh 的 denial 签名只有英文；中文 Windows 上 PowerShell 会报「拒绝访问」，
-// 这里补一层本地判定，避免沙箱已经拦住却当成普通命令失败、不向用户申请。
-const DENIAL_HINTS = [
-  'access is denied',
-  'access to the path',
-  'permission denied',
-  '拒绝访问',
-  '访问被拒绝',
-  '未经授权',
-  '权限不足',
-]
-
-function sandboxDenied(result) {
-  if (result?.sandbox?.denied) return true
-  const text = `${result?.stdout?.text || ''}\n${result?.stderr?.text || ''}`.toLowerCase()
-  // 必须先看输出再看退出码：PowerShell 的非终止性错误（如 Set-Content 被拒）
-  // 不会改变退出码，命令仍是 exit 0，只看 exitCode 会漏掉真实的沙箱拒绝。
-  if (DENIAL_HINTS.some((hint) => text.includes(hint))) return true
-  return false
-}
 
 function asText(value) {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
@@ -106,23 +67,18 @@ export function apply(ctx, config = {}) {
     return JSON.parse(body)
   }
 
-  const shell = ctx.get('shell')
   const sandboxPolicy = ctx.get('sandboxPolicy')
-  const approval = ctx.get('approval')
 
-  /** 向用户申请一次授权；没有应答通道时按 dsh 的约定 fail-closed。 */
-  async function askApproval(exec, reason) {
-    if (!approval) return 'unavailable'
-    try {
-      return await approval.request({
-        agent: exec.agent,
-        toolName: 'run_command',
-        callId: exec.callId,
-        reason,
-        signal: exec.signal,
-      })
-    } catch {
-      return 'unavailable'
+  /**
+   * dsh 的 fs/shell 沙箱只覆盖通用工具；研究类写工具（产物、项目资料、docx、
+   * 导出、导入、标签）必须自己遵守当前权限预设，否则「只读」只是提示词。
+   */
+  function assertWritable(exec) {
+    const session = exec?.agent?.session
+    if (!session) throw new Error('缺少会话上下文：这个工具只能在研究项目的会话里调用。')
+    const mode = sandboxPolicy?.resolve({ session })?.mode
+    if (mode === 'read-only') {
+      throw new Error('当前是只读模式，不能写入项目或产物。请先切换到「工作区写入」或「完全权限」。')
     }
   }
 
@@ -277,159 +233,7 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register(
     defineTool({
-      name: 'run_command',
-      description:
-        'Run one shell command inside the project working folder (PowerShell on Windows) under the current sandbox permission preset. Use it for compiling LaTeX, running python/R analysis, git status and file conversion. In workspace-write mode only the project folder is writable; a file denial is reported as "[sandbox: ...]" — that is a policy decision, not a broken command. When a denied command genuinely needs wider access, retry the exact same command once with sandbox_permissions plus a one-sentence justification; the approval prompt raised by that retry is how the user consents. In danger-full-access mode the command runs unconfined. Do not install system software, modify permissions or run destructive commands.',
-      parameters: {
-        command: {
-          type: 'string',
-          required: true,
-          description: 'Command to execute, e.g. "python analysis.py".',
-        },
-        cwd: {
-          type: 'string',
-          description: 'Relative working directory inside the project working folder. Defaults to the folder root.',
-        },
-        timeoutMs: {
-          type: 'number',
-          description: 'Timeout in milliseconds, default 120000, max 600000.',
-        },
-        sandbox_permissions: {
-          type: 'string',
-          enum: ['workspace-write', 'danger-full-access'],
-          description:
-            'Wider sandbox mode this command needs. Only valid as a one-shot retry of a command the sandbox just denied; requires justification and user approval.',
-        },
-        justification: {
-          type: 'string',
-          description:
-            'Required with sandbox_permissions: one sentence for the user explaining why this exact command needs wider access.',
-        },
-      },
-      output: {
-        schema: { type: 'object', additionalProperties: true },
-        render: (_args, value) => [
-          {
-            type: 'text',
-            text: [value?.stdout, value?.stderr].filter(Boolean).join('\n').trim() || '（无输出）',
-          },
-        ],
-        presentationMeta: (_args, value) => ({
-          kind: 'terminal',
-          exitCode: value?.exitCode ?? null,
-        }),
-      },
-      async execute(args, exec) {
-        const session = exec.agent?.session
-        const root = session?.header?.cwd
-        if (!session || !root) throw new Error('缺少会话上下文：这个工具只能在研究项目的会话里调用。')
 
-        const text = String(args.command || '').trim()
-        if (!text) throw new Error('命令不能为空。')
-
-        let policy = sandboxPolicy.resolve({ session })
-        if (args.sandbox_permissions) {
-          const target = String(args.sandbox_permissions)
-          const justification = String(args.justification || '').trim()
-          if (!justification) throw new Error('使用 sandbox_permissions 时必须给出 justification。')
-          const wider = WIDER_MODES[policy.mode] || []
-          if (!wider.includes(target)) {
-            throw new Error(`不能从当前 ${policy.mode} 沙箱直接提权到 ${target}。`)
-          }
-          const outcome = await askApproval(
-            exec,
-            `将沙箱从 ${policy.mode} 提升到 ${target}：${justification}`,
-          )
-          if (outcome !== 'allowed-once') throw new Error('用户没有批准这次提权，命令未执行。')
-          policy = { ...policy, mode: target }
-        }
-
-        const workdir = args.cwd ? resolve(root, args.cwd) : root
-        if (policy.mode !== 'danger-full-access' && !withinRoot(root, workdir)) {
-          throw new Error('工作目录必须位于项目工作文件夹内。')
-        }
-
-        const started = Date.now()
-        const runOnce = (nextPolicy) =>
-          shell.run(
-            shell.resolve({
-              command: text,
-              workdir,
-              ...(args.timeoutMs ? { timeoutMs: args.timeoutMs } : {}),
-              sandboxPolicy: nextPolicy,
-              ...(exec.signal ? { signal: exec.signal } : {}),
-            }),
-          )
-
-        let result
-        try {
-          result = await runOnce(policy)
-        } catch (error) {
-          if (!sandboxUnavailable(error) || policy.mode === 'danger-full-access') throw error
-          const outcome = await askApproval(
-            exec,
-            '本机沙箱无法启动，是否以完全权限执行这条命令？',
-          )
-          if (outcome !== 'allowed-once') {
-            throw new Error('沙箱不可用，用户没有批准以完全权限执行。')
-          }
-          policy = { ...policy, mode: 'danger-full-access' }
-          result = await runOnce(policy)
-        }
-
-        if (result.aborted) throw new Error('命令已取消。')
-
-        if (sandboxDenied(result) && policy.mode !== 'danger-full-access') {
-          const mode = result.sandbox?.mode ?? policy.mode
-          const outcome = await askApproval(
-            exec,
-            `命令被 ${mode} 沙箱拒绝，是否以完全权限重新执行？`,
-          )
-          if (outcome === 'allowed-once') {
-            policy = { ...policy, mode: 'danger-full-access' }
-            result = await runOnce(policy)
-          }
-        }
-
-        return {
-          command: text,
-          cwd: workdir === root ? '.' : relative(root, workdir),
-          exitCode: result.exitCode,
-          stdout: result.stdout?.text ?? '',
-          stderr: result.stderr?.text ?? '',
-          truncated: Boolean(result.stdout?.truncated || result.stderr?.truncated),
-          timedOut: Boolean(result.timedOut),
-          durationMs: Date.now() - started,
-          sandbox: result.sandbox
-            ? {
-                mode: result.sandbox.mode,
-                denied: Boolean(result.sandbox.denied),
-                enforcement: result.sandbox.enforcement,
-              }
-            : null,
-        }
-      },
-      presentCall(args) {
-        return {
-          card: 'generic',
-          kind: 'terminal',
-          title: '运行命令',
-          rawInput: { command: args.command, cwd: args.cwd },
-        }
-      },
-      presentResult(_args, value) {
-        if (value?.timedOut) {
-          return textResult('命令超时', `超过时限被终止。\n${value?.stderr || ''}`)
-        }
-        const code = value?.exitCode ?? '?'
-        const body = [value?.stdout, value?.stderr].filter(Boolean).join('\n').trim()
-        return textResult(`终端 · 退出码 ${code}`, body || '（无输出）')
-      },
-    }),
-  )
-
-  ctx.tools.register(
-    defineTool({
       name: 'paper_read',
       description:
         'Read parsed text of one library paper. Pass page to read a single page; otherwise reads from the start up to maxChars.',
@@ -592,6 +396,7 @@ export function apply(ctx, config = {}) {
         }),
       },
       async execute(args, exec) {
+        assertWritable(exec)
         const sessionId = sessionIdOf(exec)
         return call(
           `/internal/research/sessions/${encodeURIComponent(sessionId)}/papers/import`,
@@ -665,24 +470,10 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register(
     defineTool({
-      name: 'project_write',
+      name: 'project_update',
       description:
-        'Write to the current research project. Use it to update the project profile (description / researchQuestion / instructions) and to persist deliverables: target=artifact writes into the project artifacts (reports, decks, notes), target=file writes into the project file tree. Always persist long deliverables instead of only replying in chat.',
+        'Update the current research project profile: name, description, main research question, standing instructions or writing template. This does not write files; use write/edit for workspace files and artifact_write for deliverables.',
       parameters: {
-        content: {
-          type: 'string',
-          description:
-            'Markdown, plain text, or LaTeX source (.tex) to save. Omit when only updating the profile.',
-        },
-        title: { type: 'string', description: 'Human title of the saved file/artifact.' },
-        filename: {
-          type: 'string',
-          description: 'Optional file name, e.g. review-draft.md or main.tex.',
-        },
-        target: {
-          type: 'string',
-          description: 'artifact (default) or file.',
-        },
         name: { type: 'string', description: 'New project name, if renaming.' },
         description: { type: 'string', description: 'New project description.' },
         researchQuestion: { type: 'string', description: 'New main research question.' },
@@ -696,115 +487,88 @@ export function apply(ctx, config = {}) {
       output: {
         schema: { type: 'object', additionalProperties: true },
         render: (_args, value) => [{ type: 'text', text: asText(value) }],
-        presentationMeta: (_args, value) => ({
-          kind: 'project_write',
-          artifact: value?.artifact?.title ?? null,
-          file: value?.file?.path ?? null,
-          updatedProfile: Boolean(value?.project),
-        }),
+        presentationMeta: () => ({ kind: 'project_update' }),
       },
       async execute(args, exec) {
+        assertWritable(exec)
         const sessionId = sessionIdOf(exec)
-        const base = `/internal/research/sessions/${encodeURIComponent(sessionId)}`
-        const result = {}
         const patch = {}
         for (const key of ['name', 'description', 'researchQuestion', 'instructions', 'reviewTemplate']) {
           if (typeof args[key] === 'string' && args[key].trim()) patch[key] = args[key]
         }
-        if (Object.keys(patch).length) {
-          const saved = await call(`${base}/project`, {}, { method: 'PATCH', body: patch })
-          result.project = saved.project
-        }
-        if (typeof args.content === 'string' && args.content.trim()) {
-          const body = {
-            content: args.content,
-            title: args.title,
-            filename: args.filename,
-          }
-          if (args.target === 'file') {
-            const saved = await call(`${base}/files`, {}, { method: 'POST', body })
-            result.file = saved.file
-          } else {
-            const saved = await call(`${base}/artifacts`, {}, { method: 'POST', body })
-            result.artifact = saved.artifact
-          }
-        }
-        if (!result.project && !result.file && !result.artifact) {
-          throw new Error('没有可写入的内容：请提供 content 或至少一个项目字段。')
-        }
-        return result
+        if (!Object.keys(patch).length) throw new Error('没有要更新的项目字段。')
+        const saved = await call(
+          `/internal/research/sessions/${encodeURIComponent(sessionId)}/project`,
+          {},
+          { method: 'PATCH', body: patch },
+        )
+        return { project: saved.project }
       },
-      presentCall(args) {
-        return {
-          card: 'generic',
-          kind: 'project_write',
-          title: args.target === 'file' ? '写入项目文件' : '保存项目产物',
-          rawInput: args,
-        }
+      presentCall() {
+        return { card: 'generic', kind: 'project_update', title: '更新项目资料' }
       },
       presentResult(_args, value) {
-        const parts = []
-        if (value?.project) parts.push(`项目：${value.project.name}`)
-        if (value?.file) parts.push(`文件：${value.file.path}`)
-        if (value?.artifact) parts.push(`产物：${value.artifact.title}`)
-        return textResult('项目已更新', parts.join('\n') || '已写入。')
+        return textResult('项目已更新', value?.project?.name || '项目资料已更新。')
       },
     }),
   )
 
   ctx.tools.register(
     defineTool({
-      name: 'file_read',
+      name: 'artifact_write',
       description:
-        'Read a text file saved in the current project (Markdown, txt, json, csv, bib, tex). Use project_read first to get the exact path or file name. Use this to read a draft back before revising it; artifact_read only covers artifacts, not project files.',
+        'Save a versioned deliverable (review draft, report, deck outline, notes) into the current project artifacts. Same title/filename revises the existing artifact and bumps its version; the file is visible in the product artifact list. Use write for ordinary workspace files.',
       parameters: {
-        path: {
+        content: {
           type: 'string',
           required: true,
-          description: 'Relative path or file name shown by project_read.',
+          description: 'Markdown, plain text, or LaTeX source (.tex) to save as an artifact.',
         },
-        offset: {
-          type: 'number',
-          description:
-            'Character offset for continuing a long file. Omit on the first read; if the result says truncated, read again with nextOffset.',
+        title: { type: 'string', description: 'Human title of the artifact.' },
+        filename: {
+          type: 'string',
+          description: 'Optional file name, e.g. review-draft.md or main.tex.',
         },
       },
       output: {
         schema: { type: 'object', additionalProperties: true },
-        render: (_args, value) => {
-          const file = value?.file || {}
-          const content = value?.content || '（二进制文件，无法直接预览）'
-          const next = value?.nextOffset
-          const tail =
-            next != null
-              ? `\n\n…（已截断：全文 ${value.total} 字，本次读到 ${value.offset + String(value.content || '').length} 字；继续读取请再调用 file_read，offset=${next}）`
-              : ''
-          return [{ type: 'text', text: `文件：${file.name || ''}\n\n${content}${tail}` }]
-        },
+        render: (_args, value) => [{ type: 'text', text: asText(value) }],
         presentationMeta: (_args, value) => ({
-          kind: 'file_read',
-          name: value?.file?.name || '',
+          kind: 'artifact_write',
+          title: value?.artifact?.title ?? null,
+          version: value?.artifact?.version ?? null,
         }),
       },
       async execute(args, exec) {
+        assertWritable(exec)
         const sessionId = sessionIdOf(exec)
-        return call(
-          `/internal/research/sessions/${encodeURIComponent(sessionId)}/files`,
-          { path: args.path, offset: args.offset },
+        if (typeof args.content !== 'string' || !args.content.trim()) {
+          throw new Error('产物内容不能为空。')
+        }
+        const saved = await call(
+          `/internal/research/sessions/${encodeURIComponent(sessionId)}/artifacts`,
+          {},
+          {
+            method: 'POST',
+            body: { content: args.content, title: args.title, filename: args.filename },
+          },
         )
+        return { artifact: saved.artifact }
       },
       presentCall(args) {
         return {
           card: 'generic',
-          kind: 'file_read',
-          title: '读取文件',
-          rawInput: args,
+          kind: 'artifact_write',
+          title: '保存研究产物',
+          rawInput: { title: args.title, filename: args.filename },
         }
       },
       presentResult(_args, value) {
+        const title = value?.artifact?.title || '未命名产物'
+        const version = value?.artifact?.version
         return textResult(
-          value?.file?.name || '文件内容',
-          value?.content || '（二进制文件，无法直接预览）',
+          '产物已保存',
+          version ? `${title} · v${version}` : title,
         )
       },
     }),
@@ -812,6 +576,7 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register(
     defineTool({
+
       name: 'docx_read',
       description:
         'Read a Word (.docx) file in the current project. Returns paragraphs with stable index, style and text, every table as rows of cells, and the heading outline. Use project_read first to get the exact path, then use the paragraph index values with docx_edit. Old .doc files are not supported: ask the user to save them as .docx first.',
@@ -899,6 +664,7 @@ export function apply(ctx, config = {}) {
         }),
       },
       async execute(args, exec) {
+        assertWritable(exec)
         let operations
         if (typeof args.operations === 'string' && args.operations.trim()) {
           try {
@@ -1022,9 +788,10 @@ export function apply(ctx, config = {}) {
           paperId: value?.paperId ?? null,
         }),
       },
-      async execute(args) {
+      async execute(args, exec) {
         const tags = splitTags(args.tags)
         if (args.paperId && tags.length) {
+          assertWritable(exec)
           return call(`/internal/research/papers/${encodeURIComponent(args.paperId)}/tags`, {}, {
             method: 'PUT',
             body: { tags, mode: args.mode || 'append' },
@@ -1129,6 +896,7 @@ export function apply(ctx, config = {}) {
         }),
       },
       async execute(args, exec) {
+        assertWritable(exec)
         const sessionId = sessionIdOf(exec)
         let deck
         if (typeof args.deck === 'string' && args.deck.trim()) {
@@ -1209,6 +977,122 @@ export function apply(ctx, config = {}) {
           `已导出 · ${value?.format || ''}`,
           [files.join('\n') || '没有生成文件。', ...notes].join('\n\n'),
         )
+      },
+    }),
+  )
+
+  ctx.tools.register(
+    defineTool({
+      name: 'notes_search',
+      description:
+        'Search the in-app notes square (external paper notes grouped by conference/field). Returns note titles, docs/ paths, conference/field labels and a Chinese summary. Use it for note-based background, then notes_read on a promising path. Notes are third-party content under CC BY-NC-SA 4.0: cite the note path and conference.',
+      parameters: {
+        query: {
+          type: 'string',
+          required: true,
+          description: 'Search query; Chinese concept expansion is automatic.',
+        },
+        conference: {
+          type: 'string',
+          description: 'Optional conference filter, e.g. ICLR2026 or CVPR2026.',
+        },
+        field: {
+          type: 'string',
+          description: 'Optional field slug filter returned by a previous notes_search.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Max results, default 12, at most 40.',
+        },
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: true },
+        render: (_args, value) => [{ type: 'text', text: asText(value) }],
+        presentationMeta: (_args, value) => ({
+          kind: 'notes_search',
+          count: Array.isArray(value?.items) ? value.items.length : 0,
+        }),
+      },
+      async execute(args) {
+        return call('/internal/research/notes/search', {}, {
+          method: 'POST',
+          body: {
+            query: args.query,
+            conference: args.conference,
+            field: args.field,
+            limit: args.limit,
+          },
+        })
+      },
+      presentCall(args) {
+        return {
+          card: 'generic',
+          kind: 'notes_search',
+          title: '笔记广场',
+          rawInput: args,
+        }
+      },
+      presentResult(_args, value) {
+        const items = Array.isArray(value?.items) ? value.items : []
+        const lines = items.map((item, index) =>
+          [
+            `${index + 1}. ${item.title || item.path}`,
+            `   ${[item.conference, item.label || item.field].filter(Boolean).join(' · ')} · ${item.path}`,
+            item.description ? `   ${item.description}` : '',
+          ]
+            .filter(Boolean)
+            .join('\n'),
+        )
+        return textResult(
+          `笔记检索 · ${items.length} 条`,
+          lines.join('\n\n') || '没有命中笔记。',
+        )
+      },
+    }),
+  )
+
+  ctx.tools.register(
+    defineTool({
+      name: 'notes_read',
+      description:
+        'Read one note from the notes square by its docs/ path (from notes_search). Returns the note as Markdown, capped for context. Prefer this over re-searching when you need the method or experiment section.',
+      parameters: {
+        path: {
+          type: 'string',
+          required: true,
+          description: 'docs/... .md path returned by notes_search.',
+        },
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: true },
+        render: (_args, value) => [{ type: 'text', text: asText(value) }],
+        presentationMeta: (_args, value) => ({
+          kind: 'notes_read',
+          path: value?.path || '',
+        }),
+      },
+      async execute(args) {
+        return call('/internal/research/notes/read', {}, {
+          method: 'POST',
+          body: { path: args.path },
+        })
+      },
+      presentCall(args) {
+        return {
+          card: 'generic',
+          kind: 'notes_read',
+          title: '读取笔记',
+          rawInput: args,
+        }
+      },
+      presentResult(_args, value) {
+        const body = String(value?.markdown || '')
+        const head = `${value?.title || value?.path || '笔记'}${value?.truncated ? '（已截断）' : ''}`
+        return {
+          card: 'generic',
+          title: '笔记正文',
+          content: `${head}\n\n${body}`,
+        }
       },
     }),
   )

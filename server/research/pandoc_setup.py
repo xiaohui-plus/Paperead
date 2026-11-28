@@ -31,7 +31,11 @@ _LOCK = threading.Lock()
 _THREAD: threading.Thread | None = None
 _STATE: dict[str, Any] = {
     "status": "idle",  # idle | running | done | error
+    "phase": "",  # download | extract | done
     "percent": 0,
+    "bytes": 0,
+    "total": 0,
+    "source": "",
     "error": "",
     "startedAt": 0,
     "finishedAt": 0,
@@ -72,6 +76,11 @@ def status() -> dict[str, Any]:
         data = dict(_STATE)
     data["installed"] = installed_exe() is not None
     data["version"] = PANDOC_VERSION
+    alive = _THREAD is not None and _THREAD.is_alive()
+    data["threadAlive"] = alive
+    if data["status"] == "running" and not alive:
+        data["status"] = "error"
+        data["error"] = data.get("error") or "下载线程已退出，请重试。"
     return data
 
 
@@ -99,8 +108,9 @@ def _download(url: str, target: Path) -> None:
                     break
                 handle.write(block)
                 done += len(block)
+                _set(phase="download", bytes=done, total=total)
                 if total:
-                    _set(percent=min(99, int(done * 100 / total)))
+                    _set(percent=min(93, int(done * 93 / total)))
     digest = hashlib.sha256(target.read_bytes()).hexdigest().upper()
     if digest != ASSET_SHA256:
         target.unlink(missing_ok=True)
@@ -130,18 +140,22 @@ def _run() -> None:
     archive = work / ASSET_NAME
     errors: list[str] = []
     for url in _sources():
+        host = url.split("/")[2] if "://" in url else url
         try:
-            _set(percent=0, error="")
+            _set(phase="download", percent=0, bytes=0, total=0, source=host, error="")
             _download(url, archive)
+            _set(phase="extract", percent=95)
             _extract(archive, work / "pandoc.exe")
             archive.unlink(missing_ok=True)
-            _set(status="done", percent=100, finishedAt=int(time.time()))
+            _set(status="done", phase="done", percent=100, finishedAt=int(time.time()))
             return
         except (OSError, ValueError, zipfile.BadZipFile, urllib.error.URLError) as error:
-            errors.append(f"{url.split('/')[2]}: {error}")
+            errors.append(f"{host}: {error}")
             archive.unlink(missing_ok=True)
+            _set(phase="download", source=host, error=f"{host}：{error}，正在尝试备用下载源…")
     _set(
         status="error",
+        phase="error",
         error="；".join(errors)[-800:] or "下载失败",
         finishedAt=int(time.time()),
     )
@@ -152,20 +166,44 @@ def start() -> dict[str, Any]:
     global _THREAD
     with _LOCK:
         if installed_exe() is not None:
-            _STATE.update(status="done", percent=100)
+            _STATE.update(status="done", phase="done", percent=100)
             return dict(_STATE)
         if _THREAD is not None and _THREAD.is_alive():
             return dict(_STATE)
-        _STATE.update(status="running", percent=0, error="", startedAt=int(time.time()))
+        if _STATE.get("status") == "running":
+            _STATE.update(status="error", phase="error", error="下载线程已退出，请重试。")
+        _STATE.update(
+            status="running",
+            phase="download",
+            percent=0,
+            bytes=0,
+            total=0,
+            source="",
+            error="",
+            startedAt=int(time.time()),
+            finishedAt=0,
+        )
         _THREAD = threading.Thread(target=_run, daemon=True, name="pandoc-install")
         _THREAD.start()
     return status()
 
 
 def start_if_missing() -> None:
-    """应用启动时调用：没装过就悄悄下载，不阻塞启动。"""
+    """应用启动时调用：没装过就悄悄下载，不阻塞启动。
+
+    安装包内置/系统 PATH 里已有 pandoc 时直接标记完成，不再多下 24MB。
+    """
     if installed_exe() is not None:
         return
+    try:
+        from server.research.latex import find_pandoc
+
+        if find_pandoc():
+            with _LOCK:
+                _STATE.update(status="done", phase="done", percent=100)
+            return
+    except Exception:  # noqa: BLE001 - 探测失败时按缺失处理
+        pass
     st = status()
     if st["status"] == "running":
         return

@@ -57,7 +57,7 @@ impl AgentSidecar {
             .try_clone()
             .map_err(|error| format!("复制 agent 日志句柄失败：{error}"))?;
 
-        let node = node_path(&agent_dir);
+        let node = wait_for_node(app, &agent_dir, data_dir, python_port, python_token)?;
         let env_key = paths::var("PAPEREAD_LLM_KEY")
             .or_else(|| paths::var("PAPEREAD_API_KEY"))
             .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok())
@@ -94,6 +94,21 @@ impl AgentSidecar {
             ),
         );
 
+        // node 所在目录放到 PATH 最前面（安装版是首启下载的运行时目录），
+        // 研究 agent 的 pwsh/bash 才能直接调用 node 运行脚本。
+        let node_dir = node
+            .parent()
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_else(|| agent_dir.display().to_string());
+        let path_sep = if cfg!(windows) { ";" } else { ":" };
+        let inherited_path = std::env::var("PATH").unwrap_or_default();
+        let shell_path = if inherited_path.is_empty() {
+            node_dir
+        } else {
+            format!("{}{}{}", node_dir, path_sep, inherited_path)
+        };
+        let python = detect_python();
+
         let mut command = Command::new(&node);
         command
             .arg(&bin)
@@ -103,13 +118,16 @@ impl AgentSidecar {
             .env("PAPEREAD_AGENT_TOKEN", &token)
             .env("PAPEREAD_AGENT_COMPOSE", "full")
             .env("PAPEREAD_API_BASE", format!("http://127.0.0.1:{python_port}"))
+            .env("PATH", shell_path)
             .env("TMP", &tmp_dir)
             .env("TEMP", &tmp_dir)
             .env("TMPDIR", &tmp_dir)
             .env("PAPEREAD_TOKEN", python_token)
+            .env("PAPEREAD_INTERNAL_TOKEN", python_token)
             .env("PAPEREAD_LLM_KEY", llm_key)
             .env("PAPEREAD_LLM_BASE", llm_base)
             .env("PAPEREAD_MODEL", model)
+            .env("PAPEREAD_PYTHON", python.unwrap_or_default())
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
@@ -229,18 +247,109 @@ fn plain_path(path: PathBuf) -> PathBuf {
     path
 }
 
-fn node_path(agent_dir: &Path) -> PathBuf {
+/// 探测可用的 Python 解释器；没有就返回空串，让 agent 明确告知用户
+/// 而不是反复尝试一个不存在的命令。优先官方启动器 `py -3`（Windows），
+/// 再退回 PATH 上的 `python` / `python3`。
+fn detect_python() -> Option<String> {
+    for candidate in ["py", "python", "python3"] {
+        let mut command = Command::new(candidate);
+        if candidate == "py" {
+            command.arg("-3");
+        }
+        command.arg("--version");
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
+        let ok = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if ok {
+            return Some(if candidate == "py" {
+                "py -3".to_string()
+            } else {
+                candidate.to_string()
+            });
+        }
+    }
+    None
+}
+
+/// node 运行时查找顺序：显式 `PAPEREAD_NODE` → 安装包内置（旧版升级残留）
+/// → 首启下载目录 `<数据目录>/engines/node/<版本>/node.exe` → 系统 PATH。
+///
+/// 安装包不再内置约 86 MB 的 node.exe（会顶破 Gitee 100 MB 附件上限），
+/// agent 与公式引擎共用首启后台下载的同一份运行时。
+fn find_node(agent_dir: &Path, data_dir: &Path) -> Option<PathBuf> {
     if let Some(value) = paths::var("PAPEREAD_NODE") {
         let path = PathBuf::from(value);
         if path.is_file() {
-            return path;
+            return Some(path);
         }
     }
     let bundled = agent_dir.join("node.exe");
     if bundled.is_file() {
-        return bundled;
+        return Some(bundled);
     }
-    PathBuf::from("node")
+    let root = data_dir.join("engines").join("node");
+    if let Ok(entries) = fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let candidate = entry.path().join("node.exe");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    if let Ok(value) = std::env::var("PATH") {
+        for dir in value.split(';').filter(|dir| !dir.is_empty()) {
+            let candidate = PathBuf::from(dir).join("node.exe");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// 等 node 运行时就绪（首启下载中）。agent 起不来时研究/综述会返回 503，
+/// 前端会自动退避重试，因此这里可以安全等待，不必让窗口卡在启动页。
+fn wait_for_node(
+    app: &AppHandle,
+    agent_dir: &Path,
+    data_dir: &Path,
+    python_port: u16,
+    python_token: &str,
+) -> Result<PathBuf, String> {
+    if let Some(path) = find_node(agent_dir, data_dir) {
+        return Ok(path);
+    }
+    if paths::var("PAPEREAD_NODE_AUTODOWNLOAD").as_deref() == Some("0") {
+        return Err("未找到 node 运行时，且自动下载已关闭（PAPEREAD_NODE_AUTODOWNLOAD=0）。".into());
+    }
+    // 触发一次后台下载（Python 已就绪；已在下载时接口幂等返回当前状态）。
+    let url = format!("http://127.0.0.1:{python_port}/api/toolchain/node");
+    match ureq::post(&url)
+        .set("X-Paperead-Token", python_token)
+        .timeout(Duration::from_secs(5))
+        .call()
+    {
+        Ok(_) => paths::log_line(app, "node 运行时未安装：已触发后台下载，等待就绪"),
+        Err(error) => paths::log_line(
+            app,
+            &format!("触发 node 运行时下载失败（继续等待已有下载）：{error}"),
+        ),
+    }
+    let deadline = Instant::now() + Duration::from_secs(480);
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_secs(2));
+        if let Some(path) = find_node(agent_dir, data_dir) {
+            paths::log_line(app, &format!("node 运行时已就绪：{}", path.display()));
+            return Ok(path);
+        }
+    }
+    Err("node 运行时尚未下载完成（首次启动约 33 MB，通常 1–3 分钟）。请稍后重启应用，或在「设置 → 工具链」里重试。".into())
 }
 
 fn agent_home(_app: &AppHandle, data_dir: &Path) -> PathBuf {

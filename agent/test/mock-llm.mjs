@@ -24,6 +24,10 @@ const RECORD = process.env.MOCK_LLM_RECORD || ''
 const OMIT_DONE = process.env.MOCK_LLM_OMIT_DONE === '1'
 // 主对话只回文本、不要求工具，便于单独验证流式收尾（不依赖内部工具接口）。
 const TEXT_ONLY = process.env.MOCK_LLM_TEXT_ONLY === '1'
+// 子代理链路回归：父级请求派生子代理，子代理自己的请求继续走普通工具分支。
+const SUBAGENT = process.env.MOCK_SUBAGENT === '1'
+// 文件链路回归：按用户轮次依次调用 write / read / edit。
+const FS = process.env.MOCK_FS === '1'
 const records = []
 
 function send(res, payload) {
@@ -83,7 +87,16 @@ function classify(body) {
   }
   if (tools.length === 0 && /compact|summar/i.test(text)) return { kind: 'compaction', tools }
   const lastRole = body.messages?.at(-1)?.role ?? 'user'
-  return { kind: lastRole === 'tool' ? 'main-followup' : 'main', tools, lastRole }
+  const users = (body.messages ?? []).filter((message) => message?.role === 'user')
+  const lastUser = [...users]
+    .reverse()
+    .find((message) => {
+      const text = textOf(message.content).trimStart()
+      // skill-filesystem 会把技能目录作为一条 user 注入，末尾可能覆盖真实提问。
+      return text.length > 0 && !text.startsWith('<system-reminder>')
+    })
+  const prompt = textOf(lastUser?.content)
+  return { kind: lastRole === 'tool' ? 'main-followup' : 'main', tools, lastRole, prompt }
 }
 
 function record(body, info) {
@@ -91,6 +104,7 @@ function record(body, info) {
     kind: info.kind,
     tools: info.tools,
     lastRole: info.lastRole,
+    prompt: (info.prompt || '').slice(0, 120),
     maxTokens: body.max_tokens,
     // 内置技能是否进入模型请求（回归用来确认 agent/skills 被真正扫描到）。
     mentionsLatexSkill: /write-latex/.test(allText(body)),
@@ -123,9 +137,77 @@ function streamText(res, text) {
   }, 30)
 }
 
+function streamToolCall(res, id, name, args, reasoning) {
+  send(res, chunk({ role: 'assistant', reasoning_content: reasoning }))
+  setTimeout(() => {
+    send(
+      res,
+      chunk({
+        tool_calls: [
+          {
+            index: 0,
+            id,
+            type: 'function',
+            function: { name, arguments: JSON.stringify(args) },
+          },
+        ],
+      }),
+    )
+    send(res, { ...chunk({}, 'tool_calls'), usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 } })
+    endStream(res)
+  }, 60)
+}
+
 function streamMain(res, info) {
   const hasTodo = info.tools.includes('todo_write')
   const hasEcho = info.tools.includes('echo')
+  if (FS && info.tools.includes('report') === false && info.lastRole === 'user') {
+    const prompt = info.prompt || ''
+    if (prompt.includes('创建') && info.tools.includes('write')) {
+      return streamToolCall(res, 'call_write', 'write', { file_path: 'hello.md', content: '第一版\n' }, '写入文件验证')
+    }
+    if (prompt.includes('读取') && info.tools.includes('read')) {
+      return streamToolCall(res, 'call_read', 'read', { file_path: 'hello.md' }, '读取文件验证')
+    }
+    if (prompt.includes('改成') && info.tools.includes('edit')) {
+      return streamToolCall(
+        res,
+        'call_edit',
+        'edit',
+        { file_path: 'hello.md', old_string: '第一版', new_string: '第二版' },
+        '编辑文件验证',
+      )
+    }
+    return streamText(res, '文件链路验证完成。')
+  }
+  // 父级没有 report（它只注册在子代理作用域），据此只派生一层，避免递归。
+  if (SUBAGENT && info.tools.includes('subagent') && !info.tools.includes('report')) {
+    send(res, chunk({ role: 'assistant', reasoning_content: '派生一个子代理核对工具链路。' }))
+    setTimeout(() => {
+      send(
+        res,
+        chunk({
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call_subagent',
+              type: 'function',
+              function: {
+                name: 'subagent',
+                arguments: JSON.stringify({
+                  description: '子代理回归',
+                  prompt: '请调用 echo 工具确认链路，然后总结结果。',
+                }),
+              },
+            },
+          ],
+        }),
+      )
+      send(res, { ...chunk({}, 'tool_calls'), usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 } })
+      endStream(res)
+    }, 60)
+    return
+  }
   if (!hasTodo && !hasEcho) {
     streamText(res, '（假模型）没有可调用的工具，直接回答。')
     return

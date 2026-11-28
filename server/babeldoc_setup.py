@@ -25,7 +25,7 @@ import urllib.request
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from server import babeldoc_engine
 
@@ -42,7 +42,12 @@ _LOCK = threading.Lock()
 _THREAD: threading.Thread | None = None
 _STATE: dict[str, Any] = {
     "status": "idle",  # idle | running | done | error
+    "phase": "",  # manifest | download | verify | extract | done
     "percent": 0,
+    "bytes": 0,
+    "total": 0,
+    "source": "",
+    "attempt": 0,
     "error": "",
     "startedAt": 0,
     "finishedAt": 0,
@@ -66,11 +71,48 @@ def installed() -> bool:
 
 
 def _ready() -> bool:
-    """当前 App 期望的引擎版本是否已经就位；旧版本不算，方便随版本升级。"""
+    """当前 App 是否已有可直接使用的引擎。
+
+    先认期望版本目录；其余版本目录也认——历史清单版本号与 ``ENGINE_VERSION``
+    不一致时，旧目录其实完全能跑。若只认精确目录，会出现「已下载到 100%、
+    但每次启动仍判定未就绪并重复下载」的死循环，用户看到的就是「显示装好了
+    却始终无法完成依赖」。
+    """
     explicit = os.environ.get("PAPEREAD_BABELDOC_HOME", "").strip()
     if explicit:
         return babeldoc_engine.launcher(Path(explicit).expanduser()) is not None
-    return babeldoc_engine.launcher(install_dir()) is not None
+    if babeldoc_engine.launcher(install_dir()) is not None:
+        return True
+    root = babeldoc_engine.engine_root()
+    if root.is_dir():
+        try:
+            children = sorted(root.iterdir(), reverse=True)
+        except OSError:
+            children = []
+        for child in children:
+            if child.is_dir() and babeldoc_engine.launcher(child) is not None:
+                return True
+    return False
+
+
+def installed_version() -> str:
+    """已安装引擎的目录名（版本）；没有则返回空串。"""
+    explicit = os.environ.get("PAPEREAD_BABELDOC_HOME", "").strip()
+    if explicit:
+        home = Path(explicit).expanduser()
+        return home.name if babeldoc_engine.launcher(home) is not None else ""
+    if babeldoc_engine.launcher(install_dir()) is not None:
+        return ENGINE_VERSION
+    root = babeldoc_engine.engine_root()
+    if root.is_dir():
+        try:
+            children = sorted(root.iterdir(), reverse=True)
+        except OSError:
+            children = []
+        for child in children:
+            if child.is_dir() and babeldoc_engine.launcher(child) is not None:
+                return child.name
+    return ""
 
 
 def _legacy_manifest_urls() -> list[str]:
@@ -120,13 +162,29 @@ def _download_bases(primary: str) -> list[str]:
 def status() -> dict[str, Any]:
     with _LOCK:
         data = dict(_STATE)
-    # ``installed`` 表示「任意版本可用」（开发态 rev/旧版本也算），翻译入口按它
-    # 判断能否开跑；``ready`` 才是「当前 App 期望的引擎版本已就位」，用于决定
-    # 启动时是否需要补下载新版本。两者分开，旧引擎目录存在时不会误报升级完成。
+    # ``installed`` 表示「任意版本可用」，``ready`` 表示「当前期望版本或任一
+    # 可用引擎已就位」；``installedVersion`` 与 ``expectedVersion`` 不同时，前端
+    # 可以提示「可升级到新版本」，但翻译入口仍可继续使用旧引擎。
     data["installed"] = installed()
     data["ready"] = _ready()
     data["version"] = ENGINE_VERSION
-    data["home"] = str(babeldoc_engine.engine_home() or install_dir())
+    data["expectedVersion"] = ENGINE_VERSION
+    data["installedVersion"] = installed_version()
+    data["upgradeAvailable"] = bool(
+        data["installedVersion"] and data["installedVersion"] != ENGINE_VERSION
+    )
+    home = babeldoc_engine.engine_home()
+    data["home"] = str(home or install_dir())
+    try:
+        data["cache_ready"] = bool(babeldoc_engine.status().get("cache_ready"))
+    except Exception:  # noqa: BLE001 - 缓存探测失败不影响引擎本身可用
+        data["cache_ready"] = False
+    alive = _THREAD is not None and _THREAD.is_alive()
+    data["threadAlive"] = alive
+    # 线程已退出但状态还停在 running（异常逃逸/进程被挂起）时不能让界面永远转圈。
+    if data["status"] == "running" and not alive:
+        data["status"] = "error"
+        data["error"] = data.get("error") or "下载线程已退出，请重试。"
     return data
 
 
@@ -196,15 +254,24 @@ def _safe_names(prefix: str, values: Any) -> list[str]:
     return names
 
 
-def _safe_extract(archive: Path, target: Path) -> None:
+def _safe_extract(
+    archive: Path,
+    target: Path,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> None:
     target.mkdir(parents=True, exist_ok=True)
     root = target.resolve()
     with zipfile.ZipFile(archive) as bundle:
-        for info in bundle.infolist():
+        infos = bundle.infolist()
+        for info in infos:
             dest = (target / info.filename).resolve()
             if dest != root and root not in dest.parents:
                 raise ValueError(f"压缩包路径非法：{info.filename}")
-        bundle.extractall(target)
+        total = max(1, len(infos))
+        for index, info in enumerate(infos, 1):
+            bundle.extract(info, target)
+            if on_progress is not None:
+                on_progress(index, total)
 
 
 def _cleanup_stale(root: Path, max_age: float = 86400) -> None:
@@ -248,7 +315,14 @@ def _install(manifest: dict[str, Any], base_url: str) -> Path:
             downloaded += count
             if expected_size > 0:
                 # 2% 留给清单，下载阶段最多到 88%
-                _set(percent=min(88, 2 + int(downloaded * 86 / expected_size)))
+                _set(
+                    phase="download",
+                    percent=min(88, 2 + int(downloaded * 86 / expected_size)),
+                    bytes=downloaded,
+                    total=expected_size,
+                )
+            else:
+                _set(phase="download", bytes=downloaded)
 
         archive = work / ZIP_NAME
         with archive.open("wb") as handle:
@@ -260,6 +334,7 @@ def _install(manifest: dict[str, Any], base_url: str) -> Path:
                     # 失败换源时回滚进度，避免同分卷重复计数把百分比顶满。
                     mark = downloaded
                     url = f"{base}/{urllib.parse.quote(name)}"
+                    _set(source=urllib.parse.urlparse(base).netloc or base)
                     try:
                         _download(url, temp, on_bytes)
                         ok = True
@@ -277,21 +352,37 @@ def _install(manifest: dict[str, Any], base_url: str) -> Path:
 
         if expected_size and archive.stat().st_size != expected_size:
             raise ValueError("下载体积与清单不一致")
+        _set(phase="verify", percent=90, bytes=expected_size or downloaded, total=expected_size)
         if _sha256(archive) != expected_sha:
             raise ValueError("下载内容校验失败，请重试")
 
-        _set(percent=90)
+        _set(phase="extract", percent=93)
         stage = work / "tree"
-        _safe_extract(archive, stage)
+
+        def on_extract(done: int, total: int) -> None:
+            _set(percent=93 + int(done * 6 / max(1, total)))
+
+        _safe_extract(archive, stage, on_extract)
         if babeldoc_engine.launcher(stage) is None:
             raise ValueError("压缩包里没有可用的 BabelDOC 启动文件")
-        _set(percent=97)
+        _set(percent=99)
 
-        target = root / version
+        # 统一落到当前期望版本目录：清单版本号与 ENGINE_VERSION 漂移时，
+        # 若按清单版本命名，下次启动会判「未就绪」并重复下载整份引擎。
+        if version != ENGINE_VERSION:
+            log.warning(
+                "引擎清单版本 %s 与期望版本 %s 不一致，按期望版本目录安装",
+                version,
+                ENGINE_VERSION,
+            )
+        target = install_dir()
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
-            # 另一个进程已经装好了：直接用现成的。
-            return target
+            # 另一个进程已经装好了：直接用现成的；目录在但启动文件缺失说明上次
+            # 解压不完整，删掉重装，别让「已安装」状态永远修不好。
+            if babeldoc_engine.launcher(target) is not None:
+                return target
+            shutil.rmtree(target, ignore_errors=True)
         try:
             os.replace(stage, target)
         except OSError:
@@ -305,13 +396,29 @@ def _install(manifest: dict[str, Any], base_url: str) -> Path:
 
 def _run() -> None:
     errors: list[str] = []
+    attempt = 0
     for manifest_url in _manifest_sources():
+        attempt += 1
+        host = urllib.parse.urlparse(manifest_url).netloc or manifest_url
         try:
-            _set(percent=1, error="")
+            with _LOCK:
+                current_percent = int(_STATE.get("percent") or 0)
+            # 清单阶段不清零已下载进度：换清单源时界面不会突然从 60% 掉回 0%。
+            _set(phase="manifest", attempt=attempt, source=host, error="")
+            if current_percent <= 0:
+                _set(percent=0, bytes=0, total=0)
             manifest = _fetch_json(manifest_url)
             base_url = manifest_url.rsplit("/", 1)[0]
             _install(manifest, base_url)
-            _set(status="done", percent=100, finishedAt=int(time.time()))
+            with _LOCK:
+                total = int(_STATE.get("total") or 0)
+            _set(
+                status="done",
+                phase="done",
+                percent=100,
+                bytes=total,
+                finishedAt=int(time.time()),
+            )
             return
         except (
             OSError,
@@ -320,29 +427,47 @@ def _run() -> None:
             urllib.error.URLError,
             json.JSONDecodeError,
         ) as error:
-            host = urllib.parse.urlparse(manifest_url).netloc or manifest_url
             errors.append(f"{host}: {error}")
             log.warning("BabelDOC 引擎下载失败（%s）：%s", host, error)
             # 失败后把当前源写进状态：前端能显示「正在切换备用源」，而不是
             # 一直停在 0% 让人以为卡死。
-            _set(percent=0, error=f"{host}：{error}，正在尝试备用下载源…")
+            _set(
+                phase="manifest",
+                source=host,
+                error=f"{host}：{error}，正在尝试备用下载源…",
+            )
     _set(
         status="error",
+        phase="error",
         error="；".join(errors)[-800:] or "下载失败",
         finishedAt=int(time.time()),
     )
 
 
-def start() -> dict[str, Any]:
-    """开始后台下载；当前版本已就位或正在下载时直接返回当前状态。"""
+def start(force: bool = False) -> dict[str, Any]:
+    """开始后台下载；已有可用引擎或正在下载时直接返回当前状态。"""
     global _THREAD
     with _LOCK:
-        if _ready():
-            _STATE.update(status="done", percent=100)
+        if not force and _ready():
+            _STATE.update(status="done", phase="done", percent=100, error="")
             return dict(_STATE)
         if _THREAD is not None and _THREAD.is_alive():
             return dict(_STATE)
-        _STATE.update(status="running", percent=0, error="", startedAt=int(time.time()))
+        if _STATE.get("status") == "running":
+            # 线程已退出但状态仍停在 running：重置后允许重新开始。
+            _STATE.update(status="error", error="下载线程已退出，请重试。", phase="error")
+        _STATE.update(
+            status="running",
+            phase="manifest",
+            percent=0,
+            bytes=0,
+            total=0,
+            source="",
+            attempt=0,
+            error="",
+            startedAt=int(time.time()),
+            finishedAt=0,
+        )
         _THREAD = threading.Thread(target=_run, daemon=True, name="babeldoc-install")
         _THREAD.start()
     return status()

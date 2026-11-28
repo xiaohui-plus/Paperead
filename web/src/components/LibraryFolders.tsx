@@ -1,6 +1,9 @@
-import { useEffect, useRef, useState, type DragEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react'
 import type { Folder } from '../lib/library'
 import { IconBook, IconFolder, IconFolderPapers, IconPlus } from './icons'
+
+/** 左侧「全部文献」行的拖放目标标识，不会与后端文件夹 id 冲突。 */
+export const ALL_FOLDER_TARGET = '__library_all__'
 
 interface Props {
   folders: Folder[]
@@ -9,7 +12,11 @@ interface Props {
   loading: boolean
   error: string | null
   dragPaperId: string | null
+  /** 正在拖拽的文献当前是否归属于某个文件夹（决定「全部文献」行是否可接收） */
+  dragPaperInFolder: boolean
   dragOverFolderId: string | null
+  /** 因拖拽悬停而自动打开、尚未落定的文件夹 */
+  springOpenFolderId: string | null
   onSelect: (folderId: string | null) => void
   onCreate: (name: string) => Promise<boolean>
   onRename: (folderId: string, name: string) => Promise<boolean>
@@ -17,7 +24,13 @@ interface Props {
   onDragEnterFolder: (folderId: string) => void
   onDragLeaveFolder: (folderId: string) => void
   onDropFolder: (folderId: string) => void
+  onDropAll: () => void
+  /** 拖拽停留足够久后，请求在右侧打开该文件夹 */
+  onSpringOpen: (folderId: string) => void
 }
+
+/** 拖拽悬停在文件夹上多久后自动打开 */
+const SPRING_OPEN_MS = 620
 
 export function LibraryFolders({
   folders,
@@ -26,7 +39,9 @@ export function LibraryFolders({
   loading,
   error,
   dragPaperId,
+  dragPaperInFolder,
   dragOverFolderId,
+  springOpenFolderId,
   onSelect,
   onCreate,
   onRename,
@@ -34,6 +49,8 @@ export function LibraryFolders({
   onDragEnterFolder,
   onDragLeaveFolder,
   onDropFolder,
+  onDropAll,
+  onSpringOpen,
 }: Props) {
   const [creating, setCreating] = useState(false)
   const [draft, setDraft] = useState('')
@@ -41,11 +58,14 @@ export function LibraryFolders({
   const [renameDraft, setRenameDraft] = useState('')
   const [menuId, setMenuId] = useState<string | null>(null)
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null)
+  const [armId, setArmId] = useState<string | null>(null)
 
   const createRef = useRef<HTMLInputElement>(null)
   const renameRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  const springTimer = useRef<number | undefined>(undefined)
+  const armRef = useRef<string | null>(null)
 
   useEffect(() => {
     createRef.current?.focus()
@@ -76,6 +96,43 @@ export function LibraryFolders({
       window.removeEventListener('keydown', onKey)
     }
   }, [menuId])
+
+  const clearArm = useCallback(() => {
+    if (springTimer.current !== undefined) {
+      window.clearTimeout(springTimer.current)
+      springTimer.current = undefined
+    }
+    armRef.current = null
+    setArmId(null)
+  }, [])
+
+  // 拖拽结束、切换文件夹或文件夹本身被打开时，取消悬停计时
+  useEffect(() => {
+    clearArm()
+  }, [dragPaperId, activeFolderId, clearArm])
+
+  useEffect(() => {
+    return () => {
+      if (springTimer.current !== undefined) window.clearTimeout(springTimer.current)
+    }
+  }, [])
+
+  const armSpringOpen = useCallback(
+    (folder: Folder) => {
+      if (folder.id === activeFolderId) return
+      if (armRef.current === folder.id) return
+      clearArm()
+      armRef.current = folder.id
+      setArmId(folder.id)
+      springTimer.current = window.setTimeout(() => {
+        springTimer.current = undefined
+        armRef.current = null
+        setArmId(null)
+        onSpringOpen(folder.id)
+      }, SPRING_OPEN_MS)
+    },
+    [activeFolderId, clearArm, onSpringOpen],
+  )
 
   const beginCreate = () => {
     setMenuId(null)
@@ -120,11 +177,13 @@ export function LibraryFolders({
     event.stopPropagation()
     event.dataTransfer.dropEffect = 'move'
     if (dragOverFolderId !== folder.id) onDragEnterFolder(folder.id)
+    armSpringOpen(folder)
   }
 
   const onRowDragLeave = (event: DragEvent<HTMLDivElement>, folder: Folder) => {
     if (!dragPaperId) return
     if (event.currentTarget.contains(event.relatedTarget as Node)) return
+    if (armRef.current === folder.id) clearArm()
     onDragLeaveFolder(folder.id)
   }
 
@@ -132,7 +191,30 @@ export function LibraryFolders({
     if (!dragPaperId) return
     event.preventDefault()
     event.stopPropagation()
+    clearArm()
     onDropFolder(folder.id)
+  }
+
+  const onAllDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (!dragPaperId || !dragPaperInFolder) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.dataTransfer.dropEffect = 'move'
+    if (dragOverFolderId !== ALL_FOLDER_TARGET) onDragEnterFolder(ALL_FOLDER_TARGET)
+  }
+
+  const onAllDragLeave = (event: DragEvent<HTMLDivElement>) => {
+    if (!dragPaperId || !dragPaperInFolder) return
+    if (event.currentTarget.contains(event.relatedTarget as Node)) return
+    onDragLeaveFolder(ALL_FOLDER_TARGET)
+  }
+
+  const onAllDrop = (event: DragEvent<HTMLDivElement>) => {
+    if (!dragPaperId || !dragPaperInFolder) return
+    event.preventDefault()
+    event.stopPropagation()
+    clearArm()
+    onDropAll()
   }
 
   const onListDragOver = (event: DragEvent<HTMLDivElement>) => {
@@ -193,16 +275,25 @@ export function LibraryFolders({
               role="button"
               tabIndex={0}
               data-active={!activeFolderId}
+              data-can-drop={Boolean(dragPaperId && dragPaperInFolder)}
+              data-drop={dragOverFolderId === ALL_FOLDER_TARGET}
               onClick={() => onSelect(null)}
               onKeyDown={(event) => {
                 if (event.key === 'Enter') onSelect(null)
               }}
+              onDragOver={onAllDragOver}
+              onDragLeave={onAllDragLeave}
+              onDrop={onAllDrop}
             >
               <i className="folder-icon">
                 <IconBook />
               </i>
               <span className="folder-name">全部文献</span>
-              <em className="folder-count">{totalCount}</em>
+              {dragPaperId && dragPaperInFolder && dragOverFolderId === ALL_FOLDER_TARGET ? (
+                <span className="folder-drop-label">松开移出</span>
+              ) : (
+                <em className="folder-count">{totalCount}</em>
+              )}
             </div>
 
             {folders.map((folder) => (
@@ -213,7 +304,9 @@ export function LibraryFolders({
                   tabIndex={0}
                   data-active={folder.id === activeFolderId}
                   data-empty={folder.paper_count === 0}
+                  data-can-drop={Boolean(dragPaperId)}
                   data-drop={folder.id === dragOverFolderId}
+                  data-springing={armId === folder.id || folder.id === springOpenFolderId}
                   onClick={() => {
                     if (renamingId === folder.id) return
                     onSelect(folder.id)
@@ -256,12 +349,22 @@ export function LibraryFolders({
                     <span className="folder-name">{folder.name}</span>
                   )}
 
-                  {renamingId !== folder.id && folder.paper_count > 0 && (
-                    <em className="folder-count">{folder.paper_count}</em>
-                  )}
+                  {renamingId !== folder.id &&
+                    dragPaperId &&
+                    dragOverFolderId === folder.id && (
+                      <span className="folder-drop-label">松开移入</span>
+                    )}
 
-                  {renamingId !== folder.id && dragPaperId && (
-                    <span className="folder-drop-label">松开移入</span>
+                  {renamingId !== folder.id &&
+                    !(dragPaperId && dragOverFolderId === folder.id) &&
+                    folder.paper_count > 0 && (
+                      <em className="folder-count">{folder.paper_count}</em>
+                    )}
+
+                  {armId === folder.id && (
+                    <span className="folder-spring" aria-hidden>
+                      <i />
+                    </span>
                   )}
                 </div>
 

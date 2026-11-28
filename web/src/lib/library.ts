@@ -1369,16 +1369,28 @@ export async function extractHighlights(
 
 export interface EngineDownloadStatus {
   status: 'idle' | 'running' | 'done' | 'error'
+  /** 下载阶段：manifest / download / verify / extract / done / error */
+  phase?: string
   percent: number
+  bytes?: number
+  total?: number
+  source?: string
   error: string
   /** 任意版本可用（含开发态/旧版本） */
   installed: boolean
-  /** 当前 App 期望的引擎版本已就位 */
+  /** 当前期望版本或任一可用引擎已就位 */
   ready: boolean
   version: string
+  expectedVersion?: string
+  installedVersion?: string
+  /** 已安装版本与期望版本不一致：可继续使用，也可升级 */
+  upgradeAvailable?: boolean
+  /** 首次翻译需要的模型/字体缓存是否已就绪 */
+  cache_ready?: boolean
   home: string
   startedAt: number
   finishedAt: number
+  threadAlive?: boolean
 }
 
 /** 全局翻译引擎（BabelDOC）的安装状态与实时下载进度。 */
@@ -1386,9 +1398,11 @@ export async function getEngineStatus(): Promise<EngineDownloadStatus> {
   return jsonFetch('/api/toolchain/engine')
 }
 
-/** 开始或重试后台下载翻译引擎。 */
-export async function startEngineDownload(): Promise<EngineDownloadStatus> {
-  return jsonFetch('/api/toolchain/engine', { method: 'POST' })
+/** 开始或重试后台下载翻译引擎；``force`` 用于修复已损坏或升级旧版本。 */
+export async function startEngineDownload(force = false): Promise<EngineDownloadStatus> {
+  return jsonFetch(`/api/toolchain/engine${force ? '?force=1' : ''}`, {
+    method: 'POST',
+  })
 }
 
 /** 后端不可用时的示例条目。 */

@@ -7,6 +7,7 @@ import {
   type ChatState,
   type ChatTurn,
   type PermissionPreset,
+  type ProcessBlock,
   type ToolCall,
 } from './researchTypes'
 
@@ -26,6 +27,7 @@ function blankTurn(turn: number, at: number): ChatTurn {
     reasoning: '',
     tools: [],
     plan: [],
+    blocks: [],
   }
 }
 
@@ -102,27 +104,87 @@ function matchTool(turn: ChatTurn, callId?: string): number {
   return -1
 }
 
+function appendReasoningBlock(
+  blocks: ProcessBlock[],
+  text: string,
+  step: number | undefined,
+  at: number,
+): ProcessBlock[] {
+  const last = blocks[blocks.length - 1]
+  if (last?.kind === 'reasoning' && (last.step ?? 0) === (step ?? 0)) {
+    return blocks.map((block, index) =>
+      index === blocks.length - 1 ? { ...last, text: last.text + text } : block,
+    )
+  }
+  return [
+    ...blocks,
+    { kind: 'reasoning', id: `rb-${at}-${blocks.length}`, step, text, at },
+  ]
+}
+
+function ensureToolBlock(
+  blocks: ProcessBlock[],
+  callId: string,
+  step: number | undefined,
+  at: number,
+): ProcessBlock[] {
+  if (blocks.some((block) => block.kind === 'tool' && block.callId === callId)) {
+    return blocks
+  }
+  return [
+    ...blocks,
+    { kind: 'tool', id: `tb-${callId || at}-${blocks.length}`, callId, step, at },
+  ]
+}
+
+function ensurePlanBlock(blocks: ProcessBlock[], at: number): ProcessBlock[] {
+  if (blocks.some((block) => block.kind === 'plan')) return blocks
+  return [...blocks, { kind: 'plan', id: `pb-${at}-${blocks.length}`, at }]
+}
+
 function upsertTool(
   turn: ChatTurn,
   callId: string | undefined,
   at: number,
   patch: (tool: ToolCall) => ToolCall,
+  step?: number,
 ): ChatTurn {
   const index = matchTool(turn, callId)
   if (index >= 0) {
     const tools = turn.tools.map((tool, i) => (i === index ? patch(tool) : tool))
-    return { ...turn, tools }
+    const target = tools[index]
+    return {
+      ...turn,
+      tools,
+      blocks: ensureToolBlock(
+        turn.blocks ?? [],
+        target.callId || target.key,
+        step ?? target.step,
+        at,
+      ),
+    }
   }
   const created: ToolCall = {
     key: callId || `tool-${turn.tools.length}-${at}`,
     callId: callId || '',
     name: '',
     status: 'draft',
+    step,
     argumentsText: '',
     startedAt: at,
     endedAt: null,
   }
-  return { ...turn, tools: [...turn.tools, patch(created)] }
+  const next = patch(created)
+  return {
+    ...turn,
+    tools: [...turn.tools, next],
+    blocks: ensureToolBlock(
+      turn.blocks ?? [],
+      next.callId || next.key,
+      step ?? next.step,
+      at,
+    ),
+  }
 }
 
 export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
@@ -182,6 +244,7 @@ export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
         })),
         running: true,
         offline: false,
+        retry: null,
       }
     }
 
@@ -196,6 +259,50 @@ export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
           errorText: ended.text || undefined,
         })),
         running: false,
+        retry: null,
+      }
+    }
+
+    case 'llm.retry': {
+      // DSH 的 llm-retry 已记录重试计划：先给出失败原因与退避时间，
+      // 等待结束时会再来 llm.retry.started（新 turn 开始发送）。
+      return {
+        ...base,
+        running: true,
+        offline: false,
+        retry: {
+          turn: event.turn,
+          step: event.step,
+          retry: Number(event.retry) || 1,
+          maxRetries: event.maxRetries,
+          mode: event.mode,
+          delayMs: Number(event.delayMs) || 0,
+          started: false,
+          failure: event.failure,
+          at,
+        },
+      }
+    }
+
+    case 'llm.retry.started':
+      return base.retry
+        ? { ...base, retry: { ...base.retry, started: true, retry: Number(event.retry) || base.retry.retry, at } }
+        : base
+
+    case 'goal.change': {
+      const goal = event.goal
+      if (!goal) return { ...base, goal: null }
+      return {
+        ...base,
+        goal: {
+          id: asText(goal.id),
+          revision: Number(goal.revision) || 0,
+          objective: asText(goal.objective),
+          phase: asText(goal.phase),
+          roundsStarted: Number(event.roundsStarted) || 0,
+          maxGoalRounds: Number(goal.maxGoalRounds) || 0,
+          blockedReason: goal.blockedReason ? asText(goal.blockedReason) : undefined,
+        },
       }
     }
 
@@ -208,51 +315,72 @@ export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
     }
 
     case 'reasoning.delta': {
+      const text = asText(event.text)
+      const step = typeof event.step === 'number' ? event.step : undefined
       const [next, index] = withTurn(base, event.turn ?? 1, at)
       return patchActiveTurn(next, index, (turn) => ({
         ...turn,
-        reasoning: turn.reasoning + asText(event.text),
+        reasoning: turn.reasoning + text,
+        blocks: appendReasoningBlock(turn.blocks ?? [], text, step, at),
       }))
     }
 
     case 'tool.draft': {
       const [next, index] = withTurn(base, event.turn ?? 1, at)
       return patchActiveTurn(next, index, (turn) =>
-        upsertTool(turn, event.callId, at, (tool) => ({
-          ...tool,
-          name: asText(event.name) || tool.name,
-          status: tool.status === 'running' ? 'running' : 'draft',
-          argumentsText: tool.argumentsText + asText(event.argumentsDelta),
-        })),
+        upsertTool(
+          turn,
+          event.callId,
+          at,
+          (tool) => ({
+            ...tool,
+            name: asText(event.name) || tool.name,
+            status: tool.status === 'running' ? 'running' : 'draft',
+            argumentsText: tool.argumentsText + asText(event.argumentsDelta),
+          }),
+          typeof event.step === 'number' ? event.step : undefined,
+        ),
       )
     }
 
     case 'tool.start': {
       const [next, index] = withTurn(base, event.turn ?? 1, at)
       return patchActiveTurn(next, index, (turn) =>
-        upsertTool(turn, event.callId, at, (tool) => ({
-          ...tool,
-          name: asText(event.name) || tool.name,
-          status: 'running',
-          input: event.input ?? tool.input,
-          meta: event.meta ?? tool.meta,
-          startedAt: tool.startedAt ?? at,
-        })),
+        upsertTool(
+          turn,
+          event.callId,
+          at,
+          (tool) => ({
+            ...tool,
+            name: asText(event.name) || tool.name,
+            status: 'running',
+            input: event.input ?? tool.input,
+            meta: event.meta ?? tool.meta,
+            startedAt: tool.startedAt ?? at,
+          }),
+          typeof event.step === 'number' ? event.step : undefined,
+        ),
       )
     }
 
     case 'tool.end': {
       const [next, index] = withTurn(base, event.turn ?? 1, at)
       return patchActiveTurn(next, index, (turn) =>
-        upsertTool(turn, event.callId, at, (tool) => ({
-          ...tool,
-          name: asText(event.name) || tool.name,
-          status: event.isError ? 'error' : 'done',
-          error: asText(event.error) || tool.error,
-          result: asText(event.result) || tool.result,
-          meta: event.meta ?? tool.meta,
-          endedAt: at,
-        })),
+        upsertTool(
+          turn,
+          event.callId,
+          at,
+          (tool) => ({
+            ...tool,
+            name: asText(event.name) || tool.name,
+            status: event.isError ? 'error' : 'done',
+            error: asText(event.error) || tool.error,
+            result: asText(event.result) || tool.result,
+            meta: event.meta ?? tool.meta,
+            endedAt: at,
+          }),
+          typeof event.step === 'number' ? event.step : undefined,
+        ),
       )
     }
 
@@ -260,7 +388,11 @@ export function applyEvent(state: ChatState, event: AgentEvent): ChatState {
       const items = Array.isArray(event.items) ? event.items : []
       const index = lastTurnIndex(base)
       if (index < 0) return base
-      return patchTurn(base, index, (turn) => ({ ...turn, plan: items }))
+      return patchTurn(base, index, (turn) => ({
+        ...turn,
+        plan: items,
+        blocks: ensurePlanBlock(turn.blocks ?? [], at),
+      }))
     }
 
     case 'approval.request': {
@@ -353,7 +485,9 @@ export function applyHistoryEvents(
       while (
         cursor < events.length &&
         events[cursor].type === event.type &&
-        (events[cursor].turn ?? 1) === turn
+        (events[cursor].turn ?? 1) === turn &&
+        // 同一轮里按 step 分批合并，避免把不同步骤的思考段粘成一段。
+        (events[cursor].step ?? 0) === (event.step ?? 0)
       ) {
         last = events[cursor]
         parts.push(asText(last.text))

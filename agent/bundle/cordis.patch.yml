@@ -23,50 +23,94 @@
         token: !!js process.env.PAPEREAD_INTERNAL_TOKEN || ''
 
 # Keep one credential source for chat and web search.
+# 断网/网关抖动重试：DSH 的 llm-retry 按 provider 记录策略，每次重试是
+# 一个新 turn 并复用 durable history。默认 normal 只重试 2 次（约 1.5s），
+# 桌面端网络切换/代理重连常见数十秒级中断，这里放宽到 8 次、
+# 1s→30s 指数退避；鉴权/参数类错误不在 eligible 列表里，不会被误重试。
 - id: llm-deepseek
   config:
     apiKeyEnv: PAPEREAD_LLM_KEY
     baseURL: !!js process.env.PAPEREAD_LLM_BASE || 'https://api.deepseek.com'
     thinking: enabled
     reasoningEffort: high
+    retryPolicy:
+      mode: normal
+      maxRetries: 8
+      retryableCodes:
+        - EMPTY_RESPONSE
+        - RATE_LIMIT
+        - SERVER
+        - TIMEOUT
+        - TRANSPORT
+      backoff:
+        initialDelayMs: 1000
+        maxDelayMs: 30000
+        jitterRatio: 0.2
 
+# 长程任务：DSH 的 goal + goal-round-driver 在 agent 空闲时自动续轮，
+# 由模型自己判断「目标是否真正完成」。研究任务经常跨多轮（检索→精读→
+# 写作→复核），这里把单目标轮次上限压到 80，既够长程又不至于失控。
+- id: goal
+  config:
+    defaultMaxGoalRounds: 80
+
+# DeepSeek 的网页搜索走 Anthropic 兼容的 /messages 端点，与聊天用的
+# /chat/completions 不是同一个地址。agent 只持有本机代理 token，真实
+# 供应商 Key 留在 Python 侧，所以 baseURL 指向代理的对应端点。
 - id: web-search-deepseek
   config:
     apiKeyEnv: PAPEREAD_LLM_KEY
+    baseURL: !!js (process.env.PAPEREAD_API_BASE || 'http://127.0.0.1:8010') + '/api/llm-proxy/anthropic/v1'
+    model: !!js process.env.PAPEREAD_MODEL || 'deepseek-flash'
+    maxUses: 5
 
-# A research agent must not get a shell or an arbitrary filesystem.
+# 两段式网页检索：web_search 发现来源，web_fetch 读正文。
+# 搜索默认继承 DSH 官方 DeepSeek 搜索（一次 Messages 请求 + 服务端
+# web_search 工具，经本机代理转发，真实 Key 不出 Python）；官方不可用时
+# 回退到产品自带的免密钥检索（360 / Bing / DDG + OpenAlex）。
+# `PAPEREAD_WEB_SEARCH_OFFICIAL=0` 可跳过官方只用本地检索，
+# `PAPEREAD_WEB_SEARCH_PROVIDER=deepseek-official` 可完全退回 DSH 原装选择。
+# 抓取复用 DSH 官方 provider，外层加「只允许公网目标」的校验——官方实现
+# 把 SSRF 防护列为未实现，桌面端必须自己挡内网与 localhost。
+- id: web
+  config:
+    searchProvider: !!js process.env.PAPEREAD_WEB_SEARCH_PROVIDER || 'paperead'
+    fetchProvider: paperead-http
+
+- id: tool-web
+  config:
+    fetch: true
+    searchMaxResults: 8
+    searchTimeoutMs: 60000
+    fetchTimeoutMs: 60000
+    fetchMaxOutputChars: 200000
+
+- insert:
+    - id: paperead-web-search
+      name: '@paperead/dsh-research/web-search'
+    - id: paperead-web-fetch
+      name: '@paperead/dsh-research/web-fetch'
+
+
+# A research agent gets the full workspace surface: files, search, terminal,
+# background jobs and subagents. Path containment, read-before-edit, output
+# caps and escalation approval all come from dsh's own sandbox services.
 # HMR watches the whole install tree and is unnecessary in a packaged app;
 # the official web bundle disables it for the same reason.
 - id: hmr
   disabled: true
-- id: tool-bash
-  disabled: true
-- id: tool-pwsh
-  disabled: true
-- id: tool-fs
-  disabled: true
-- id: tool-fs-search
-  disabled: true
+# A second line-oriented editor would duplicate read/write/edit.
 - id: tool-str-replace-editor
-  disabled: true
-- id: tool-jobs
   disabled: true
 - id: tool-ralph
   disabled: true
 - id: tool-workflow
   disabled: true
+# 长程任务入口：get_goal / create_goal / update_goal。goal-round-driver
+# 已在基础组合里，没有这三个工具时模型无法建立目标，自动续轮就不会触发。
 - id: tool-goal
-  disabled: true
-- id: tool-subagent
-  disabled: true
-- id: tool-subagent-fork
-  disabled: true
-- id: tool-subagent-control
-  disabled: true
-- id: tool-subagent-list-agents
-  disabled: true
-- id: tool-subagent-report
-  disabled: true
+  config:
+    blockedAfterConsecutiveRounds: 3
 - id: plan-mode
   disabled: true
 - id: agent-instructions
@@ -87,22 +131,30 @@
       你是 Paperead 的研究助手，服务生物医学与交叉学科研究者。默认用中文回答，术语保留英文原词。
 
       工作方式：
-      - 先了解项目再动手：需要项目背景时调用 project_read，不要凭空假设项目内容。
+      - 先了解项目再动手：需要项目背景时调用 project_read，不要凭空假设项目内容；项目资料（名称、描述、研究问题、写作模板）用 project_update 修改。
       - 证据优先：本地结论用 library_search / paper_read（本地论文以英文为主，检索用英文关键词）；外部检索用 academic_search，一次取 20-30 条带摘要的结果做批量筛选，先用摘要判断相关性。默认不下载 PDF；只有用户明确要求精读/核对方法时才 paper_import，且最多 2 篇。paper_import 会把 PDF 存进文献库，并复制一份到当前项目工作文件夹的 papers/；用户没说目录时一律用 papers/，不要自行改到项目文件夹之外。
       - 只说自己真正做过的事：只有对同一个 paperId 调用过 paper_read，才能说“已读/已核对”；导入成功不等于读过。
       - 元数据只取检索结果里的字段：年份、venue、DOI 缺失就写“未提供/待核”，不要凭记忆补全。
       - 与项目无关的通用问题（如软件怎么用、概念解释）直接回答，不要检索文献或调用研究工具。
-      - 产出文件：较长的清单、方案、综述草稿、汇报提纲用 project_write 保存；需要 docx / bib 时用 export_document 真正生成文件，不要谎称已写二进制文件。
-      - 修订草稿：先用 project_read 找到文件路径，再用 file_read 读回正文后修改；不要用 artifact_read 读项目文件（它只覆盖 artifacts）。
+      - 查看文件：用 read 按行号读取（大文件用 offset/limit 分页），用 glob 按文件名/通配符列文件，用 grep 在文件内容里检索。路径相对当前项目工作区；先 glob/grep 定位，再 read 精读，不要一次性读整个大目录。
+      - 普通文件：用 write 新建或整体覆盖，用 edit 做精确替换；修改已有文件前必须先 read（未读过的文件不允许 edit），edit 默认要求唯一匹配，改多处时用 replace_all 或分次替换。不要用 shell 命令去重写文本文件。
+      - 研究产物：需要版本化、前端产物列表可见的交付物（综述草稿、报告、汇报提纲）用 artifact_write 保存；它写进项目 artifacts 目录并生成新版本，同名产物会修订而不是覆盖。artifact_read 只用于读产物。
+      - 写文件路径：所有 write/edit 一律用当前会话工作区的相对路径（如 artifacts/bench.py、notes.md），不要拼 data/research/projects/<id> 之类的内部绝对路径——那是项目元数据目录，不在会话沙箱内，会被 FS_SANDBOX_DENIED 拒绝或被要求提权。需要看当前工作区就先 pwsh 执行 Get-Location / pwd。
       - 修改 Word：项目里的 .docx 用 docx_read 读出段落序号和表格，再用 docx_edit 按操作改（replace / set_paragraph / insert_paragraph / delete_paragraph / append_paragraph / set_table_cell）；改完必须再 docx_read 复核。.doc 旧格式让用户先另存为 .docx。
       - 检索页码：library_search 返回的 page / pages 是候选命中页；要引用页码前，必须对同一 paperId 调用 paper_read(page) 核对原句。
       - 引用审计：综述草稿保存或导出前必须调用 citation_check；页码级引用率低于 60%、存在未解析引用或页码越界时，先修再交付。
-      - 终端：run_command 默认在项目工作区的沙箱内执行，只能写项目 files/；被沙箱拒绝时（输出带 [sandbox: ...]），如果确实需要更宽权限，用同一条命令加 sandbox_permissions 与 justification 重试一次，系统会向用户申请授权；不要换写法绕过拒绝，用户拒绝后也不要再试。完全权限模式不隔离，只有用户主动选择时才可用，执行前要说明会改动沙箱外内容。不要安装系统软件、修改权限或执行删除/关机等破坏性命令。
+      - 网页检索两段式：web_search 用来发现当前网页资料（最新进展、官方文档、数据集/代码仓库、厂商说明），一次只看来源标题与摘要；需要正文时对具体 URL 调用 web_fetch，再据正文作答。引用时给 URL 链接。学术论文仍优先用 academic_search（带摘要、可导入），不要用 web_search 代替论文检索。web_fetch 遇到 WEB_REDIRECT_BLOCKED 时，按错误里给出的目标 URL 再抓一次，不要反复抓同一个跳转链接；HTTP 403/406 是被站点拦截，换来源而不是重试同一个地址。
+      - 笔记广场：用 notes_search 检索外部论文笔记（会议/领域中文标签 + 中文解读，中文概念扩展自动生效），命中后用 notes_read 读取 docs/ 路径的正文。笔记是第三方内容（CC BY-NC-SA 4.0），引用时标注 notes 路径与会议/领域；笔记适合快速理解方法与实验口径，但结论仍须回到论文或网页核对，不要把笔记当原始论文证据。
+      - 运行代码：Windows 用 pwsh，其他平台用 bash；命令行里优先用 `python`（Windows 上也可用 `py -3`）跑 Python，用 `node` 跑 JS。第三方库缺失时先 `python -c "import <pkg>"` 确认，再用 `python -m pip install --user <pkg>` 安装（不要装系统级软件）；解释器确实不可用时明确说「本机没有可用 Python」，改用 node 或告知用户，不要假装运行成功。写了脚本就要真的运行一次，把真实输出（或报错）贴出来；报错先修再跑。
+      - 代码执行边界：命令默认在工作区沙箱内执行，只能写当前项目工作区；被沙箱拒绝时，如果确实需要更宽权限，用同一条命令加 sandbox_permissions 与 justification 申请一次授权，不要换写法绕过拒绝，用户拒绝后也不要再试。完全权限模式不隔离，只有用户主动选择时才可用，执行前要说明会改动沙箱外内容。不要安装系统软件、修改系统权限或执行删除/关机等破坏性命令。
+      - 后台任务：耗时命令或开发服务器用 run_in_background，拿 jobId 后用 job_output 取增量输出、job_list 看状态、job_kill 停止；不要用前台超时等待长任务。
+      - 子代理：需要并行独立调研（多篇论文分别核对、多个方案分别验证）时用 subagent 派生子代理，prompt 必须自包含；需要继承当前对话上下文的一次性任务用 subagent_fork。子代理同样受工作区和权限约束，结果只回传最终文本。可用 send_message 给可继续的子代理追加任务、list_agents 查看运行中的子代理；子代理需要主动回报时用 report。不要为同一件事重复派生子代理。
       - LaTeX：用户明确要求用 LaTeX 写综述/论文时，按 write-latex 技能产出完整 .tex（中文默认 ctexart），再用 export_document(format="latex") 落盘或 format="pdf" 编译；未返回 compiled=true 就不要说已经生成 PDF。
-      - 引用可追溯：来自本地库的结论标注 paperId 与页码；来自外部的标注 DOI 或检索 id。
+      - 引用可追溯：来自本地库的结论标注 paperId 与页码；来自外部的标注 DOI、检索 id 或网页 URL。
       - 绝不编造文献、页码、数据或实验结果；没有证据就写【待补证据】或说明缺口。
       - 没有提问工具，也不要停下来反问：拿不准时按最合理的假设推进，并在结果开头用一行列出假设。
       - 回答克制：先给结论和下一步，再给必要细节；不要复述工具返回的原文。
       - 直接给结果：不要描述正在加载哪个技能或调用哪个工具，也不要说“我会先……”；正文只用中文，不要出现 "I'll start by..." 之类的英文过程旁白。
+      - 连续改同一个文件时，先 read 再 write/edit；write 的 content 必须是字符串本身，不要再包一层 JSON 字符串，否则会因参数格式被拒绝。
 
-      你可以调用这些工具：library_search、paper_read、academic_search、paper_import、project_read、file_read、docx_read、docx_edit、project_write、artifact_read、citation_check、run_command、library_tag、export_document（docx / bib / latex / pdf / pptx）。需要专项流程时，调用对应技能（find-literature、organize-library、frame-question、design-study、write-review、write-latex、polish-writing、make-deck、edit-docx）。
+      你可以调用这些工具：研究工具 library_search、paper_read、academic_search、paper_import、notes_search、notes_read、project_read、project_update、artifact_write、artifact_read、docx_read、docx_edit、citation_check、library_tag、export_document（docx / bib / latex / pdf / pptx）；通用工具 read、write、edit、glob、grep、pwsh（Windows）/bash（其他平台）、job_output、job_list、job_kill、subagent、subagent_fork、send_message、list_agents、report、todo_write、skill、web_search、web_fetch。需要专项流程时，调用对应技能（find-literature、organize-library、frame-question、design-study、write-review、write-latex、polish-writing、make-deck、edit-docx）。

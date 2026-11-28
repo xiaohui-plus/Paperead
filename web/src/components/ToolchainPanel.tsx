@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { IconCheck, IconDownload, IconRefresh } from './icons'
 
 interface ToolInfo {
@@ -7,43 +7,34 @@ interface ToolInfo {
   version: string
 }
 
+interface DownloadState {
+  status: 'idle' | 'running' | 'done' | 'error'
+  phase?: string
+  percent: number
+  bytes?: number
+  total?: number
+  source?: string
+  error: string
+  installed: boolean
+  version: string
+  threadAlive?: boolean
+}
+
 interface ToolchainStatus {
-  pandoc: ToolInfo
-  pandocDownload: {
-    status: 'idle' | 'running' | 'done' | 'error'
-    percent: number
-    error: string
-    installed: boolean
-    version: string
-  }
-  nodeDownload: {
-    status: 'idle' | 'running' | 'done' | 'error'
-    percent: number
-    error: string
-    installed: boolean
-    version: string
-  }
-  engines: { name: string; path: string; version: string }[]
+  pandoc: ToolInfo & { source?: string }
+  pandocDownload: DownloadState
+  nodeDownload: DownloadState & { usable?: boolean; system?: string }
+  engines: { name: string; path: string; version: string; source?: string }[]
   bibtex: ToolInfo
   /** LaTeX 引擎（MiKTeX 便携版）自动安装：下载 → 安装 → 配置 → 中文支持 */
-  texDownload?: {
-    status: 'idle' | 'running' | 'done' | 'error'
-    phase: string
-    percent: number
-    error: string
-    warning: string
-    installed: boolean
-    version: string
-    bin: string
-  }
+  texDownload?: DownloadState & { phase: string; warning: string; bin: string }
   /** 全局翻译引擎（BabelDOC）：独立于 PDF 导出链，需单独下载 */
-  engineDownload?: {
-    status: 'idle' | 'running' | 'done' | 'error'
-    percent: number
-    error: string
-    installed: boolean
+  engineDownload?: DownloadState & {
     ready: boolean
-    version: string
+    expectedVersion?: string
+    installedVersion?: string
+    upgradeAvailable?: boolean
+    cache_ready?: boolean
   }
   installer: { winget: boolean; package: string }
   ready: boolean
@@ -75,10 +66,41 @@ const TEX_PHASE: Record<string, string> = {
   done: '完成',
 }
 
-function StatusPill({ ok, text }: { ok: boolean; text: string }) {
+const DEP_PHASE: Record<string, string> = {
+  manifest: '获取清单',
+  download: '下载',
+  verify: '校验文件',
+  extract: '解压',
+  done: '完成',
+  error: '失败',
+}
+
+function formatSize(bytes?: number): string {
+  if (!bytes || bytes <= 0) return ''
+  const mb = bytes / (1024 * 1024)
+  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`
+  if (mb >= 1) return `${mb.toFixed(1)} MB`
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`
+}
+
+function progressText(item?: DownloadState): string {
+  if (!item) return ''
+  const parts: string[] = []
+  const phase = DEP_PHASE[item.phase ?? '']
+  if (phase) parts.push(phase)
+  if (item.total && item.bytes) {
+    parts.push(`${formatSize(item.bytes)} / ${formatSize(item.total)}`)
+  } else if (item.bytes) {
+    parts.push(formatSize(item.bytes))
+  }
+  if (item.percent > 0) parts.push(`${item.percent}%`)
+  return parts.join(' · ')
+}
+
+function StatusPill({ ok, text, pending }: { ok: boolean; text: string; pending?: boolean }) {
   return (
-    <span className="toolchain-pill" data-ok={ok}>
-      {ok ? <IconCheck /> : null}
+    <span className="toolchain-pill" data-ok={ok} data-pending={pending ? 'true' : undefined}>
+      {ok && !pending ? <IconCheck /> : null}
       {text}
     </span>
   )
@@ -89,20 +111,26 @@ function ToolRow({
   hint,
   ok,
   detail,
+  pending,
 }: {
   name: string
   hint: string
   ok: boolean
   detail: string
+  pending?: boolean
 }) {
   return (
-    <div className="toolchain-row">
+    <div className="toolchain-row" data-pending={pending ? 'true' : undefined}>
       <div className="toolchain-row-main">
         <b>{name}</b>
         <span>{hint}</span>
         {detail && <code>{detail}</code>}
       </div>
-      <StatusPill ok={ok} text={ok ? '已就绪' : '未检测到'} />
+      <StatusPill
+        ok={ok}
+        pending={pending}
+        text={pending ? '检测中…' : ok ? '已就绪' : '未检测到'}
+      />
     </div>
   )
 }
@@ -119,8 +147,12 @@ export function ToolchainPanel() {
   const [startingNode, setStartingNode] = useState(false)
   const [startingEngine, setStartingEngine] = useState(false)
   const [startingTex, setStartingTex] = useState(false)
+  const inFlight = useRef(false)
 
   const load = useCallback(async (silent = false, refresh = false) => {
+    // 轮询时避免请求堆叠：慢网络下上一轮没回来时跳过这一轮即可。
+    if (silent && inFlight.current) return
+    inFlight.current = true
     if (!silent) setLoading(true)
     try {
       const res = await fetch(`/api/toolchain${refresh ? '?refresh=1' : ''}`)
@@ -130,6 +162,7 @@ export function ToolchainPanel() {
     } catch (e) {
       setError(e instanceof Error ? e.message : '检测失败')
     } finally {
+      inFlight.current = false
       if (!silent) setLoading(false)
     }
   }, [])
@@ -153,7 +186,7 @@ export function ToolchainPanel() {
     ) {
       return
     }
-    const timer = window.setInterval(() => void load(true), 2000)
+    const timer = window.setInterval(() => void load(true), 1500)
     return () => window.clearInterval(timer)
   }, [pandocState, nodeState, engineState, texState, load])
 
@@ -238,11 +271,13 @@ export function ToolchainPanel() {
     }
   }
 
-  const startEngine = async () => {
+  const startEngine = async (force = false) => {
     setStartingEngine(true)
     setError('')
     try {
-      const res = await fetch('/api/toolchain/engine', { method: 'POST' })
+      const res = await fetch(`/api/toolchain/engine${force ? '?force=1' : ''}`, {
+        method: 'POST',
+      })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`)
       await load(true)
@@ -275,10 +310,13 @@ export function ToolchainPanel() {
   const nodeDownload = status?.nodeDownload
   const nodeDownloading = nodeDownload?.status === 'running'
   const engineDownload = status?.engineDownload
-  // 翻译入口只看「有可用引擎」（installed）；ready 表示当前期望版本已升级到位，
-  // 旧版本在时翻译照样能跑，不该在设置页误报「未就绪」。
+  // 翻译入口只看「有可用引擎」（installed）；旧版本在时翻译照样能跑，
+  // 但设置页要能提示「已安装 vA，可升级到 vB」。
   const engineReady = Boolean(engineDownload?.installed || engineDownload?.ready)
   const engineDownloading = engineDownload?.status === 'running'
+  const engineBroken = engineDownload?.status === 'done' && !engineReady
+  const engineUpgrade = Boolean(engineDownload?.installed && engineDownload?.upgradeAvailable)
+  const nodeUsable = Boolean(status?.nodeDownload?.usable || status?.nodeDownload?.installed)
 
   const texDownload = status?.texDownload
   const texDownloading = texDownload?.status === 'running'
@@ -290,10 +328,10 @@ export function ToolchainPanel() {
         <div>
           <h3>写作工具</h3>
           <p>
-            首次启动会自动补齐写作依赖：pandoc（约 24MB）、公式引擎组件（约 32MB）、
-            全局翻译引擎（约 218MB）与 LaTeX 引擎（MiKTeX 便携版，约 250MB），只需一次。
+            首次启动会自动补齐写作与翻译依赖：pandoc（约 24MB）、公式引擎组件（约 32MB）、
+            全局翻译引擎（约 218MB）与 LaTeX 引擎（MiKTeX 便携版，约 250MB）。
             <br />
-            装好后完全离线可用；缺宏包（含中文 ctex）会在导出时自动下载。
+            依赖按顺序下载、失败自动切换备用源，装好后完全离线可用；缺宏包（含中文 ctex）会在导出时自动下载。
           </p>
         </div>
         <button
@@ -305,19 +343,39 @@ export function ToolchainPanel() {
         </button>
       </section>
 
-      {error && <div className="update-error">检测失败：{error}</div>}
+      {error && (
+        <div className="update-error">
+          依赖检测暂时失败：{error}
+          <button className="link-btn" onClick={() => void load(false, true)}>
+            重试
+          </button>
+        </div>
+      )}
 
       <div className="toolchain-list">
         <ToolRow
           name="pandoc"
           hint="Markdown 转 LaTeX"
           ok={Boolean(status?.pandoc.found)}
-          detail={status?.pandoc.version || ''}
+          pending={loading && !status}
+          detail={[
+            status?.pandoc.version,
+            status?.pandoc.source === 'bundled'
+              ? '安装包内置'
+              : status?.pandoc.source === 'downloaded'
+                ? '已下载'
+                : status?.pandoc.source === 'system'
+                  ? '系统 PATH'
+                  : '',
+          ]
+            .filter(Boolean)
+            .join(' · ')}
         />
         <ToolRow
           name="LaTeX 引擎"
           hint="编译 PDF（xelatex / pdflatex / lualatex）"
           ok={Boolean(engine)}
+          pending={loading && !status}
           detail={
             engine
               ? `${engine.name} · ${engine.version}`.trim()
@@ -330,15 +388,19 @@ export function ToolchainPanel() {
           name="BibTeX"
           hint="参考文献排序与格式化"
           ok={Boolean(status?.bibtex.found)}
+          pending={loading && !status}
           detail={status?.bibtex.version || ''}
         />
         <ToolRow
           name="公式引擎"
           hint="MathJax 完整 TeX（node 运行时）"
-          ok={Boolean(status?.nodeDownload?.installed)}
+          ok={nodeUsable}
+          pending={loading && !status}
           detail={
-            status?.nodeDownload?.installed
-              ? `node ${status.nodeDownload.version}`
+            nodeUsable
+              ? status?.nodeDownload?.installed
+                ? `node ${status.nodeDownload.version} · 已下载`
+                : 'node · 系统内置'
               : ''
           }
         />
@@ -346,15 +408,25 @@ export function ToolchainPanel() {
           name="全局翻译引擎"
           hint="BabelDOC 整篇翻译（独立组件，约 218MB）"
           ok={engineReady}
-          detail={
+          pending={loading && !status}
+          detail={[
             engineReady
-              ? engineDownload?.ready
-                ? `v${engineDownload?.version ?? ''}`
-                : '已安装'
+              ? engineUpgrade
+                ? `v${engineDownload?.installedVersion || '?'}（可升级到 v${
+                    engineDownload?.expectedVersion || engineDownload?.version || '?'
+                  }）`
+                : `v${engineDownload?.installedVersion || engineDownload?.version || ''}`
               : engineDownloading
-                ? `下载中 ${engineDownload?.percent ?? 0}%`
-                : ''
-          }
+                ? progressText(engineDownload)
+                : engineBroken
+                  ? '安装完成但校验未通过'
+                  : '',
+            engineReady && engineDownload?.cache_ready === false
+              ? '首次翻译需下载模型'
+              : '',
+          ]
+            .filter(Boolean)
+            .join(' · ')}
         />
       </div>
 
@@ -362,7 +434,7 @@ export function ToolchainPanel() {
         <div className="toolchain-install">
           <p>
             {downloading
-              ? `pandoc 正在后台下载（${download?.percent ?? 0}%），完成后自动可用。`
+              ? `pandoc 正在后台下载（${progressText(download) || '准备中'}），完成后自动可用。`
               : download?.status === 'error'
                 ? `pandoc 下载失败：${download.error || '网络不可用'}`
                 : 'pandoc 用于 DOCX / LaTeX 导出，首次使用前需要下载一次。'}
@@ -386,11 +458,11 @@ export function ToolchainPanel() {
         </div>
       )}
 
-      {status && !status.nodeDownload?.installed && (
+      {status && !nodeUsable && (
         <div className="toolchain-install">
           <p>
             {nodeDownloading
-              ? `公式引擎组件正在后台下载（${nodeDownload?.percent ?? 0}%），完成后自动启用。`
+              ? `公式引擎组件正在后台下载（${progressText(nodeDownload) || '准备中'}），完成后自动启用。`
               : nodeDownload?.status === 'error'
                 ? `公式引擎组件下载失败：${nodeDownload.error || '网络不可用'}`
                 : '公式排版需要 node 运行时（约 32MB），首次启动会自动下载，之后离线可用。'}
@@ -418,29 +490,32 @@ export function ToolchainPanel() {
         <div className="toolchain-install">
           <p>
             {engineDownloading
-              ? `全局翻译引擎正在后台下载（${engineDownload?.percent ?? 0}%），完成后「译文 / 对照」会自动开始翻译。`
-              : engineDownload?.status === 'error'
-                ? `全局翻译引擎下载失败：${engineDownload?.error || '网络不可用'}`
-                : '整篇翻译需要首次联网下载 BabelDOC 引擎（约 218MB），之后离线可用。'}
+              ? `全局翻译引擎正在后台下载（${progressText(engineDownload) || '准备中'}），完成后「译文 / 对照」会自动开始翻译。`
+              : engineBroken
+                ? '翻译引擎已下载完成，但启动文件校验未通过（解压不完整或被安全软件拦截），请重新安装。'
+                : engineDownload?.status === 'error'
+                  ? `全局翻译引擎下载失败：${engineDownload?.error || '网络不可用'}`
+                  : '整篇翻译需要首次联网下载 BabelDOC 引擎（约 218MB），之后离线可用。'}
           </p>
-          {engineDownloading && (
+          {(engineDownloading || engineBroken) && (
             <div className="storage-progress">
               <div className="storage-progress-track">
                 <span
                   className="storage-progress-fill"
-                  style={{ width: `${Math.max(2, engineDownload?.percent ?? 0)}%` }}
+                  style={{ width: `${Math.max(2, engineBroken ? 100 : (engineDownload?.percent ?? 0))}%` }}
+
                 />
               </div>
               <div className="storage-progress-meta">
-                <span>正在下载翻译引擎</span>
-                <span>{engineDownload?.percent ?? 0}%</span>
+                <span>{engineBroken ? '安装校验未通过' : '正在下载翻译引擎'}</span>
+                <span>{engineBroken ? '需重试' : `${engineDownload?.percent ?? 0}%`}</span>
               </div>
             </div>
           )}
           <div className="toolchain-actions">
             <button
               className="btn primary"
-              onClick={() => void startEngine()}
+              onClick={() => void startEngine(engineBroken)}
               disabled={engineDownloading || startingEngine}
             >
               <IconDownload />
@@ -448,9 +523,33 @@ export function ToolchainPanel() {
                 ? `正在下载 ${engineDownload?.percent ?? 0}%`
                 : startingEngine
                   ? '正在启动…'
-                  : engineDownload?.status === 'error'
-                    ? '重试下载翻译引擎'
-                    : '下载翻译引擎'}
+                  : engineBroken
+                    ? '重新安装翻译引擎'
+                    : engineDownload?.status === 'error'
+                      ? '重试下载翻译引擎'
+                      : '下载翻译引擎'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {engineReady && engineUpgrade && (
+        <div className="toolchain-install">
+          <p>
+            {engineDownloading
+              ? `正在下载新版本（${progressText(engineDownload) || '准备中'}），当前引擎仍可正常使用。`
+              : `当前使用 v${engineDownload?.installedVersion || '旧版本'}，可升级到 v${
+                  engineDownload?.expectedVersion || engineDownload?.version || '新版本'
+                }。升级下载约 218MB，不影响当前翻译。`}
+          </p>
+          <div className="toolchain-actions">
+            <button
+              className="btn small ghost"
+              onClick={() => void startEngine(true)}
+              disabled={engineDownloading || startingEngine}
+            >
+              <IconDownload />
+              {engineDownloading ? '正在下载…' : '升级翻译引擎'}
             </button>
           </div>
         </div>

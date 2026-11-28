@@ -81,3 +81,51 @@ def test_toolchain_exposes_tex_download(
     assert tex["status"] in {"idle", "running", "done", "error"}
     assert "percent" in tex
     assert "installed" in tex
+
+def test_toolchain_route_ok_when_cache_missing_but_pandoc_downloaded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """首装后 pandoc 已下载、自检缓存还是空的：不能因 data=None 抛 500。
+
+    旧逻辑 ``stale_pandoc = download.installed and not data.get(...)`` 在
+    ``data`` 为 None 时直接 AttributeError，用户点「检查依赖」就只看到 HTTP 500。
+    """
+    monkeypatch.setenv("PAPEREAD_TOKEN", "deps-token")
+    monkeypatch.setenv("PAPEREAD_DATA", str(tmp_path / "data"))
+    monkeypatch.setenv("PAPEREAD_MOCK", "1")
+
+    from server import toolchain_api
+    from server.research import pandoc_setup
+
+    toolchain_api._CACHE = None
+    exe = pandoc_setup.install_dir() / "pandoc.exe"
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    exe.write_bytes(b"stub")
+
+    import server.main as main
+
+    importlib.reload(main)
+    client = TestClient(main.app)
+    try:
+        res = client.get("/api/toolchain", headers={"X-Paperead-Token": "deps-token"})
+    finally:
+        toolchain_api._CACHE = None
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["pandocDownload"]["installed"] is True
+    assert "engineDownload" in body
+
+
+def test_safe_status_degrades_single_component() -> None:
+    """单个依赖探测异常只降级该组件，不让整页 500。"""
+    from server import toolchain_api
+
+    def boom() -> dict:
+        raise RuntimeError("probe failed")
+
+    data = toolchain_api._safe_status(boom, toolchain_api._download_default())
+
+    assert data["status"] == "idle"
+    assert data["installed"] is False
+    assert "probe failed" in data["error"]

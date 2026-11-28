@@ -2205,6 +2205,7 @@ html[data-sidebar='collapsed'] .library {
 }
 
 .folder-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2238,6 +2239,56 @@ html[data-sidebar='collapsed'] .library {
 .folder-row[data-drop='true'] {
   background: var(--blue-soft);
   box-shadow: inset 0 0 0 1px var(--blue-line);
+}
+
+/* 拖拽中：可接收的文件夹给一个克制轮廓，目标行才用实心高亮 */
+.folder-row[data-can-drop='true']:not([data-drop='true']) {
+  box-shadow: inset 0 0 0 1px var(--line-2);
+}
+
+.folder-row[data-can-drop='true']:not([data-drop='true']) .folder-icon {
+  color: var(--blue);
+}
+
+.folder-spring {
+  position: absolute;
+  left: 7px;
+  right: 7px;
+  bottom: 3px;
+  height: 2px;
+  border-radius: 99px;
+  background: var(--bg-soft);
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.folder-spring i {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--blue);
+  animation: folder-spring-fill 0.62s linear forwards;
+}
+
+@keyframes folder-spring-fill {
+  to {
+    width: 100%;
+  }
+}
+
+.folder-row[data-springing='true'] .folder-icon {
+  animation: folder-spring-icon 0.62s ease-in-out;
+}
+
+@keyframes folder-spring-icon {
+  0%,
+  100% {
+    transform: none;
+  }
+  50% {
+    transform: translateY(-1px) scale(1.08);
+  }
 }
 
 .folder-icon {
@@ -2433,8 +2484,15 @@ html[data-sidebar='collapsed'] .library {
 }
 
 .library-main {
+  position: relative;
   overflow-y: auto;
   padding: 28px 36px 80px;
+  transition: background 0.16s ease, box-shadow 0.16s ease;
+}
+
+.library-main[data-drop='true'] {
+  background: rgba(76, 156, 232, 0.035);
+  box-shadow: inset 0 0 0 2px var(--blue-line);
 }
 
 .library-head {
@@ -2972,9 +3030,116 @@ html[data-sidebar='collapsed'] .library {
   color: var(--faint);
 }
 
+.paper-card[draggable='true'] {
+  cursor: grab;
+}
+
+.paper-card[draggable='true']:active {
+  cursor: grabbing;
+}
+
 .paper-card[data-dragging='true'] {
-  opacity: 0.55;
-  transform: scale(0.985);
+  opacity: 0.32;
+  transform: scale(0.98);
+  border-style: dashed;
+  border-color: var(--blue-line);
+  box-shadow: none;
+}
+
+/* 排序拖拽：落点线画在卡片外侧（overflow:hidden 不影响 box-shadow） */
+.paper-card[data-insert='before'] {
+  box-shadow: -5px 0 0 -1px var(--blue);
+}
+
+.paper-card[data-insert='after'] {
+  box-shadow: 5px 0 0 -1px var(--blue);
+}
+
+.paper-grid.is-list .paper-card[data-insert='before'] {
+  box-shadow: 0 -5px 0 -1px var(--blue);
+}
+
+.paper-grid.is-list .paper-card[data-insert='after'] {
+  box-shadow: 0 5px 0 -1px var(--blue);
+}
+
+/* 拖动时跟随光标的紧凑卡片 */
+.paper-drag-ghost {
+  position: absolute;
+  top: -1000px;
+  left: -1000px;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 240px;
+  padding: 9px;
+  border: 1px solid var(--blue-line);
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 16px 40px rgba(20, 80, 140, 0.22);
+  pointer-events: none;
+}
+
+.paper-drag-ghost-cover {
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 54px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: linear-gradient(135deg, #eef5fd 0%, #d8e7f8 100%);
+  color: var(--faint);
+  font-size: 9px;
+  letter-spacing: 0.5px;
+}
+
+.paper-drag-ghost-cover img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #fff;
+}
+
+.paper-drag-ghost-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.paper-drag-ghost-body b {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+.paper-drag-ghost-body span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.paper-drag-ghost-handle {
+  flex: none;
+  margin-left: auto;
+  width: 3px;
+  height: 26px;
+  border-radius: 99px;
+  background: var(--line-2);
+  box-shadow: 6px 0 0 var(--line-2);
 }
 
 .folder-out-rail {
@@ -3087,9 +3252,16 @@ html[data-sidebar='collapsed'] .library {
   .folder-icon,
   .folder-out-rail,
   .folder-out-progress i,
-  .paper-grid.is-switching {
+  .paper-grid.is-switching,
+  .library-main {
     animation: none !important;
     transition: none !important;
+  }
+
+  /* 不开动画时让悬停进度条直接显示为「已就绪」 */
+  .folder-spring i {
+    animation: none !important;
+    width: 100%;
   }
 
   /* 无法播放闪烁时改成一次性描边，仍能看出定位到了哪一条 */
@@ -12460,7 +12632,7 @@ html[data-scanning='1'] #root .scan-overlay * {
   font-size: 13.5px;
 }
 
-.chat .turn-block .tool-row > summary {
+.chat .turn-block .tool-row > .tool-row-head {
   gap: 5px;
   padding: 1px 5px;
   font-size: 13px;

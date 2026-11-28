@@ -181,3 +181,42 @@ def test_set_node_path_registers_and_resets_probe(
         mathjax_render._NODE_EXE = mathjax_render._UNSET
         mathjax_render._AVAILABLE = None
         mathjax_render._AVAILABLE_AT = 0.0
+
+def test_status_reports_usable_with_system_node(
+    monkeypatch: pytest.MonkeyPatch, isolated: Path
+) -> None:
+    """系统/内置 node 也算可用：设置页不能显示「未安装」却实际能排版公式。"""
+    fake = isolated / "system" / "node.exe"
+    monkeypatch.setattr(node_setup, "installed_exe", lambda: None)
+    monkeypatch.setattr(node_setup, "system_exe", lambda: fake)
+
+    state = node_setup.status()
+
+    assert state["installed"] is False
+    assert state["usable"] is True
+    assert state["system"] == str(fake)
+
+
+def test_start_if_missing_skips_download_when_system_node_exists(
+    monkeypatch: pytest.MonkeyPatch, isolated: Path
+) -> None:
+    """本机已有 node 时不要再下载 32MB 精简包。"""
+    from paperead import mathjax_render
+
+    fake = isolated / "system" / "node.exe"
+    fake.parent.mkdir(parents=True, exist_ok=True)
+    fake.write_bytes(b"")
+    monkeypatch.setattr(node_setup, "installed_exe", lambda: None)
+    monkeypatch.setattr(node_setup, "system_exe", lambda: fake)
+    started: list[str] = []
+    registered: list[str] = []
+    monkeypatch.setattr(node_setup, "start", lambda: started.append("start"))
+    monkeypatch.setattr(
+        mathjax_render, "set_node_path", lambda path: registered.append(path)
+    )
+
+    node_setup.start_if_missing()
+
+    assert started == []
+    assert registered == [str(fake)]
+    assert node_setup.status()["status"] == "done"

@@ -55,8 +55,10 @@ if (-not (Test-Path "src-tauri\resources\paperead-server\paperead-server.exe")) 
 if (-not (Test-Path "src-tauri\resources\agent\src\bin.mjs")) {
     $errors += "缺少已 stage 的 agent 资源"
 }
-if (-not (Test-Path "src-tauri\resources\agent\node.exe")) {
-    $errors += "agent 缺少内置 node.exe"
+# node 运行时不再内置（约 86MB），首次启动由 Python 侧后台下载、桌面壳等待就绪。
+# 这里只确认 stage 阶段没有把 node.exe 又打回安装包，避免包体悄悄反弹。
+if (Test-Path "src-tauri\resources\agent\node.exe") {
+    $errors += "agent 仍内置 node.exe：安装包会重新逼近 100MB 上限，请运行 scripts\stage-agent.ps1"
 }
 if (-not (Test-Path "src-tauri\resources\browser-extension\chrome-mv3\manifest.json")) {
     $errors += "缺少内置浏览器扩展（先运行 scripts\stage-extension.ps1）"
@@ -68,6 +70,11 @@ if (-not (Test-Path "src-tauri\resources\browser-extension\firefox-mv2\manifest.
 if (Test-Path $installer) {
     $actual = (Get-Item $installer).VersionInfo.FileVersion
     if ($actual -ne $version) { $errors += "安装包版本 $actual != $version" }
+    $sizeMb = [math]::Round((Get-Item $installer).Length / 1MB, 2)
+    Write-Host "安装包体积：$sizeMb MB"
+    if ((Get-Item $installer).Length -gt 104857600) {
+        $errors += "安装包超过 Gitee 100MB 单附件上限（$sizeMb MB）"
+    }
 
     # 签名只做提示不做拦截：SignPath 获批前本地包必然是未签名的
     $auth = Get-AuthenticodeSignature -LiteralPath $installer

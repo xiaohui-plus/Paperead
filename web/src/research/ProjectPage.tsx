@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
 import {
   IconBack,
   IconChat,
@@ -50,6 +58,25 @@ interface Props {
 }
 
 type Tab = 'files' | 'sessions'
+
+const RAIL_MIN = 220
+const RAIL_MAX = 520
+const RAIL_DEFAULT = 272
+const RAIL_STORAGE_KEY = 'paperead:project-rail-width'
+
+function clampRail(width: number): number {
+  return Math.min(RAIL_MAX, Math.max(RAIL_MIN, Math.round(width)))
+}
+
+function initialRailWidth(): number {
+  try {
+    const saved = Number(localStorage.getItem(RAIL_STORAGE_KEY))
+    if (Number.isFinite(saved) && saved > 0) return clampRail(saved)
+  } catch {
+    /* localStorage 不可用时用默认宽度 */
+  }
+  return RAIL_DEFAULT
+}
 
 /** 产物在资源管理器里挂在虚拟「产物」文件夹下，与普通文件共用同一棵树。 */
 const ARTIFACT_FOLDER_ID = 'artifact-root'
@@ -111,6 +138,8 @@ export function ProjectPage({
   const [tab, setTab] = useState<Tab>('sessions')
   // 手机端：文件/会话栏是抽屉，默认收起，把高度留给会话正文
   const [railOpen, setRailOpen] = useState(false)
+  const [railWidth, setRailWidth] = useState(initialRailWidth)
+  const resizeStart = useRef<{ x: number; width: number } | null>(null)
   const [preview, setPreview] = useState<ProjectFile | null>(null)
   const [previewArtifact, setPreviewArtifact] = useState<ArtifactSummary | null>(null)
   const [localPreview, setLocalPreview] = useState<{
@@ -718,8 +747,59 @@ export function ProjectPage({
     )
   }
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(RAIL_STORAGE_KEY, String(railWidth))
+    } catch {
+      /* 隐私模式等场景下只保留本次会话内的宽度 */
+    }
+  }, [railWidth])
+
+  const beginRailResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    resizeStart.current = { x: event.clientX, width: railWidth }
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId)
+    } catch {
+      /* 合成事件或指针已失效时仍靠 pointermove 更新 */
+    }
+    document.body.classList.add('is-resizing-rail')
+  }
+
+  const moveRailResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const start = resizeStart.current
+    if (!start) return
+    setRailWidth(clampRail(start.width + event.clientX - start.x))
+  }
+
+  const endRailResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!resizeStart.current) return
+    resizeStart.current = null
+    document.body.classList.remove('is-resizing-rail')
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    } catch {
+      /* 指针已释放 */
+    }
+  }
+
+  const nudgeRail = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      event.preventDefault()
+      const delta = event.key === 'ArrowLeft' ? -16 : 16
+      setRailWidth((width) => clampRail(width + delta))
+    } else if (event.key === 'Home') {
+      event.preventDefault()
+      setRailWidth(RAIL_DEFAULT)
+    }
+  }
+
   return (
-    <div className="project-page">
+    <div
+      className="project-page"
+      style={{ '--project-rail-width': `${railWidth}px` } as CSSProperties}
+    >
       <header className="project-head">
         <button className="project-back" onClick={back} title="返回">
           <IconBack />
@@ -1092,6 +1172,23 @@ export function ProjectPage({
               )}
             </div>
           )}
+        <div
+          className="project-rail-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="调整文件与会话栏宽度"
+          title="拖动调整宽度，双击复位"
+          aria-valuemin={RAIL_MIN}
+          aria-valuemax={RAIL_MAX}
+          aria-valuenow={railWidth}
+          tabIndex={0}
+          onPointerDown={beginRailResize}
+          onPointerMove={moveRailResize}
+          onPointerUp={endRailResize}
+          onPointerCancel={endRailResize}
+          onDoubleClick={() => setRailWidth(RAIL_DEFAULT)}
+          onKeyDown={nudgeRail}
+        />
         </aside>
 
         <section className="project-main">

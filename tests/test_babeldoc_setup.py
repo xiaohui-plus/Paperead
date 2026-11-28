@@ -144,3 +144,68 @@ def test_auto_download_is_skipped_in_mock(monkeypatch: pytest.MonkeyPatch) -> No
     babeldoc_setup.start_if_missing()
 
     assert babeldoc_setup._STATE["status"] == "idle"
+
+def test_install_manifest_version_mismatch_still_lands_on_expected_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """清单版本与 ENGINE_VERSION 漂移时，仍装到期望目录。
+
+    旧逻辑按清单版本命名目录、就绪判断却只认 ENGINE_VERSION，导致下载完成后
+    ``ready`` 永远为 False，每次启动重复下载同一份引擎，用户看到「装好了却
+    始终没完成依赖」。
+    """
+    data = _fake_zip()
+    release, manifest = _release(tmp_path, data)
+    monkeypatch.setenv("PAPEREAD_DATA", str(tmp_path / "data"))
+    monkeypatch.delenv("PAPEREAD_BABELDOC_HOME", raising=False)
+    manifest["version"] = "0.7.2"
+    babeldoc_setup._STATE.update(status="idle", percent=0, error="", startedAt=0, finishedAt=0)
+
+    target = babeldoc_setup._install(manifest, release.as_uri())
+
+    assert target == babeldoc_setup.install_dir()
+    state = babeldoc_setup.status()
+    assert state["installedVersion"] == babeldoc_setup.ENGINE_VERSION
+    assert state["ready"] is True
+
+
+def test_ready_accepts_older_installed_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """旧版本目录可用时不再重复下载；只提示可升级。"""
+    monkeypatch.setenv("PAPEREAD_DATA", str(tmp_path / "data"))
+    monkeypatch.delenv("PAPEREAD_BABELDOC_HOME", raising=False)
+    old = babeldoc_setup.babeldoc_engine.engine_root() / "0.7.0"
+    (old / "python").mkdir(parents=True)
+    (old / "python" / "python.exe").write_bytes(b"stub")
+    (old / "run_babeldoc.py").write_text("print('x')\n", encoding="utf-8")
+
+    state = babeldoc_setup.status()
+
+    assert state["installed"] is True
+    assert state["ready"] is True
+    assert state["installedVersion"] == "0.7.0"
+    assert state["upgradeAvailable"] is True
+
+
+def test_status_recovers_dead_running_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """线程已退出但状态还停在 running 时，界面不能永远转圈。"""
+    import threading
+
+    monkeypatch.setenv("PAPEREAD_DATA", str(tmp_path / "data"))
+    done = threading.Thread(target=lambda: None)
+    done.start()
+    done.join()
+    babeldoc_setup._THREAD = done
+    babeldoc_setup._STATE.update(status="running", phase="download", percent=42)
+    try:
+        state = babeldoc_setup.status()
+    finally:
+        babeldoc_setup._THREAD = None
+        babeldoc_setup._STATE.update(status="idle", phase="", percent=0, error="")
+
+    assert state["status"] == "error"
+    assert state["threadAlive"] is False
+    assert "线程" in state["error"]

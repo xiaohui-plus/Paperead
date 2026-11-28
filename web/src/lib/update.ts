@@ -2,6 +2,8 @@
 
 import webPackage from '../../package.json'
 
+export { mergeInstallProgress } from './updateProgress'
+
 /**
  * 前端构建自带的版本号。
  * 网页端（没有 Tauri、后端也没起）时用它兜底，避免设置页显示上次检查缓存里的旧版本。
@@ -60,6 +62,11 @@ export interface UpdateProgress {
   total?: number
   percent?: number
   message?: string
+  /**
+   * 事件来源：manual（设置页主动更新）、menu（帮助菜单）、background（后台预下载）。
+   * 设置页只消费 manual，避免后台下载的进度把正在显示的进度条拉回去。
+   */
+  source?: 'manual' | 'menu' | 'background' | string
 }
 
 const UPDATE_PROGRESS_EVENT = 'paperead:update-progress'
@@ -317,7 +324,11 @@ export async function installUpdateInApp(
   let launched = false
   let launchedVersion = ''
   const unlisten = await watchUpdateProgress((progress) => {
-    if (progress.stage === 'launching') {
+    // 帮助菜单或后台预下载的 launching 不代表本次设置页发起的安装已完成。
+    if (
+      progress.stage === 'launching' &&
+      (!progress.source || progress.source === 'manual')
+    ) {
       launched = true
       launchedVersion = String(progress.version || '')
     }

@@ -9,15 +9,17 @@
     paper_import     POST /internal/research/scholar/import
                      POST /internal/research/sessions/{id}/papers/import
     project_read     GET  /internal/research/sessions/{id}/project
-    project_write    PATCH /internal/research/sessions/{id}/project
-                     POST /internal/research/sessions/{id}/files
-                     POST /internal/research/sessions/{id}/artifacts
+    project_update   PATCH /internal/research/sessions/{id}/project
+    artifact_write   POST /internal/research/sessions/{id}/artifacts
     artifact_read    GET  /internal/research/sessions/{id}/artifacts
                      GET  /internal/research/artifacts/{artifactId}
     library_tag      GET  /internal/research/library/papers
                      PUT  /internal/research/papers/{paperId}/tags
     docx_read        GET  /internal/research/sessions/{id}/docx
     docx_edit        POST /internal/research/sessions/{id}/docx
+
+普通工作区文件的查看/编辑/搜索由 dsh 的 read/write/edit/glob/grep 直接完成，
+不再经过 /files；该接口保留给产品侧的文本读写与兼容旧调用。
 """
 
 from __future__ import annotations
@@ -37,6 +39,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from paperead.scholar import search as scholar_search
 from paperead.scholar.cite import build_bibtex
+from paperead.tutor import web as web_search
+from server.notes_api import _mirror_description, _parse_online
 from paperead.scholar.http import FriendlyError
 from paperead.scholar.models import paper_from_dict
 from paperead.scholar.search import SOURCE_KEYS, SearchInput
@@ -175,6 +179,22 @@ class RunIn(BaseModel):
     command: str
     cwd: str | None = None
     timeout_ms: int | None = Field(default=120_000, alias="timeoutMs")
+
+
+class WebSearchIn(BaseModel):
+    query: str = Field(..., min_length=1, max_length=400)
+    limit: int = Field(default=6, ge=1, le=12)
+
+
+class NotesSearchIn(BaseModel):
+    query: str = Field(..., min_length=1, max_length=200)
+    conference: str = ""
+    field: str = ""
+    limit: int = Field(default=12, ge=1, le=40)
+
+
+class NotesReadIn(BaseModel):
+    path: str = Field(..., min_length=5, max_length=500)
 
 
 class ExportIn(BaseModel):
@@ -957,6 +977,9 @@ def build_router(
     library: Any,
     add_pdf: Callable[[str, bytes, dict[str, Any]], dict[str, Any]],
     public: Callable[[dict[str, Any]], dict[str, Any]],
+    catalog: Any = None,
+    mirror: Any = None,
+    note_store: Any = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/internal/research", tags=["research-internal-tools"])
 
@@ -1028,6 +1051,162 @@ def build_router(
             "translated": translated,
             "notice": notice,
             "error": None,
+        }
+
+    @router.post("/web-search")
+    async def web_search_endpoint(
+        body: WebSearchIn,
+        x_internal_token: str | None = Header(default=None, alias="x-internal-token"),
+    ) -> dict[str, Any]:
+        """网页检索：复用阅读问答的免密钥检索（360 / Bing / DDG + OpenAlex）。
+
+        agent 的 web_search provider 调这里，而不是让模型直接连某个搜索
+        供应商；这样搜索源、超时与去重都由产品侧统一控制，也不额外消耗
+        一次模型请求。
+        """
+        _check(x_internal_token)
+        query = body.query.strip()
+        try:
+            items = await web_search.search_many(
+                [query],
+                limit=body.limit,
+                total_limit=body.limit,
+                academic=True,
+                academic_query=query,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"网页检索失败：{exc}") from exc
+        if not items:
+            try:
+                items = await web_search.search(query, body.limit)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=502, detail=f"网页检索失败：{exc}") from exc
+
+        sources: list[dict[str, str]] = []
+        for item in items[: body.limit]:
+            url = str(item.get("url") or "").strip()
+            if not url:
+                continue
+            sources.append(
+                {
+                    "url": url,
+                    "title": str(item.get("title") or ""),
+                    "snippet": str(item.get("content") or item.get("snippet") or ""),
+                    "publishedAt": str(
+                        item.get("published") or item.get("publishedAt") or item.get("year") or ""
+                    ),
+                }
+            )
+        return {"sources": sources, "count": len(sources)}
+
+    # ── 笔记广场（外部论文笔记） ───────────────────────
+
+    def _note_markdown(blocks: Any) -> str:
+        parts: list[str] = []
+        for block in blocks or []:
+            if not isinstance(block, dict):
+                continue
+            kind = str(block.get("kind") or "")
+            text = str(block.get("text") or "").strip()
+            if kind == "table":
+                html = str(block.get("table_html") or "").strip()
+                if html:
+                    parts.append(html)
+                    continue
+            if not text:
+                continue
+            if kind == "title":
+                parts.append(f"# {text}")
+            elif kind == "heading":
+                try:
+                    level = int(block.get("level") or 2)
+                except (TypeError, ValueError):
+                    level = 2
+                level = max(2, min(level, 6))
+                parts.append(f"{'#' * level} {text}")
+            elif kind == "equation":
+                latex = str(block.get("latex") or text).strip()
+                parts.append(f"$$\n{latex}\n$$")
+            else:
+                parts.append(text)
+        return "\n\n".join(parts)
+
+    @router.post("/notes/search")
+    def notes_search(
+        body: NotesSearchIn,
+        x_internal_token: str | None = Header(default=None, alias="x-internal-token"),
+    ) -> dict[str, Any]:
+        """笔记广场检索：概念扩展 + 会议/领域筛选，返回标题与中文解读。"""
+        _check(x_internal_token)
+        if catalog is None:
+            raise HTTPException(status_code=503, detail="笔记目录未启用")
+        catalog.ensure()
+        data = catalog.list(
+            conference=body.conference,
+            field=body.field,
+            query=body.query,
+            limit=body.limit,
+            offset=0,
+        )
+        items: list[dict[str, Any]] = []
+        for row in data.get("items") or []:
+            path = str(row.get("path") or "")
+            if not path:
+                continue
+            description = catalog.description_of(path)
+            if not description:
+                description = _mirror_description(path, mirror) or ""
+            items.append(
+                {
+                    "path": path,
+                    "title": str(row.get("title") or ""),
+                    "conference": str(row.get("conference") or ""),
+                    "field": str(row.get("field") or ""),
+                    "label": str(row.get("label") or ""),
+                    "description": description,
+                }
+            )
+        return {
+            "query": body.query,
+            "matched": int(data.get("matched") or 0),
+            "items": items,
+            "queryPlan": data.get("query") or {},
+        }
+
+    @router.post("/notes/read")
+    def notes_read(
+        body: NotesReadIn,
+        x_internal_token: str | None = Header(default=None, alias="x-internal-token"),
+    ) -> dict[str, Any]:
+        """读取单篇笔记正文（优先本地镜像/缓存，返回 Markdown）。"""
+        _check(x_internal_token)
+        path = body.path.strip()
+        if not path.startswith("docs/") or not path.endswith(".md") or ".." in path:
+            raise HTTPException(status_code=400, detail="笔记路径不合法")
+        rel = path[len("docs/") :]
+        cached = note_store.get(note_store.note_id(rel)) if note_store is not None else None
+        if cached and cached.get("blocks"):
+            note = cached
+            source = "cache"
+        else:
+            parsed = _parse_online(path, mirror)
+            if note_store is not None:
+                try:
+                    note_store.upsert(parsed)
+                except OSError:
+                    pass
+            note = parsed.to_dict()
+            source = "mirror" if mirror is not None else "online"
+        markdown = _note_markdown(note.get("blocks"))
+        limit = 30000
+        truncated = len(markdown) > limit
+        return {
+            "path": path,
+            "title": str(note.get("title") or ""),
+            "description": str(note.get("description") or ""),
+            "markdown": markdown[:limit],
+            "truncated": truncated,
+            "source": source,
         }
 
     @router.post("/scholar/import")

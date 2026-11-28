@@ -14,8 +14,8 @@ export interface StreamHandlers {
 const IDLE_TIMEOUT = 75_000
 const MAX_BACKOFF = 15_000
 
-export function streamSessionEvents(
-  sessionId: string,
+function createStream(
+  urlFor: (cursor: number) => string,
   after: number,
   handlers: StreamHandlers,
 ): () => void {
@@ -71,10 +71,10 @@ export function streamSessionEvents(
     armIdle()
     let buffer = ''
     try {
-      const response = await fetch(
-        `/api/research/sessions/${encodeURIComponent(sessionId)}/events?after=${cursor}`,
-        { signal: controller.signal, headers: { Accept: 'text/event-stream' } },
-      )
+      const response = await fetch(urlFor(cursor), {
+        signal: controller.signal,
+        headers: { Accept: 'text/event-stream' },
+      })
       if (!response.ok) {
         const data = (await response.json().catch(() => ({}))) as { detail?: string }
         throw new Error(data.detail || `连接失败（HTTP ${response.status}）`)
@@ -128,4 +128,31 @@ export function streamSessionEvents(
     clearIdle()
     if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer)
   }
+}
+/** 父会话：落库事件 + 历史回放。 */
+export function streamSessionEvents(
+  sessionId: string,
+  after: number,
+  handlers: StreamHandlers,
+): () => void {
+  return createStream(
+    (cursor) =>
+      `/api/research/sessions/${encodeURIComponent(sessionId)}/events?after=${cursor}`,
+    after,
+    handlers,
+  )
+}
+
+/** 子代理会话：agent 内部 session，不在产品库里，直接订阅实时 SSE。 */
+export function streamSubagentEvents(
+  subagentId: string,
+  after: number,
+  handlers: StreamHandlers,
+): () => void {
+  return createStream(
+    (cursor) =>
+      `/api/research/sessions/${encodeURIComponent(subagentId)}/events/live?after=${cursor}`,
+    after,
+    handlers,
+  )
 }

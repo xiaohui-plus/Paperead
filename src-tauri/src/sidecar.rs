@@ -63,6 +63,9 @@ impl Sidecar {
             .env("PAPEREAD_PORT", port.to_string())
             .env("PAPEREAD_DATA", &data_dir)
             .env("PAPEREAD_TOKEN", &token)
+            // 研究 agent 调 /internal/research/* 的共享凭据：Python 与 agent
+            // 必须一致；缺失时内部接口只对本机放行，不能让同网段直接读写项目。
+            .env("PAPEREAD_INTERNAL_TOKEN", &token)
             // 局域网开放：手机扫「设置 → 设备同步」的二维码后要能连上这台电脑。
             // 所有 /api 请求仍要求随机 token（二维码里带的那个），同网段设备拿不到 token。
             .env("PAPEREAD_HOST", "0.0.0.0")

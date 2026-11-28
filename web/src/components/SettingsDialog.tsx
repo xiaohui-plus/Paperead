@@ -9,6 +9,7 @@ import {
   isAndroidApp,
   isNewerVersion,
   loadUpdateCache,
+  mergeInstallProgress,
   parseUpdateNotes,
   UPDATE_RECHECK_MS,
   type UpdateInfo,
@@ -439,7 +440,10 @@ export function SettingsDialog({
     setInstallError('')
     setInstallProgress({ stage: 'checking', message: '正在检查更新…' })
     const report = (progress: UpdateProgress) => {
-      setInstallProgress(progress)
+      // 只消费本次主动更新产生的事件：后台预下载与帮助菜单也会广播同一事件，
+      // 混进来会让百分比在两个下载链路之间来回跳。
+      if (progress.source && progress.source !== 'manual') return
+      setInstallProgress((prev) => mergeInstallProgress(prev, progress))
       if (progress.stage === 'failed' && progress.message) {
         setInstallError(progress.message)
       }

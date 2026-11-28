@@ -6,9 +6,16 @@ import { TurnBlock } from './TurnBlock'
 
 /** 超过约 10 行就折起，避免用户粘贴长提示时把会话流撑得很长。 */
 const COLLAPSED_HEIGHT = 180
+/** 分栏/窗口拉窄后字号换行变多，阈值同步收紧，尽量少占竖向空间。 */
+const NARROW_COLLAPSED_HEIGHT = 132
+
+function collapsedHeight(width: number): number {
+  return width > 0 && width < 560 ? NARROW_COLLAPSED_HEIGHT : COLLAPSED_HEIGHT
+}
 
 function MessageBubble({ text }: { text: string }) {
   const bubble = useRef<HTMLDivElement>(null)
+  const lastWidth = useRef(0)
   const [expanded, setExpanded] = useState(false)
   const [collapsible, setCollapsible] = useState(false)
 
@@ -16,8 +23,23 @@ function MessageBubble({ text }: { text: string }) {
     const element = bubble.current
     if (!element) return
     // scrollHeight 始终是完整内容高度，收起状态下也能测出是否超过阈值。
-    setCollapsible(element.scrollHeight > COLLAPSED_HEIGHT + 1)
+    setCollapsible(element.scrollHeight > collapsedHeight(element.clientWidth) + 1)
   }, [text, expanded])
+
+  useEffect(() => {
+    const element = bubble.current
+    if (!element || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => {
+      const width = element.clientWidth
+      const previous = lastWidth.current
+      lastWidth.current = width
+      setCollapsible(element.scrollHeight > collapsedHeight(width) + 1)
+      // 左右拉窄时自动收起已展开的长消息，避免窄栏被正文继续撑长。
+      if (previous > 0 && width < previous - 80) setExpanded(false)
+    })
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [text])
 
   return (
     <>

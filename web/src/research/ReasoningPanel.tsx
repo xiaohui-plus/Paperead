@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { IconBrain, IconChevron } from '../components/icons'
 
 function firstLine(text: string): string {
@@ -15,16 +15,18 @@ function latestLine(text: string): string {
 interface Props {
   text: string
   running: boolean
-  duration?: string
 }
 
 /**
- * 思考行：对齐 DeepSeek Harness 的 ReasoningRow。
- * 运行中单行摘要跟随最后一行并横向滚到行尾，结束后退回第一行。
+ * 思考行：对齐 DSH 的 ReasoningRow。
+ * 单行独立折叠，默认收起；运行中摘要跟随最后一行，结束后退回第一行。
+ * 一段思考结束（或进入下一步任务）时自动收起，用户此前展开过也一并折叠，
+ * 避免旧思考长期占位。
  */
-export function ReasoningPanel({ text, running, duration }: Props) {
+export function ReasoningPanel({ text, running }: Props) {
   const [open, setOpen] = useState(false)
   const summaryRef = useRef<HTMLSpanElement>(null)
+  const wasRunning = useRef(running)
   const summary = running ? latestLine(text) : firstLine(text)
 
   useLayoutEffect(() => {
@@ -33,8 +35,13 @@ export function ReasoningPanel({ text, running, duration }: Props) {
     element.scrollLeft = running ? element.scrollWidth - element.clientWidth : 0
   }, [running, summary])
 
+  useEffect(() => {
+    if (wasRunning.current && !running) setOpen(false)
+    wasRunning.current = running
+  }, [running])
+
   return (
-    <div className="reasoning-panel" data-state={running ? 'running' : 'ok'}>
+    <div className="reasoning-panel" data-state={running ? 'running' : 'ok'} data-open={open}>
       <button
         className="reasoning-row"
         aria-expanded={open}
@@ -57,7 +64,6 @@ export function ReasoningPanel({ text, running, duration }: Props) {
             </span>
           </>
         )}
-        {!running && duration && <em className="reasoning-suffix">{duration}</em>}
         <span className="reasoning-chevron" data-open={open}>
           <IconChevron />
         </span>

@@ -267,35 +267,34 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="Paperead", version=__version__, lifespan=_lifespan)
 
-# 安装包不带 pandoc：桌面版首次启动在后台下载一次，之后离线可用。
-# 设 PAPEREAD_PANDOC_AUTODOWNLOAD=0 可关闭，测试和开发环境默认不下载。
-if is_frozen() and env("PAPEREAD_PANDOC_AUTODOWNLOAD", "1") != "0":
+# 安装包不带 pandoc / 翻译引擎 / node / TeX：桌面版首次启动在后台补齐。
+# 只并行「pandoc + 翻译引擎」两路：pandoc 小且写作导出马上要用，翻译引擎最大、
+# 是首装最容易被其它下载拖慢的一项；node 等 pandoc 结束再下（通常几秒），
+# TeX 由 tex_setup 自己延迟启动，避免四路同时抢带宽导致大文件反复超时。
+def _bootstrap_dependencies() -> None:
+    from server import babeldoc_setup, node_setup, tex_setup
     from server.research import pandoc_setup
 
-    pandoc_setup.start_if_missing()
+    def run() -> None:
+        if env("PAPEREAD_PANDOC_AUTODOWNLOAD", "1") != "0":
+            pandoc_setup.start_if_missing()
+        if env("PAPEREAD_BABELDOC_AUTODOWNLOAD", "1") != "0":
+            babeldoc_setup.start_if_missing()
+        if env("PAPEREAD_TEX_AUTODOWNLOAD", "1") != "0":
+            tex_setup.start_if_missing()
+        if env("PAPEREAD_NODE_AUTODOWNLOAD", "1") != "0":
+            deadline = time.time() + 120
+            while time.time() < deadline:
+                if pandoc_setup.status().get("status") != "running":
+                    break
+                time.sleep(2)
+            node_setup.start_if_missing()
 
-# BabelDOC 引擎体积大，安装包也不内置：首次启动在后台下载分卷并解压。
-# 全程只有 urllib 网络读取，不会创建子进程或 cmd 窗口。
-# 设 PAPEREAD_BABELDOC_AUTODOWNLOAD=0 可关闭。
-if is_frozen() and env("PAPEREAD_BABELDOC_AUTODOWNLOAD", "1") != "0":
-    babeldoc_setup.start_if_missing()
+    threading.Thread(target=run, daemon=True, name="deps-bootstrap").start()
 
-# MathJax 完整引擎要 node 运行时（解压后约 80MB），安装包不内置：首次启动在
-# 后台下载只含 node.exe 的精简包，装好后自动注册给公式渲染器，立即生效。
-# 全程只有 urllib 网络读取，不会创建子进程或 cmd 窗口。
-# 设 PAPEREAD_NODE_AUTODOWNLOAD=0 可关闭。
-if is_frozen() and env("PAPEREAD_NODE_AUTODOWNLOAD", "1") != "0":
-    from server import node_setup
 
-    node_setup.start_if_missing()
-
-# 本机没有 TeX 引擎时，首启在后台装 MiKTeX 便携版到数据目录：不需要管理员、
-# 不改系统 PATH，装好后立即能被探测到。延迟启动，避免与其他依赖抢带宽。
-# 设 PAPEREAD_TEX_AUTODOWNLOAD=0 可关闭。
-if is_frozen() and env("PAPEREAD_TEX_AUTODOWNLOAD", "1") != "0":
-    from server import tex_setup
-
-    tex_setup.start_if_missing()
+if is_frozen():
+    _bootstrap_dependencies()
 
 # 项目/文件/会话等具体路由必须先于下面的 /api/research/{path:path} 代理注册，
 # 否则会被通配代理拦截，误报“研究 agent 尚未启动”。
@@ -396,6 +395,15 @@ async def guard(request: Request, call_next):
     if path.startswith("/api/llm-proxy/"):
         # 研究 agent 用 Authorization: Bearer <token> 调本地 LLM 代理
         if TOKEN and request.headers.get("authorization") != f"Bearer {TOKEN}":
+            return JSONResponse({"detail": "unauthorized"}, status_code=403)
+    elif path.startswith("/internal/"):
+        # 研究 agent 的内部读写接口：只允许本机进程访问，并按内部 token 校验。
+        # 桌面端对局域网开放是为了手机连电脑，但 /internal 不能被同网段直接调用。
+        client_host = request.client.host if request.client else ""
+        if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+            return JSONResponse({"detail": "internal API is local-only"}, status_code=403)
+        internal = os.environ.get("PAPEREAD_INTERNAL_TOKEN", "")
+        if internal and request.headers.get("x-internal-token") != internal:
             return JSONResponse({"detail": "unauthorized"}, status_code=403)
     elif ext_path:
         if path in {"/api/ext/v1/ping", "/api/ext/v1/pair"}:
@@ -5650,7 +5658,15 @@ app.include_router(build_scholar_router(store, _add_scholar_pdf, _public))
 # 研究 agent 的项目/产物/标签工具：与检索工具同一前缀，需在 main 里拿到
 # 文献库与「入库并后台解析」的回调，所以放在依赖都就绪之后注册。
 app.include_router(
-    build_tools_router(research_store, store, _add_scholar_pdf, _public)
+    build_tools_router(
+        research_store,
+        store,
+        _add_scholar_pdf,
+        _public,
+        catalog=notes_catalog,
+        mirror=notes_mirror,
+        note_store=note_store,
+    )
 )
 
 

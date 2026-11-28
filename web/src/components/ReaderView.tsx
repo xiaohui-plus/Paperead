@@ -683,6 +683,13 @@ export function ReaderView({ paperId, onBack }: Props) {
           setEngineDialogOpen(true)
           return
         }
+        if (engine.cache_ready === false) {
+          // 引擎本体装好但模型/字体缓存还没下过：翻译能开始，只是首篇会慢一些。
+          setTranslationNotice({
+            tone: 'info',
+            text: '首次整篇翻译需要下载 BabelDOC 模型与字体缓存，开始阶段可能较慢，请保持网络畅通。',
+          })
+        }
       } catch {
         // 状态接口不可用时不阻断，任务接口仍会返回 engine_missing
       }

@@ -9,6 +9,8 @@ import { randomUUID } from 'node:crypto'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
 export const name = 'research-host'
+// `subagents` is optional: the minimal composition mounts this host without the
+// subagent service, so it must be looked up at request time instead of injected.
 export const inject = ['webServer', 'agents', 'commands']
 
 const MAX_BODY_BYTES = 1_000_000
@@ -215,6 +217,55 @@ export function apply(ctx, config = {}) {
       case 'todo/write':
         emit(sid, { type: 'plan.update', items: event.data.todos })
         break
+      // DSH 的 llm-retry / goal 事件本身是非 surface 事件（不进模型上下文），
+      // 但官方客户端会通过下行流把它们渲染成“重试中/目标第几轮”。这里按
+      // 同一语义转成自研事件，前端才能看到断网重试与长程轮次。
+      case 'llm/retry': {
+        const data = event.data ?? {}
+        emit(sid, {
+          type: 'llm.retry',
+          turn: data.turn,
+          step: data.step,
+          provider: data.provider,
+          mode: data.mode,
+          retry: data.retry,
+          maxRetries: data.maxRetries,
+          delayMs: data.delayMs,
+          failure: data.failure
+            ? { code: data.failure.code, message: data.failure.message }
+            : undefined,
+        })
+        break
+      }
+      case 'llm/retry-started':
+        emit(sid, {
+          type: 'llm.retry.started',
+          turn: event.data?.turn,
+          step: event.data?.step,
+          retry: event.data?.retry,
+        })
+        break
+      case 'goal/change': {
+        const data = event.data ?? {}
+        const goal = data.goal ?? null
+        emit(sid, {
+          type: 'goal.change',
+          operation: data.operation,
+          // DSH 把轮次计数放在 change 顶层，不在 goal 快照里。
+          roundsStarted: data.operation === 'clear' ? 0 : Number(data.roundsStarted) || 0,
+          goal: goal
+            ? {
+                id: goal.id,
+                revision: goal.revision,
+                objective: goal.objective,
+                phase: goal.phase,
+                maxGoalRounds: goal.maxGoalRounds,
+                blockedReason: goal.blockedReason,
+              }
+            : null,
+        })
+        break
+      }
       case 'permission/preset':
         emit(sid, { type: 'permission.update', preset: event.data.preset })
         break
@@ -398,6 +449,30 @@ export function apply(ctx, config = {}) {
           return json(res, 200, { ok: true, requestId, outcome })
         } catch (error) {
           return json(res, 400, { error: String(error?.message || error) })
+        }
+      }
+
+      const subagentsMatch = pathname.match(/^\/v1\/sessions\/([^/]+)\/subagents$/)
+      if (subagentsMatch && req.method === 'GET') {
+        const sessionId = decodeURIComponent(subagentsMatch[1])
+        try {
+          const runtime = ctx.get('subagents')
+          if (!runtime) return json(res, 200, { subagents: [] })
+          const rows = await runtime.listChildren(sessionId)
+          const subagents = rows
+            .filter((row) => row.kind === 'child')
+            .map((row) => ({
+              id: row.id,
+              mode: row.mode,
+              label: row.label ?? '',
+              // active/inactive 是子代理自己的生命周期；live status 用于运行中轮询。
+              activity: row.activity,
+              hasChildren: Boolean(row.hasChildren),
+              status: ctx.agents.get(row.id)?.status ?? 'inactive',
+            }))
+          return json(res, 200, { subagents })
+        } catch (error) {
+          return json(res, 500, { error: String(error?.message || error) })
         }
       }
 

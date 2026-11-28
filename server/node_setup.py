@@ -17,7 +17,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import shutil
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -40,7 +42,10 @@ _LOCK = threading.Lock()
 _THREAD: threading.Thread | None = None
 _STATE: dict[str, Any] = {
     "status": "idle",  # idle | running | done | error
+    "phase": "",  # download | extract | verify | done
     "percent": 0,
+    "bytes": 0,
+    "total": 0,
     "error": "",
     "startedAt": 0,
     "finishedAt": 0,
@@ -57,6 +62,28 @@ def install_dir() -> Path:
 def installed_exe() -> Path | None:
     target = install_dir() / "node.exe"
     return target if target.is_file() else None
+
+
+def system_exe() -> Path | None:
+    """本机已有可用的 node（内置 vendor 或 PATH）。
+
+    下载的这份只是兜底：用户机器/安装包里本来就有 node 时不应该再拉 32MB。
+    """
+    env = os.environ.get("PAPEREAD_NODE", "").strip()
+    if env:
+        path = Path(env)
+        if path.is_file():
+            return path
+    base = getattr(sys, "_MEIPASS", None)
+    roots: list[Path] = [Path(base)] if base else []
+    roots.append(Path(__file__).resolve().parent.parent)
+    for root in roots:
+        for rel in (Path("vendor") / "node", Path("paperead") / "vendor" / "node"):
+            candidate = root / rel / ("node.exe" if os.name == "nt" else "node")
+            if candidate.is_file():
+                return candidate
+    found = shutil.which("node") or shutil.which("node.exe")
+    return Path(found) if found else None
 
 
 def _sources() -> list[str]:
@@ -80,8 +107,18 @@ def _sources() -> list[str]:
 def status() -> dict[str, Any]:
     with _LOCK:
         data = dict(_STATE)
-    data["installed"] = installed_exe() is not None
+    local = installed_exe()
+    system = system_exe()
+    data["installed"] = local is not None
+    data["system"] = str(system or "")
+    # ``usable`` = 公式引擎现在就能用（下载的 / 内置的 / 系统 node 任一存在）。
+    data["usable"] = bool(local or system)
     data["version"] = NODE_VERSION
+    alive = _THREAD is not None and _THREAD.is_alive()
+    data["threadAlive"] = alive
+    if data["status"] == "running" and not alive:
+        data["status"] = "error"
+        data["error"] = data.get("error") or "下载线程已退出，请重试。"
     return data
 
 
@@ -120,8 +157,9 @@ def _download(url: str, target: Path) -> None:
                     break
                 handle.write(block)
                 done += len(block)
+                _set(phase="download", bytes=done, total=total)
                 if total:
-                    _set(percent=min(99, int(done * 100 / total)))
+                    _set(percent=min(93, int(done * 93 / total)))
     if ASSET_SHA256 and _sha256(target) != ASSET_SHA256:
         target.unlink(missing_ok=True)
         raise ValueError("下载内容校验失败，请重试")
@@ -181,15 +219,17 @@ def _run() -> None:
     archive = work / ASSET_NAME
     errors: list[str] = []
     for url in _sources():
+        host = url.split("/")[2] if "://" in url else url
         try:
-            _set(percent=0, error="")
+            _set(phase="download", percent=0, bytes=0, total=0, error="")
             _download(url, archive)
-            _set(percent=95)
+            _set(phase="extract", percent=94)
             _extract(archive, work / "node.exe")
+            _set(phase="verify", percent=97)
             _verify(work / "node.exe")
             archive.unlink(missing_ok=True)
             _apply_to_mathjax()
-            _set(status="done", percent=100, finishedAt=int(time.time()))
+            _set(status="done", phase="done", percent=100, finishedAt=int(time.time()))
             log.info("node 运行时已安装：%s", work)
             return
         except (
@@ -198,35 +238,49 @@ def _run() -> None:
             zipfile.BadZipFile,
             urllib.error.URLError,
         ) as error:
-            host = url.split("/")[2] if "://" in url else url
             errors.append(f"{host}: {error}")
             log.warning("node 运行时下载失败（%s）：%s", host, error)
             archive.unlink(missing_ok=True)
             (work / "node.exe").unlink(missing_ok=True)
+            # 换源时不清零已下载字节的「已完成」，但重新下载会重新计数；
+            # 这里只更新失败源，避免界面一直停在旧源的错误上。
+            _set(phase="download", error=f"{host}：{error}，正在尝试备用下载源…")
     _set(
         status="error",
+        phase="error",
         error="；".join(errors)[-800:] or "下载失败",
         finishedAt=int(time.time()),
     )
 
 
 def start() -> dict[str, Any]:
-    """开始后台下载；已经装好或正在下载时直接返回当前状态。"""
+    """开始后台下载；已装好/本机已有 node 或正在下载时直接返回当前状态。"""
     global _THREAD
     with _LOCK:
         if installed_exe() is not None:
-            _STATE.update(status="done", percent=100)
+            _STATE.update(status="done", phase="done", percent=100)
             return dict(_STATE)
         if _THREAD is not None and _THREAD.is_alive():
             return dict(_STATE)
-        _STATE.update(status="running", percent=0, error="", startedAt=int(time.time()))
+        if _STATE.get("status") == "running":
+            _STATE.update(status="error", phase="error", error="下载线程已退出，请重试。")
+        _STATE.update(
+            status="running",
+            phase="download",
+            percent=0,
+            bytes=0,
+            total=0,
+            error="",
+            startedAt=int(time.time()),
+            finishedAt=0,
+        )
         _THREAD = threading.Thread(target=_run, daemon=True, name="node-install")
         _THREAD.start()
     return status()
 
 
 def start_if_missing() -> None:
-    """应用启动时调用：没装过就悄悄下载，不阻塞启动。"""
+    """应用启动时调用：本机已经能用 node 时不要重复下载 32MB。"""
     if os.environ.get("PAPEREAD_MOCK") == "1":
         return
     if os.environ.get("PAPEREAD_NODE_AUTODOWNLOAD", "1") == "0":
@@ -236,8 +290,19 @@ def start_if_missing() -> None:
         return
     exe = installed_exe()
     if exe is not None:
-        _set(status="done", percent=100)
+        _set(status="done", phase="done", percent=100)
         _apply_to_mathjax()
+        return
+    # 内置 vendor 或系统 PATH 里已有 node：公式引擎可以直接用，无需再下载。
+    existing = system_exe()
+    if existing is not None:
+        try:
+            from paperead import mathjax_render
+
+            mathjax_render.set_node_path(str(existing))
+        except Exception:  # noqa: BLE001 - 注册失败不影响下载判断
+            pass
+        _set(status="done", phase="done", percent=100)
         return
     st = status()
     if st["status"] == "running":

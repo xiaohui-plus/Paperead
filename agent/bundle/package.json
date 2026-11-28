@@ -6,11 +6,17 @@
   "main": "./lib/index.js",
   "exports": {
     ".": "./lib/index.js",
-    "./tools": "./lib/tools.js"
+    "./tools": "./lib/tools.js",
+    "./web-fetch": "./lib/web-fetch.js",
+    "./web-search": "./lib/web-search.js"
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-web": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-web-fetch-http": "0.1.0-rc.6"
   }
 }

@@ -192,9 +192,12 @@ def _search_bin_dirs() -> list[Path]:
         candidates.append(base / "Programs" / "MiKTeX" / "miktex" / "bin" / "x64")
         candidates.append(base / "MiKTeX" / "miktex" / "bin" / "x64")
         # MiKTeX 便携版解压到用户目录时的常见结构。
-        candidates.extend(
-            base.glob("Programs/MiKTeX/*/texmfs/install/miktex/bin/x64")
-        )
+        try:
+            candidates.extend(
+                base.glob("Programs/MiKTeX/*/texmfs/install/miktex/bin/x64")
+            )
+        except OSError:
+            pass
     for key in ("PROGRAMFILES", "ProgramFiles", "ProgramFiles(x86)", "PROGRAMFILES(X86)"):
         value = os.environ.get(key)
         if value:
@@ -626,7 +629,7 @@ def bib_stem(directory: Path) -> str | None:
     return None
 
 
-def _probe_version(command: list[str], timeout: int = 8) -> str:
+def _probe_version(command: list[str], timeout: int = 3) -> str:
     try:
         proc = subprocess.run(
             command, capture_output=True, timeout=timeout, **hidden_kwargs()
@@ -635,6 +638,39 @@ def _probe_version(command: list[str], timeout: int = 8) -> str:
         return ""
     raw = (proc.stdout or proc.stderr).decode("utf-8", "replace").strip()
     return raw.splitlines()[0] if raw else ""
+
+
+def _pandoc_source(path: str | None) -> str:
+    if not path:
+        return ""
+    resolved = Path(path)
+    try:
+        from server.research.pandoc_setup import install_dir as download_dir
+
+        if resolved.parent == download_dir():
+            return "downloaded"
+    except Exception:  # noqa: BLE001 - 来源探测失败不影响主结论
+        pass
+    tools = bundled_tools_dir()
+    if tools is not None:
+        try:
+            resolved.relative_to(tools)
+            return "bundled"
+        except ValueError:
+            pass
+    return "system"
+
+
+def _engine_source(path: str) -> str:
+    try:
+        from server import tex_setup
+
+        Path(path).relative_to(tex_setup.bin_dir())
+        return "portable"
+    except ValueError:
+        return "system"
+    except Exception:  # noqa: BLE001 - 来源探测失败不影响主结论
+        return "system"
 
 
 def find_winget() -> str | None:
@@ -661,7 +697,12 @@ def toolchain_status() -> dict[str, Any]:
             continue
         seen.add(name)
         engines.append(
-            {"name": name, "path": path, "version": _probe_version([path, "--version"])}
+            {
+                "name": name,
+                "path": path,
+                "version": _probe_version([path, "--version"]),
+                "source": _engine_source(path),
+            }
         )
     bibtex = find_bibtex()
     winget = find_winget()
@@ -675,6 +716,7 @@ def toolchain_status() -> dict[str, Any]:
             "found": bool(pandoc),
             "path": pandoc or "",
             "version": _probe_version([pandoc, "--version"]) if pandoc else "",
+            "source": _pandoc_source(pandoc),
         },
         "engines": engines,
         "bibtex": {

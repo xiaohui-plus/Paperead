@@ -7,13 +7,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -211,6 +212,48 @@ def _completion_to_sse(payload: dict[str, Any], model: str) -> bytes:
     return b"".join(parts)
 
 
+# 连接级重试：断网 / 代理未就绪 / DNS 抖动时先在本机代理内部重试，比让
+# agent 整轮重试少一次完整往返。只在「上游尚未开始回包」时重试；流一旦
+# 开始就不再重试，避免同一段回答被写两遍（流中断由 agent 的 llm-retry
+# 以整轮为单位兜底）。
+PROXY_RETRIES = max(1, int(os.environ.get("PAPEREAD_PROXY_RETRIES", "3")))
+PROXY_RETRY_BASE_S = float(os.environ.get("PAPEREAD_PROXY_RETRY_BASE", "0.8"))
+
+
+async def _open_stream(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    *,
+    json_body: dict[str, Any],
+    headers: dict[str, str],
+    label: str,
+) -> httpx.Response:
+    last: httpx.HTTPError | None = None
+    for attempt in range(PROXY_RETRIES):
+        try:
+            request = client.build_request(method, url, json=json_body, headers=headers)
+            return await client.send(request, stream=True)
+        except httpx.HTTPError as error:
+            last = error
+            if attempt + 1 >= PROXY_RETRIES:
+                break
+            delay = PROXY_RETRY_BASE_S * (2**attempt)
+            log.warning(
+                "%s 连接失败（第 %d/%d 次），%.1fs 后重试：url=%s %s",
+                label,
+                attempt + 1,
+                PROXY_RETRIES,
+                delay,
+                url,
+                str(error) or type(error).__name__,
+            )
+            await asyncio.sleep(delay)
+    if last is None:
+        raise RuntimeError(f"{label} 连接失败：未知错误")
+    raise last
+
+
 def build_llm_proxy_router(data_dir: Path, token: str) -> APIRouter:
     router = APIRouter()
     config_path = data_dir / "research-model.json"
@@ -356,9 +399,13 @@ def build_llm_proxy_router(data_dir: Path, token: str) -> APIRouter:
         upstream = None
         started = time.monotonic()
         try:
-            upstream = await client.send(
-                client.build_request("POST", url, json=body, headers=headers),
-                stream=True,
+            upstream = await _open_stream(
+                client,
+                "POST",
+                url,
+                json_body=body,
+                headers=headers,
+                label="llm 代理",
             )
         except httpx.HTTPError as error:
             await client.aclose()
@@ -551,6 +598,135 @@ def build_llm_proxy_router(data_dir: Path, token: str) -> APIRouter:
             stream(),
             status_code=status,
             media_type=SSE_MEDIA,
+            headers={"cache-control": "no-cache", "x-accel-buffering": "no"},
+        )
+
+    # ── 网页搜索（DeepSeek Messages API） ─────────────────────────
+    #
+    # DSH 的 web_search provider 走 Anthropic 兼容的 /messages 端点，
+    # 与聊天用的 /chat/completions 不是同一个地址。agent 只拿到本机代理
+    # 的 token，真实 Key 只留在 Python 侧，所以这里按同一套模型配置转发，
+    # 前端/agent 都不需要知道供应商密钥。
+
+    def _anthropic_base(base_url: str) -> str:
+        override = os.environ.get("PAPEREAD_SEARCH_BASE_URL", "").strip().rstrip("/")
+        if override:
+            return override
+        parsed = httpx.URL(base_url)
+        host = (parsed.host or "").lower()
+        if host == "deepseek.com" or host.endswith(".deepseek.com"):
+            # httpx.URL.netloc 是 bytes，直接拼进 URL 会得到
+            # "https://b'api.deepseek.com'/..."，表现为 getaddrinfo failed。
+            scheme = parsed.scheme or "https"
+            port = parsed.port
+            authority = host if port in (None, 80, 443) else f"{host}:{port}"
+            return f"{scheme}://{authority}/anthropic/v1"
+        # 非 DeepSeek 的聊天服务通常没有 Anthropic 兼容端点；搜索仍走
+        # 官方地址，Key 不匹配时由上游返回明确错误，而不是静默降级。
+        return "https://api.deepseek.com/anthropic/v1"
+
+    @router.post("/api/llm-proxy/anthropic/v1/messages")
+    async def anthropic_messages(
+        request: Request,
+        authorization: str | None = Header(default=None),
+        anthropic_version: str | None = Header(default=None, alias="anthropic-version"),
+    ):
+        authorize(authorization)
+        sync_shared()
+        if not state["api_key"]:
+            return JSONResponse(
+                {
+                    "error": {
+                        "message": "尚未配置回答模型：请在设置里填写 API Key，或在研究输入框里选择模型。",
+                        "type": "missing_credential",
+                    }
+                },
+                status_code=503,
+            )
+
+        try:
+            body = await request.json()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid json body") from None
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="invalid json body")
+        body["model"] = state["model"]
+
+        base = _anthropic_base(state["base_url"])
+        url = f"{base}/messages"
+        headers = {
+            "x-api-key": state["api_key"],
+            "authorization": f"Bearer {state['api_key']}",
+            "anthropic-version": anthropic_version or "2023-06-01",
+            "content-type": "application/json",
+            "accept": request.headers.get("accept", "application/json"),
+            "accept-encoding": "identity",
+        }
+
+        client = httpx.AsyncClient(timeout=TIMEOUT)
+        try:
+            upstream = await _open_stream(
+                client,
+                "POST",
+                url,
+                json_body=body,
+                headers=headers,
+                label="搜索代理",
+            )
+        except httpx.HTTPError as error:
+            await client.aclose()
+            reason = str(error) or type(error).__name__
+            log.warning("搜索代理连接失败：url=%s model=%s %s", url, state["model"], reason)
+            return JSONResponse(
+                {
+                    "error": {
+                        "message": f"连接搜索服务失败：{reason}",
+                        "type": "transport",
+                    }
+                },
+                status_code=502,
+            )
+
+        if upstream.status_code >= 400:
+            detail = (await upstream.aread()).decode("utf-8", "replace")
+            status = upstream.status_code
+            await upstream.aclose()
+            await client.aclose()
+            log.warning(
+                "搜索代理上游报错：url=%s model=%s status=%s body=%s",
+                url,
+                state["model"],
+                status,
+                detail[:500],
+            )
+            try:
+                payload = json.loads(detail)
+            except ValueError:
+                payload = {"error": {"message": detail[:2000]}}
+            return JSONResponse(payload, status_code=status)
+
+        media_type = upstream.headers.get("content-type") or "application/json"
+
+        async def relay() -> AsyncIterator[bytes]:
+            try:
+                async for chunk in upstream.aiter_bytes():
+                    if chunk:
+                        yield chunk
+            except httpx.HTTPError as error:
+                log.warning(
+                    "搜索代理读流失败：url=%s model=%s %s",
+                    url,
+                    state["model"],
+                    str(error) or type(error).__name__,
+                )
+            finally:
+                await upstream.aclose()
+                await client.aclose()
+
+        return StreamingResponse(
+            relay(),
+            status_code=upstream.status_code,
+            media_type=media_type,
             headers={"cache-control": "no-cache", "x-accel-buffering": "no"},
         )
 

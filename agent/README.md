@@ -15,7 +15,7 @@ DSH（DeepSeek Harness）运行时，作为 Paperead 的 Node sidecar 使用。
 - 完整组合的关键是禁用 `hmr`（官方 `dsh-web-app` 也这么做）；不禁用会拖住启动。
 - P0.5：6 个接入 seam 的契约固化在 `agent/docs/dsh-integration-notes.md`。
 - P1：`npm run test:full` 覆盖工具清单、工具卡、todo/plan、标题（provider）、
-  `presentationMeta` 和 resume；shell/fs/subagent 断言为不可见。
+  `presentationMeta` 和 resume；完整组合断言文件/搜索/终端/后台任务/子代理工具可见，旧研究包装工具不可见。
 - P2：agent 端口/token 在 Python 启动前预分配，通过环境变量注入；
   不再写 `agent.json`，Python 代理不向前端暴露 token。
 - 内置技能：`agent/skills` 通过 `PAPEREAD_SKILLS_DIR` + `customSkillDirs` 接入，

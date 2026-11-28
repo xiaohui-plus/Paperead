@@ -13,6 +13,7 @@ winget 这条链对权限与环境敏感（UAC、系统 TEMP 不可写、装完 
 from __future__ import annotations
 
 import json
+import logging
 import os
 
 import subprocess
@@ -31,14 +32,18 @@ from server.winproc import popen_hidden
 
 router = APIRouter(prefix="/api/toolchain", tags=["toolchain"])
 
+log = logging.getLogger("paperead.toolchain")
+
 _MAX_LOG_LINES = 400
 _JOBS: dict[str, dict[str, Any]] = {}
 _LOCK = threading.Lock()
 _CURRENT: str | None = None
 
-# 自检结果缓存：工具装好之后默认一直“已就绪”，不再每次打开设置页都探测一遍。
-# 只有手动「重新检测」、安装完成，或导出时发现工具缺失才会作废重测。
+# 自检结果缓存：缓存全部结论（含未就绪），避免每次打开设置页都重新跑外部命令探测。
+# 未就绪也要缓存，否则「还缺 TeX」的机器每次开设置页都要重扫一遍目录与引擎版本。
+# ``?refresh=1``、安装完成与导出时发现工具缺失会作废缓存。
 _CACHE_NAME = "toolchain-status.json"
+_CACHE_TTL = 600.0
 _CACHE: dict[str, Any] | None = None
 
 
@@ -48,31 +53,44 @@ def _cache_path() -> Path:
     return default_data_dir() / _CACHE_NAME
 
 
-def _load_cache() -> dict[str, Any] | None:
-    """读取上次的自检结果；只有全部就绪才复用。
-
-    缺工具时下次打开页面重新检测，避免用户在应用外装好 TeX 后一直显示未就绪。
-    """
+def _load_cache(refresh: bool = False) -> dict[str, Any] | None:
     global _CACHE
+    if refresh:
+        return None
     if _CACHE is not None:
-        return _CACHE
+        try:
+            checked_cached = float(_CACHE.get("checkedAt") or 0)
+        except (TypeError, ValueError):
+            checked_cached = 0.0
+        if checked_cached > 0 and time.time() - checked_cached <= _CACHE_TTL:
+            return _CACHE
+        # 进程内缓存也会过期：用户在应用外装好 TeX 后不必等重启才刷新。
+        _CACHE = None
     try:
         data = json.loads(_cache_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(data, dict) or not data.get("ready"):
+    if not isinstance(data, dict):
+        return None
+    try:
+        checked = float(data.get("checkedAt") or 0)
+    except (TypeError, ValueError):
+        checked = 0.0
+    # 旧版本缓存没有 checkedAt，按过期处理一次，之后写入新时间戳。
+    if checked <= 0 or time.time() - checked > _CACHE_TTL:
         return None
     _CACHE = data
-    return _CACHE
+    return data
 
 
 def _save_cache(data: dict[str, Any]) -> None:
     global _CACHE
-    _CACHE = data
+    payload = {**data, "checkedAt": time.time()}
+    _CACHE = payload
     try:
         path = _cache_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     except OSError:
         # 写缓存失败不影响检测本身，下次重新探测即可。
         pass
@@ -228,18 +246,125 @@ def _run_install(job_id: str) -> None:
             _CURRENT = None
 
 
+def _download_default(**extra: Any) -> dict[str, Any]:
+    return {
+        "status": "idle",
+        "percent": 0,
+        "phase": "",
+        "error": "",
+        "installed": False,
+        "bytes": 0,
+        "total": 0,
+        "source": "",
+        "startedAt": 0,
+        "finishedAt": 0,
+        **extra,
+    }
+
+
+def _safe_status(fn: Any, default: dict[str, Any]) -> dict[str, Any]:
+    """单个组件探测失败只降级该组件，不让整页 /api/toolchain 变成 500。"""
+    try:
+        data = fn()
+    except Exception as exc:  # noqa: BLE001 - 依赖状态探测不应拖垮设置页
+        log.warning("依赖状态探测失败（%s）：%s", getattr(fn, "__qualname__", fn), exc)
+        data = dict(default)
+        data["error"] = f"{type(exc).__name__}: {exc}"[:300]
+        return data
+    if not isinstance(data, dict):
+        return dict(default)
+    merged = dict(default)
+    merged.update(data)
+    return merged
+
+
+def _writing_status() -> dict[str, Any]:
+    """pandoc / TeX 探测；整套探测失败时返回缺省结构而不是抛 500。"""
+    try:
+        return toolchain_status()
+    except Exception as exc:  # noqa: BLE001 - 目录权限等异常不应让设置页打不开
+        log.warning("写作工具链探测失败：%s", exc)
+        return {
+            "pandoc": {"found": False, "path": "", "version": "", "source": ""},
+            "engines": [],
+            "bibtex": {"found": False, "path": "", "version": ""},
+            "installer": {"winget": False, "package": "MiKTeX.MiKTeX"},
+            "ready": False,
+            "missing": ["pandoc", "latex"],
+            "error": f"{type(exc).__name__}: {exc}"[:300],
+        }
+
+
+def _node_summary(node: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "usable": bool(node.get("usable") or node.get("installed")),
+        "installed": bool(node.get("installed")),
+        "version": node.get("version") or "",
+        "system": node.get("system") or "",
+    }
+
+
+def _engine_summary(engine: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "installed": bool(engine.get("installed")),
+        "ready": bool(engine.get("ready")),
+        "version": engine.get("version") or "",
+        "installedVersion": engine.get("installedVersion") or "",
+        "cacheReady": bool(engine.get("cache_ready")),
+    }
+
+
+def _downloads() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """轻量探测：只读下载状态与目录，不启动外部命令。"""
+    download = _safe_status(
+        pandoc_setup.status,
+        _download_default(version=pandoc_setup.PANDOC_VERSION),
+    )
+    tex = _safe_status(tex_setup.status, _download_default(warning=""))
+    node = _safe_status(
+        node_setup.status,
+        _download_default(usable=False, system="", version=node_setup.NODE_VERSION),
+    )
+    engine = _safe_status(
+        babeldoc_setup.status,
+        _download_default(
+            ready=False,
+            cache_ready=False,
+            installedVersion="",
+            version=babeldoc_setup.ENGINE_VERSION,
+        ),
+    )
+    return download, tex, node, engine
+
+
+def _writing_with_summary(node: dict[str, Any], engine: dict[str, Any]) -> dict[str, Any]:
+    data = _writing_status()
+    data["node"] = _node_summary(node)
+    data["engine"] = _engine_summary(engine)
+    return data
+
+
 @router.get("")
 def status(refresh: bool = Query(False)) -> dict[str, Any]:
     """默认返回缓存的自检结果；``?refresh=1`` 强制重新检测。"""
-    download = pandoc_setup.status()
-    tex = tex_setup.status()
-    data = None if refresh else _load_cache()
-    # 工具刚装好但缓存还是「未检测到」时补测一次：pandoc 下载完成、
-    # 应用内 LaTeX 引擎安装完成都属于这种情况。
-    stale_pandoc = download.get("installed") and not data.get("pandoc", {}).get("found")
-    stale_tex = tex.get("installed") and not (data or {}).get("engines")
-    if data is None or stale_pandoc or stale_tex:
-        data = toolchain_status()
+    download, tex, node, engine = _downloads()
+    cached = _load_cache(refresh)
+    data = cached
+    if cached is not None:
+        # 组件刚装好、缓存还写着「未检测到」时补测一次（下载完成 / 应用内安装完成）。
+        stale = (
+            (download.get("installed") and not cached.get("pandoc", {}).get("found"))
+            or (tex.get("installed") and not cached.get("engines"))
+            or (
+                (node.get("usable") or node.get("installed"))
+                and not cached.get("node", {}).get("usable")
+            )
+            or (engine.get("installed") and not cached.get("engine", {}).get("installed"))
+        )
+        if stale:
+            data = None
+    if data is None:
+        data = _writing_with_summary(node, engine)
         _save_cache(data)
     return {
         **data,
@@ -248,8 +373,8 @@ def status(refresh: bool = Query(False)) -> dict[str, Any]:
             "jobId": _CURRENT,
         },
         "pandocDownload": download,
-        "nodeDownload": node_setup.status(),
-        "engineDownload": babeldoc_setup.status(),
+        "nodeDownload": node,
+        "engineDownload": engine,
         "texDownload": tex,
     }
 
@@ -261,13 +386,25 @@ def engine_status() -> dict[str, Any]:
     与 PDF 导出链的 pandoc / TeX 检测分开暴露：翻译引擎是独立组件，
     未就绪时点「译文/对照」需要弹进度窗口，而不是只给一句报错。
     """
-    return babeldoc_setup.status()
+    return _safe_status(
+        babeldoc_setup.status,
+        _download_default(
+            ready=False,
+            cache_ready=False,
+            installedVersion="",
+            version=babeldoc_setup.ENGINE_VERSION,
+        ),
+    )
 
 
 @router.post("/engine")
-def engine_start() -> dict[str, Any]:
-    """开始（或重试）后台下载翻译引擎；已就绪或正在下载时直接回状态。"""
-    return babeldoc_setup.start()
+def engine_start(force: bool = Query(False)) -> dict[str, Any]:
+    """开始（或重试）后台下载翻译引擎；``force`` 用于修复损坏安装或升级旧版本。"""
+    try:
+        return babeldoc_setup.start(force=force)
+    except Exception as exc:  # noqa: BLE001 - 启动失败要回显原因
+        log.warning("启动翻译引擎下载失败：%s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.post("/pandoc")

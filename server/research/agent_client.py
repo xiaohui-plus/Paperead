@@ -134,6 +134,13 @@ async def respond_approval(
     )
 
 
+async def list_subagents(session_id: str) -> list[dict[str, Any]]:
+    """列出某个父会话直接派生的子代理；agent 未就绪时返回空列表。"""
+    data = await get_json(f"/v1/sessions/{session_id}/subagents", timeout=15)
+    rows = data.get("subagents")
+    return rows if isinstance(rows, list) else []
+
+
 async def stream_events(session_id: str, after: int) -> AsyncIterator[dict[str, Any]]:
     """订阅 agent SSE，逐条产出事件字典；连接异常统一抛 AgentUnavailable。"""
     base, token = agent_target()

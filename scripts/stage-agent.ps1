@@ -34,13 +34,11 @@ foreach ($scope in @("@paperead", "@paper-reflow")) {
     Copy-Item -Recurse -Force (Join-Path $src "bundle\*") $link
 }
 
-# 安装用户机器不一定有 Node，内置一份（Rust 侧优先用 agent/node.exe）。
-$node = (Get-Command node -ErrorAction SilentlyContinue).Source
-if ($node) {
-    Copy-Item $node (Join-Path $dst "node.exe") -Force
-} else {
-    Write-Warning "没有找到 node，安装版将依赖用户机器上的 Node"
-}
+# node 运行时不再打进安装包：完整 node.exe 约 86 MB，会让安装包逼近 Gitee
+# 100 MB 附件上限。桌面版首次启动由 Python 侧后台下载到
+# <数据目录>/engines/node/<版本>/，Rust 侧等它就绪后再拉起 agent；公式引擎
+# 与 agent 共用这一份运行时。
+Remove-Item (Join-Path $dst "node.exe") -Force -ErrorAction SilentlyContinue
 
 # 安装包里不需要调试符号、sourcemap、类型声明和非 x64 预编译产物，
 # 这些能省掉约 90 MB，安装包才能压到 Gitee 100 MB 附件限制以内。

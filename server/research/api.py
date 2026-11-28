@@ -1280,6 +1280,53 @@ def build_router(
             raise HTTPException(status_code=503, detail="AGENT_UNAVAILABLE") from error
         return {"ok": True}
 
+    @router.get("/sessions/{session_id}/subagents")
+    async def session_subagents(session_id: str) -> dict[str, Any]:
+        _session_or_404(session_id)
+        if not agent_client.available():
+            return {"subagents": []}
+        try:
+            return {"subagents": await agent_client.list_subagents(session_id)}
+        except agent_client.AgentUnavailable:
+            return {"subagents": []}
+
+    @router.get("/sessions/{session_id}/events/live")
+    async def session_events_live(
+        session_id: str,
+        after: int = Query(default=0, ge=0),
+    ) -> StreamingResponse:
+        """子代理会话的实时事件：不落产品库，直接透传 agent SSE。
+
+        子代理是 agent 内部的独立 session，不在产品 ``sessions`` 表里，走不了
+        后台泵；打开子代理面板时用它看实时输出，关闭页面即断开。
+        """
+
+        async def relay() -> Any:
+            try:
+                async for event in agent_client.stream_events(session_id, after):
+                    yield _sse(event)
+            except agent_client.AgentUnavailable as error:
+                yield _sse(
+                    {
+                        "seq": 0,
+                        "at": int(time.time() * 1000),
+                        "type": "notice",
+                        "level": "error",
+                        "code": "agent.offline",
+                        "text": str(error),
+                    }
+                )
+
+        return StreamingResponse(
+            relay(),
+            media_type="text/event-stream",
+            headers={
+                "cache-control": "no-cache, no-transform",
+                "x-accel-buffering": "no",
+                "connection": "keep-alive",
+            },
+        )
+
     @router.get("/sessions/{session_id}/events")
     async def session_events(
         session_id: str,
